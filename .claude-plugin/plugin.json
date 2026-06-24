@@ -1,0 +1,9 @@
+{
+  "name": "arteries",
+  "version": "0.1.0",
+  "description": "Always-on memory layer with autonomous prompt retrieval. Observes conversations, builds memory across sessions, and surfaces curated prompts when the situation warrants it.",
+  "author": {
+    "name": "Bao Nguyen"
+  },
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arteries"
+version = "0.1.0"
+description = "Always-on memory layer for prompt retrieval"
+requires-python = ">=3.10"
+dependencies = [
+    "psycopg2-binary>=2.9.0",
+    "capillaries",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+art = "arteries.cli:main"
