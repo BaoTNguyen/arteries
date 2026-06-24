@@ -1,0 +1,218 @@
+"""
+Storage layer for arteries memory tiers.
+
+All three tiers live in the arteries schema of the shared capillaries
+Postgres instance. Queries return dicts — the frame module converts
+them to MemoryFrame types.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import psycopg2
+import psycopg2.extras
+
+from arteries.config import DB_CONFIG
+
+
+def _conn():
+    return psycopg2.connect(**DB_CONFIG)
+
+
+# -- Ephemeral ----------------------------------------------------------------
+
+def get_ephemeral(
+    project_id: str,
+    agent_process_id: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, fact, domains, confidence, source_ts, status
+            FROM arteries.ephemeral
+            WHERE project_id = %s
+              AND agent_process_id = %s
+              AND status = 'uncompiled'
+              AND valid_until IS NULL
+            ORDER BY source_ts DESC
+            LIMIT %s
+            """,
+            (project_id, agent_process_id, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def insert_ephemeral(
+    project_id: str,
+    agent_process_id: str,
+    fact: str,
+    domains: list[str],
+    confidence: float = 1.0,
+    parent_agent_id: str | None = None,
+    embedding: list[float] | None = None,
+) -> str:
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO arteries.ephemeral
+                (fact, embedding, domains, confidence, project_id,
+                 agent_process_id, parent_agent_id)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                fact,
+                embedding,
+                psycopg2.extras.Json(domains),
+                confidence,
+                project_id,
+                agent_process_id,
+                parent_agent_id,
+            ),
+        )
+        conn.commit()
+        return str(cur.fetchone()[0])
+
+
+# -- Persistent ---------------------------------------------------------------
+
+def get_persistent(
+    project_id: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, fact, domains, confidence, source_ts
+            FROM arteries.persistent
+            WHERE project_id = %s
+              AND valid_until IS NULL
+            ORDER BY source_ts DESC
+            LIMIT %s
+            """,
+            (project_id, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def get_active_domains(project_id: str) -> list[str]:
+    """Domains from recent persistent memories — proxy for what the user is working on."""
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT d.value
+            FROM arteries.persistent,
+                 jsonb_array_elements_text(domains) AS d(value)
+            WHERE project_id = %s
+              AND valid_until IS NULL
+              AND source_ts > now() - INTERVAL '24 hours'
+            """,
+            (project_id,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+# -- Evergreen ----------------------------------------------------------------
+
+def get_evergreen(limit: int = 50) -> list[dict[str, Any]]:
+    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, fact, domains, confidence, source_ts, source_meta
+            FROM arteries.evergreen
+            WHERE superseded_by IS NULL
+            ORDER BY access_count DESC, source_ts DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def insert_evergreen(
+    fact: str,
+    domains: list[str],
+    confidence: float = 1.0,
+    parent_ids: list[str] | None = None,
+    embedding: list[float] | None = None,
+    source_meta: dict[str, Any] | None = None,
+) -> str:
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO arteries.evergreen
+                (fact, embedding, domains, confidence, parent_ids, source_meta)
+            VALUES (%s, %s, %s::jsonb, %s, %s::uuid[], %s::jsonb)
+            RETURNING id
+            """,
+            (
+                fact,
+                embedding,
+                psycopg2.extras.Json(domains),
+                confidence,
+                parent_ids or [],
+                psycopg2.extras.Json(source_meta or {}),
+            ),
+        )
+        conn.commit()
+        return str(cur.fetchone()[0])
+
+
+def get_recurring_domains() -> list[str]:
+    """Domains that appear in evergreen — user's cross-project patterns."""
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT d.value, COUNT(*) AS cnt
+            FROM arteries.evergreen,
+                 jsonb_array_elements_text(domains) AS d(value)
+            WHERE superseded_by IS NULL
+            GROUP BY d.value
+            ORDER BY cnt DESC
+            LIMIT 10
+            """,
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+# -- Retrievals ---------------------------------------------------------------
+
+def get_recent_retrievals(
+    project_id: str,
+    agent_process_id: str,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT prompt_id, situation, score, relevance, created_at
+            FROM arteries.retrievals
+            WHERE project_id = %s
+              AND agent_process_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (project_id, agent_process_id, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def log_retrieval(
+    project_id: str,
+    agent_process_id: str,
+    prompt_id: str,
+    situation: str,
+    score: float,
+) -> None:
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO arteries.retrievals
+                (project_id, agent_process_id, prompt_id, situation, score)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (project_id, agent_process_id, prompt_id, situation, score),
+        )
+        conn.commit()

@@ -1,6 +1,6 @@
-# Memory Project — Handoff from prompt-system
+# Memory Project — Handoff from capillaries
 
-Everything the memory project needs to know about how prompt-system consumes and depends on memory.
+Everything the memory project needs to know about how capillaries consumes and depends on memory.
 
 ## MemoryFrame contract
 
@@ -134,6 +134,18 @@ The memory project should populate `active_domains` and `recurring_domains`, the
 
 This keeps the gate stateless (it just reads the frame) while the memory project handles the intelligence of domain tracking.
 
+## Memory-informed post-rerank filter (implemented)
+
+A `MemoryFilter` (`capillaries/search/memory_filter.py`) runs after the cross-encoder reranker in `find.py::_try_single`. When a MemoryFrame is provided, `_try_single` requests the top-5 candidates from the reranker instead of top-1, then the filter applies additive score adjustments based on:
+
+- **Active domain match** (+0.06) — `persistent.active_domains`
+- **Recurring domain match** (+0.03) — `evergreen.recurring_domains`
+- **Intent alignment** (+0.04) — `evergreen.user_intent`
+- **Session insight domain** (+0.02) — domain tags from `persistent.session_insights`
+- **Prior retrieval penalty** (-0.10) — prompts in `persistent.prior_retrievals` with `relevance < 0.4` (surfaced but unused)
+
+The memory project's responsibility: populate these MemoryFrame fields accurately. The filter is stateless — it reads the frame and scores. The adjustment weights are initial heuristics suitable for RLVR optimization later.
+
 ## Other memory-dependent behaviors the gate should eventually support
 
 ### Confidence-aware retrieval
@@ -160,7 +172,7 @@ For the memory project to make good decisions about caching and confidence, it h
 - **Source filtering**: Default is `source='private'`. Public prompts are excluded unless explicitly requested.
 - **Corpus**: 849 private prompts, median length 2,203 chars. 114 are Image Gen prompts (12.4%) which tend to surface as false positives for business queries due to broad keyword overlap.
 
-## Files in prompt-system that touch memory
+## Files in capillaries that touch memory
 
 | File | What it does |
 |---|---|

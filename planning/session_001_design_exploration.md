@@ -2,7 +2,7 @@
 
 ## System Context Established
 
-The arteries project is a memory layer that populates and manages a `MemoryFrame` consumed by an existing prompt-retrieval gate in the `prompt-system` repo. The gate is stateless — it reads the frame but never mutates it. Arteries owns all write, eviction, scoring, and lifecycle logic.
+The arteries project is a memory layer that populates and manages a `MemoryFrame` consumed by an existing prompt-retrieval gate in the `capillaries` repo. The gate is stateless — it reads the frame but never mutates it. Arteries owns all write, eviction, scoring, and lifecycle logic.
 
 The gate runs a 3-stage decision pipeline:
 1. Heuristic check (kills greetings, short messages)
@@ -78,7 +78,7 @@ The user is considering using Reinforcement Learning with Verifiable Rewards for
 
 **Q: How does arteries receive conversation data?**
 
-A: Arteries runs as a background process observing the current ongoing conversation directly. It sees all memory tiers and the last 10 message/response pairs (including autonomous agent turns). It is NOT in the prompt-system gate's request/response path as middleware — it is an independent observer/enhancer.
+A: Arteries runs as a background process observing the current ongoing conversation directly. It sees all memory tiers and the last 10 message/response pairs (including autonomous agent turns). It is NOT in the capillaries gate's request/response path as middleware — it is an independent observer/enhancer.
 
 ### Enhancement Strategy
 
@@ -88,7 +88,7 @@ A: Arteries augments agent replies (post-response enhancement), NOT input inject
 
 ### Gate Relationship
 
-**Q: How does arteries connect to the prompt-system gate?**
+**Q: How does arteries connect to the capillaries gate?**
 
 A: Arteries is in the hot path (Option A — synchronous). It evaluates every turn, decides whether to trigger a gate call, populates the MemoryFrame, and forwards to the gate. The gate fires when the recent conversation context (last 10 pairs + relevant memory) matches a prompt/skill in the corpus. Arteries' core responsibilities:
 1. Decide what conversation details become memories
@@ -123,7 +123,7 @@ A: Two parallel ingestion tracks:
 
 **Q: How are memories surfaced at query time?**
 
-A: In-memory vector search (same approach already used in prompt-system for the prompt database). Arteries surfaces up to 5 most relevant memories for injection. RLVR helps determine relevance based on previous work conversation samples.
+A: In-memory vector search (same approach already used in capillaries for the prompt database). Arteries surfaces up to 5 most relevant memories for injection. RLVR helps determine relevance based on previous work conversation samples.
 
 ### Compilation Flow & Contradiction Handling
 
@@ -309,7 +309,7 @@ A: RLVR targets the **sync model's per-turn decisions** — high volume, fast fe
 | Decision | Reward signal | How verified |
 |---|---|---|
 | **Top-5 retrieval ranking** — which memories to surface | Was the memory reflected in the agent's response? User didn't correct → positive. Surfaced but unused → negative. | Semantic overlap comparison: memory fact text vs agent output. Every turn, immediate feedback. **Strongest candidate.** |
-| **Gate trigger** — should the prompt-system be called? | Did the retrieved prompt get used by the agent? | Prompt retrieved → used in response = positive. Gate skipped → agent struggled = negative (noisier). Every turn, immediate. |
+| **Gate trigger** — should capillaries be called? | Did the retrieved prompt get used by the agent? | Prompt retrieved → used in response = positive. Gate skipped → agent struggled = negative (noisier). Every turn, immediate. |
 | **Ephemeral extraction** — what's worth remembering from this turn? | Did the async LLM also extract it (or equivalent)? | Async LLM acts as automatic grader. Sync extracted + async confirmed = positive. Sync missed what async found = negative. Every turn, seconds delay. |
 
 **NOT RLVR-trained (too rare, too slow for learning):**
@@ -336,6 +336,32 @@ A: The same insight must appear in persistent memory across **3+ different proje
 
 1. **Training data bootstrap**: Before enough per-turn signal exists, what's the initial policy for the sync model? LLM-as-judge making per-turn calls, replaced by RLVR once enough data exists?
 2. **Scope of the RLVR model**: Fine-tuned 1-3B LLM with RL, or small classifier with feature engineering? What's the appetite for training infrastructure?
+
+### Memory-Informed Post-Rerank Filter (Decided, Implemented)
+
+**Q: How does memory context influence which prompt is selected from the reranker's candidates?**
+
+A: A `MemoryFilter` runs after the cross-encoder reranker, operating on the top-5 candidates instead of just the top-1. The reranker handles semantic quality (query-document relevance); the memory filter handles contextual fit using signals the reranker is blind to.
+
+**Signals applied (additive adjustments to rerank score):**
+
+| Signal | Source | Adjustment | Rationale |
+|---|---|---|---|
+| Active domain match | `persistent.active_domains` | +0.06 | User is working in this domain right now |
+| Recurring domain match | `evergreen.recurring_domains` | +0.03 | User works in this domain across sessions (weaker than active) |
+| Intent alignment | `evergreen.user_intent` | +0.04 | Candidate matches long-term user goals |
+| Session insight domain | `persistent.session_insights[].domain` | +0.02 | Reinforces domains surfaced by current session context |
+| Prior retrieval unused | `persistent.prior_retrievals` with relevance < 0.4 | -0.10 | Prompt was surfaced before but agent didn't use it |
+
+**Design constraints:**
+- Adjustments are intentionally small — memory breaks ties in the reranker's narrow band (scores often cluster within 0.05), it doesn't override strong semantic signals
+- Filter is stateless — reads the MemoryFrame, scores, returns. Memory project owns all mutation logic
+- Falls back to top-1 reranker result when no MemoryFrame is provided (backward compatible)
+- Lives in `capillaries/search/memory_filter.py`, wired into `find.py::_try_single`
+
+**What this solves:** The narrow-band embedding problem documented in the handoff. When "Board presentation" (0.884) and "DCF model" (0.847) are both in the top-5, and the user has been doing finance work for 3 sessions, the memory filter tips the selection toward DCF model without needing the embedding threshold to distinguish them.
+
+**Relationship to RLVR:** This filter provides a clean target for the sync model's "top-5 retrieval ranking" RLVR decision. The adjustment weights above are initial heuristics — RLVR can learn optimal weights from whether the selected prompt was actually used by the agent.
 
 ### Other Open Design Surfaces
 
