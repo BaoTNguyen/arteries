@@ -16,6 +16,8 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import sys
 
 from arteries import runlog
@@ -69,7 +71,8 @@ async def evaluate(message: str) -> str | None:
 
     prompt_text = None
     try:
-        decision = await run_gate(message=message, memory=frame)
+        with _dependency_stdout_to_stderr():
+            decision = await run_gate(message=message, memory=frame)
     except Exception as exc:
         runlog.log_failure("prompt.gate.failed", "capillaries", exc, turn_id=turn_id)
         decision = None
@@ -88,7 +91,8 @@ async def evaluate(message: str) -> str | None:
         if decision.search:
             try:
                 from capillaries.find import find
-                result = await find(message, memory=frame)
+                with _dependency_stdout_to_stderr():
+                    result = await find(message, memory=frame)
             except Exception as exc:
                 runlog.log_failure("prompt.retrieve.failed", "capillaries", exc, turn_id=turn_id)
             else:
@@ -128,6 +132,16 @@ async def _compile_background() -> None:
         await compile_once()
     except Exception as exc:
         runlog.log_failure("memory.compile.failed", "arteries", exc)
+
+
+@contextlib.contextmanager
+def _dependency_stdout_to_stderr():
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        yield
+    logs = buffer.getvalue()
+    if logs:
+        print(logs, end="", file=sys.stderr)
 
 
 def main() -> None:

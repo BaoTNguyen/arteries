@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, evergreen, inspect, runs, setup_cli, setup_db
+from arteries import doctor, evergreen, inspect, packet, runs, setup_cli, setup_db
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor")
+COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -22,7 +22,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "command",
         nargs="?",
         choices=COMMANDS,
-        help="command to run: setup, evergreen, setup-db, eval, inspect, runs, doctor",
+        help="command to run: setup, evergreen, setup-db, eval, inspect, runs, doctor, packet",
     )
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args(argv)
@@ -52,6 +52,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return runs.main(ns.args)
     if ns.command == "doctor":
         return doctor.main(ns.args)
+    if ns.command == "packet":
+        return packet.main(list(ns.args))
 
     parser.error(f"unknown command: {ns.command}")
     return 2

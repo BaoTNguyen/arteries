@@ -9,8 +9,10 @@ After installing the package, use `art` for arteries commands:
 
 ```bash
 art setup --list
+art setup --cwd /path/to/repo pi
 art setup --cwd /path/to/repo claude
 art setup --cwd /path/to/repo codex --check
+art packet --message "manual compact"
 art evergreen extract --project . --out evergreen_review.md
 art setup-db
 art eval "I prefer stdlib-first implementations."
@@ -29,10 +31,16 @@ bash scripts/art.sh setup --list
 
 ## Testing
 
-Run the local unit tests without requiring Postgres or model services:
+Run the local unit tests without requiring Postgres or model services. Use the script so both arteries and capillaries are importable:
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+bash scripts/test.sh
+```
+
+For non-sibling repos, set `CAPILLARIES_ROOT` first:
+
+```bash
+CAPILLARIES_ROOT=/path/to/capillaries bash scripts/test.sh
 ```
 
 Current tests cover heuristic ephemeral extraction and `MemoryFrame` assembly for ephemeral, persistent, and evergreen memory rows using mocked storage.
@@ -47,6 +55,24 @@ These tests create isolated temporary records, verify each tier one by one, and 
 
 
 
+## Import Topology
+
+Arteries is the runtime layer around capillaries. Keep imports one-way:
+
+```text
+agent CLI hook -> arteries -> capillaries
+```
+
+Capillaries owns prompt retrieval, gate decisions, reranking, and shared memory contract types such as `MemoryFrame`. Arteries owns memory extraction, storage, `MemoryFrame` assembly, tracing, and CLI hooks. Capillaries should not import arteries. If both projects need a shared type, keep it in capillaries and pass it into capillaries functions from arteries.
+
+For local editable development, make both packages importable in the hook environment:
+
+```bash
+export PYTHONPATH=/path/to/arteries/src:/path/to/capillaries/src:$PYTHONPATH
+```
+
+Installed `.arteries` runtimes do this automatically with `ARTERIES_ROOT` and `CAPILLARIES_ROOT`.
+
 ## CLI Integration
 
 The universal per-turn evaluator is:
@@ -55,7 +81,7 @@ The universal per-turn evaluator is:
 bash scripts/eval.sh "I am working on RLVR memory promotion for capillaries."
 ```
 
-Any CLI can integrate arteries by running that command on each user prompt and injecting stdout when it is non-empty.
+Supported Tier 1-3 CLIs integrate through provider-specific setup for Pi, Codex, and Claude Code. The shared continuity packet generator is available as `art packet` and is wired into installed runtimes as `.arteries/hooks/compact-packet.sh`.
 
 ## Basic Activity Tracking
 
@@ -64,22 +90,22 @@ Arteries records minimal run events when `art eval` observes a turn, extracts ep
 Inspect current memory plus recent events:
 
 ```bash
-art inspect --project prompt-system --agent prompt-system-hook --events 10
+art inspect --project my-project --agent my-project-hook --events 10
 ```
 
 Start or inspect runs directly:
 
 ```bash
-art runs start --project prompt-system --agent prompt-system-hook --cli codex
-art runs recent --project prompt-system --limit 25
-art runs summary --project prompt-system --limit 100
+art runs start --project my-project --agent my-project-hook --cli codex
+art runs recent --project my-project --limit 25
+art runs summary --project my-project --limit 100
 art runs show <run-id>
 ```
 
 Check wiring for a repo:
 
 ```bash
-art doctor --project prompt-system --agent prompt-system-hook --cli codex --repo /path/to/repo
+art doctor --project my-project --agent my-project-hook --cli codex --repo /path/to/repo
 ```
 
 Stable script entry points:
@@ -108,18 +134,26 @@ To reduce repeated Codex permission prompts, approve the specific script command
 
 ## Native CLI Setup
 
-Install arteries into another repo with provider-specific setup recipes:
+Install arteries into another repo with provider-specific Tier 1-3 setup recipes:
 
 ```bash
-art setup --cwd /path/to/repo generic
-art setup --cwd /path/to/repo claude
+art setup --cwd /path/to/repo pi
 art setup --cwd /path/to/repo codex
+art setup --cwd /path/to/repo claude
 ```
 
 Supported providers:
 
 ```bash
 art setup --list
+```
+
+For local editable imports, point the runtime at capillaries:
+
+```bash
+art setup --cwd /path/to/repo pi \
+  --arteries-root /path/to/arteries \
+  --capillaries-root /path/to/capillaries
 ```
 
 Verify or remove an integration:
@@ -129,17 +163,19 @@ art setup --cwd /path/to/repo claude --check
 art setup --cwd /path/to/repo claude --remove
 ```
 
-Every provider installs a repo-local `.arteries/` runtime with stable scripts. The activate hook starts a fresh run and the observe hook stamps `ARTERIES_PROJECT`, `ARTERIES_AGENT_ID`, `ARTERIES_CLI`, and `ARTERIES_REPO`:
+Every provider installs a repo-local `.arteries/` runtime with stable scripts. The activate hook starts a fresh run, the observe hook stamps `ARTERIES_PROJECT`, `ARTERIES_AGENT_ID`, `ARTERIES_CLI`, and `ARTERIES_REPO`, and the compact hook builds a continuity packet from ephemeral, persistent, and evergreen memories:
 
 ```text
 .arteries/config.json
 .arteries/hooks/observe.sh
 .arteries/hooks/generic-observe.sh
 .arteries/hooks/activate.sh
+.arteries/hooks/compact-packet.sh
+.arteries/hooks/pi-compact-json.sh
 .arteries/smoke.sh
 ```
 
-Generic CLIs can call `bash .arteries/hooks/generic-observe.sh "user prompt"` and inject stdout when non-empty.
+Pi additionally installs `.pi/extensions/arteries.ts` as the Tier 1 native compaction replacement extension. Codex installs a compact prompt file and compact lifecycle hooks. Claude installs prompt/session hooks plus `PreCompact` and `PostCompact` packet hooks.
 
 ## Evergreen Review Import
 

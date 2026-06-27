@@ -38,6 +38,13 @@ class ArtCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         doctor_main.assert_called_once_with(["--project", "demo"])
 
+    def test_packet_dispatches_to_packet_cli(self):
+        with patch.object(cli.packet, "main", return_value=0) as packet_main:
+            result = cli.main(["packet", "--message", "manual"])
+
+        self.assertEqual(result, 0)
+        packet_main.assert_called_once_with(["--message", "manual"])
+
 
 if __name__ == "__main__":
     unittest.main()
