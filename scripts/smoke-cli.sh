@@ -2,7 +2,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-export PYTHONPATH="${PYTHONPATH:-src}"
+CAPILLARIES_SRC="${CAPILLARIES_ROOT:-../capillaries}/src"
+export PYTHONPATH="src:${CAPILLARIES_SRC}:${PYTHONPATH:-}"
 
 prompt="${1:-thanks}"
 
