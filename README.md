@@ -29,6 +29,43 @@ From this repo without installing, use:
 bash scripts/art.sh setup --list
 ```
 
+## Windows Local Setup
+
+This repo is shell-script-first, so the lowest-friction Windows path is WSL2 or Git Bash plus a Python virtual environment. The important part is that both `arteries` and `capillaries` are importable, and that Postgres plus the model endpoints are running locally.
+
+1. Clone the repos side by side, for example:
+   `C:\src\arteries` and `C:\src\capillaries`
+2. Create a venv in `arteries` and install both packages in editable mode:
+   `pip install -e .` in `arteries`, then `pip install -e ..\capillaries` or the equivalent path to your sibling checkout.
+3. Point the runtime at the sibling repo when needed:
+   `CAPILLARIES_ROOT=C:\src\capillaries`
+4. Start PostgreSQL with `pgvector` available, create or reuse the `capillaries` database, then initialize the arteries schema:
+   `python -m arteries.setup_db`
+5. Start an OpenAI-compatible embeddings service and set:
+   `EMBED_URL=http://127.0.0.1:8003/v1/embeddings`
+6. Start an OpenAI-compatible chat/completions service for background compilation and set:
+   `GENERATE_URL=http://127.0.0.1:8001/v1/chat/completions`
+7. Verify the wiring with:
+   `art doctor --project default`
+
+The default database settings are:
+
+- host: `/var/run/postgresql` on Unix, so override it on Windows with `DB_HOST=127.0.0.1`
+- port: `5432`
+- database: `capillaries`
+- user/password: whatever your local Postgres instance requires
+
+For a pure PowerShell session, set the env vars before running Python commands:
+
+```powershell
+$env:CAPILLARIES_ROOT = "C:\src\capillaries"
+$env:DB_HOST = "127.0.0.1"
+$env:DB_PORT = "5432"
+$env:DB_NAME = "capillaries"
+$env:EMBED_URL = "http://127.0.0.1:8003/v1/embeddings"
+$env:GENERATE_URL = "http://127.0.0.1:8001/v1/chat/completions"
+```
+
 ## Testing
 
 Run the local unit tests without requiring Postgres or model services. Use the script so both arteries and capillaries are importable:
