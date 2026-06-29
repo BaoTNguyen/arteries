@@ -1,0 +1,11 @@
+{
+  "name": "arteries",
+  "version": "0.1.0",
+  "description": "Always-on memory layer for AI coding agents.",
+  "license": "MIT",
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  }
+}

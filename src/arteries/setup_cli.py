@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,7 @@ class Context:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install arteries into agent CLI projects.")
     parser.add_argument("provider", nargs="?", choices=PROVIDERS)
-    parser.add_argument("--cwd", type=Path, default=Path.cwd(), help="target repo directory")
+    parser.add_argument("--cwd", type=Path, default=_default_cwd(), help="target repo directory")
     parser.add_argument("--arteries-root", type=Path, default=_default_arteries_root())
     parser.add_argument("--project", help="ARTERIES_PROJECT value; defaults to repo directory name")
     parser.add_argument("--cli", help="ARTERIES_CLI value; defaults to provider name")
@@ -69,6 +70,10 @@ def main(argv: list[str] | None = None) -> int:
 
 def _default_arteries_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def _default_cwd() -> Path:
+    return Path(os.getenv("ARTERIES_CALLER_CWD") or Path.cwd())
 
 
 def _default_capillaries_root(arteries_root: Path) -> Path:
@@ -345,10 +350,10 @@ Arteries observes turns, builds memory, may surface retrieved prompts, and produ
 
 def _codex_toml_block() -> str:
     return f'''{CODEX_MARKER_START}
+experimental_compact_prompt_file = "../.arteries/codex/compact_prompt.txt"
+
 [features]
 hooks = true
-
-experimental_compact_prompt_file = ".arteries/codex/compact_prompt.txt"
 
 [[hooks.SessionStart]]
 matcher = "startup|resume|clear|compact"

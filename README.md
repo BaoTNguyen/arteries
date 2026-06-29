@@ -1,206 +1,178 @@
 # arteries
 
-Always-on memory layer for capillaries prompt retrieval.
+Arteries is the memory and tracing layer around capillaries.
 
+Capillaries decides whether a prompt from your private corpus should be used. Arteries gives that decision a memory frame, records what happened, and leaves enough trace data that you can later answer practical questions like:
 
-## CLI Shortcut
+- What did the agent observe in this repo?
+- Which memories did it extract?
+- Which prompt did capillaries retrieve?
+- What gate match caused retrieval to open?
+- What user message triggered it?
+- Did Codex, Pi, or Claude produce the event?
 
-After installing the package, use `art` for arteries commands:
+The goal is not to make another agent. The goal is to make the agents you already use carry project memory and leave an audit trail.
 
-```bash
-art setup --list
-art setup --cwd /path/to/repo pi
-art setup --cwd /path/to/repo claude
-art setup --cwd /path/to/repo codex --check
-art packet --message "manual compact"
-art evergreen extract --project . --out evergreen_review.md
-art setup-db
-art eval "I prefer stdlib-first implementations."
-art inspect --project default --events 10
-art runs start --project default --cli codex
-art runs recent --project default --limit 25
-art runs summary --project default --limit 100
-art doctor --project default
+## What problem it solves
+
+Coding CLIs forget too much between sessions, and each CLI has its own hook or extension model. If you use Codex in one project, Pi in another, and Claude Code somewhere else, the useful context gets scattered.
+
+Arteries gives those tools one shared local memory path:
+
+```text
+CLI hook or extension -> arteries -> capillaries -> private prompt corpus
+                         |
+                         +-> Postgres memory and run logs
+                         +-> repo-local fallback logs
 ```
 
-From this repo without installing, use:
+It handles four jobs:
 
-```bash
-bash scripts/art.sh setup --list
-```
+1. Observe each user turn that reaches the hook.
+2. Extract short-lived project memories from that turn.
+3. Build the `MemoryFrame` that capillaries uses for gate and retrieval decisions.
+4. Log runs, gate decisions, retrieved prompts, compaction packets, and memory compilation.
 
-## Windows Local Setup
+Capillaries remains the retrieval engine. Arteries owns the runtime layer around it.
 
-This repo is shell-script-first, so the lowest-friction Windows path is WSL2 or Git Bash plus a Python virtual environment. The important part is that both `arteries` and `capillaries` are importable, and that Postgres plus the model endpoints are running locally.
+## How the pieces fit
 
-1. Clone the repos side by side, for example:
-   `C:\src\arteries` and `C:\src\capillaries`
-2. Create a venv in `arteries` and install both packages in editable mode:
-   `pip install -e .` in `arteries`, then `pip install -e ..\capillaries` or the equivalent path to your sibling checkout.
-3. Point the runtime at the sibling repo when needed:
-   `CAPILLARIES_ROOT=C:\src\capillaries`
-4. Start PostgreSQL with `pgvector` available, create or reuse the `capillaries` database, then initialize the arteries schema:
-   `python -m arteries.setup_db`
-5. Start an OpenAI-compatible embeddings service and set:
-   `EMBED_URL=http://127.0.0.1:8003/v1/embeddings`
-6. Start an OpenAI-compatible chat/completions service for background compilation and set:
-   `GENERATE_URL=http://127.0.0.1:8001/v1/chat/completions`
-7. Verify the wiring with:
-   `art doctor --project default`
-
-The default database settings are:
-
-- host: `/var/run/postgresql` on Unix, so override it on Windows with `DB_HOST=127.0.0.1`
-- port: `5432`
-- database: `capillaries`
-- user/password: whatever your local Postgres instance requires
-
-For a pure PowerShell session, set the env vars before running Python commands:
-
-```powershell
-$env:CAPILLARIES_ROOT = "C:\src\capillaries"
-$env:DB_HOST = "127.0.0.1"
-$env:DB_PORT = "5432"
-$env:DB_NAME = "capillaries"
-$env:EMBED_URL = "http://127.0.0.1:8003/v1/embeddings"
-$env:GENERATE_URL = "http://127.0.0.1:8001/v1/chat/completions"
-```
-
-## Testing
-
-Run the local unit tests without requiring Postgres or model services. Use the script so both arteries and capillaries are importable:
-
-```bash
-bash scripts/test.sh
-```
-
-For non-sibling repos, set `CAPILLARIES_ROOT` first:
-
-```bash
-CAPILLARIES_ROOT=/path/to/capillaries bash scripts/test.sh
-```
-
-Current tests cover heuristic ephemeral extraction and `MemoryFrame` assembly for ephemeral, persistent, and evergreen memory rows using mocked storage.
-
-Run live Postgres smoke tests for the three memory tiers:
-
-```bash
-PYTHONPATH=src ARTERIES_LIVE_TESTS=1 python3 -m unittest tests.test_live_memory_tiers -v
-```
-
-These tests create isolated temporary records, verify each tier one by one, and clean up after themselves. The persistent test mocks the external LLM call so it only requires Postgres.
-
-
-
-## Import Topology
-
-Arteries is the runtime layer around capillaries. Keep imports one-way:
+Keep the dependency direction one-way:
 
 ```text
 agent CLI hook -> arteries -> capillaries
 ```
 
-Capillaries owns prompt retrieval, gate decisions, reranking, and shared memory contract types such as `MemoryFrame`. Arteries owns memory extraction, storage, `MemoryFrame` assembly, tracing, and CLI hooks. Capillaries should not import arteries. If both projects need a shared type, keep it in capillaries and pass it into capillaries functions from arteries.
+Capillaries owns:
 
-For local editable development, make both packages importable in the hook environment:
+- prompt gating
+- prompt search and reranking
+- private prompt corpus access
+- shared memory contract types such as `MemoryFrame`
 
-```bash
-export PYTHONPATH=/path/to/arteries/src:/path/to/capillaries/src:$PYTHONPATH
+Arteries owns:
+
+- setup for Codex, Pi, and Claude Code
+- `.arteries/` runtime scripts inside target repos
+- ephemeral, persistent, and evergreen memory storage
+- `MemoryFrame` assembly
+- compaction packets
+- central trace output
+- run/event telemetry
+
+The two repos should usually sit next to each other:
+
+```text
+/home/bao-tn/Coding/Projects/arteries
+/home/bao-tn/Coding/Projects/capillaries
 ```
 
-Installed `.arteries` runtimes do this automatically with `ARTERIES_ROOT` and `CAPILLARIES_ROOT`.
+The scripts assume that sibling layout unless you pass `--capillaries-root`.
 
-## CLI Integration
+## Services it expects
 
-The universal per-turn evaluator is:
+For memory and retrieval to work, keep these available locally:
+
+- PostgreSQL with `pgvector`
+- the `capillaries` database
+- an OpenAI-compatible embedding endpoint, usually `http://127.0.0.1:8003/v1/embeddings`
+- an OpenAI-compatible chat/completions endpoint, usually `http://127.0.0.1:8001/v1/chat/completions`
+- capillaries importable on `PYTHONPATH`
+
+Defaults live in `src/arteries/config.py` and environment variables can override them:
 
 ```bash
-bash scripts/eval.sh "I am working on RLVR memory promotion for capillaries."
+DB_HOST=/var/run/postgresql
+DB_PORT=5432
+DB_NAME=capillaries
+DB_USER=$USER
+DB_PASSWORD=
+EMBED_URL=http://127.0.0.1:8003/v1/embeddings
+GENERATE_URL=http://127.0.0.1:8001/v1/chat/completions
 ```
 
-Supported Tier 1-3 CLIs integrate through provider-specific setup for Pi, Codex, and Claude Code. The shared continuity packet generator is available as `art packet` and is wired into installed runtimes as `.arteries/hooks/compact-packet.sh`.
-
-## Basic Activity Tracking
-
-Arteries records minimal run events when `art eval` observes a turn, extracts ephemeral memory, builds a frame, gates prompt retrieval, retrieves a prompt, or completes compilation. Events use `ARTERIES_PROJECT` as the project id, defaulting to `default`. They write to Postgres when the `arteries.agent_runs` and `arteries.agent_events` tables exist; otherwise they fall back to repo-local JSONL under `.arteries/runs/`.
-
-Inspect current memory plus recent events:
+Initialize the arteries schema once:
 
 ```bash
-art inspect --project my-project --agent my-project-hook --events 10
-```
-
-Start or inspect runs directly:
-
-```bash
-art runs start --project my-project --agent my-project-hook --cli codex
-art runs recent --project my-project --limit 25
-art runs summary --project my-project --limit 100
-art runs show <run-id>
-```
-
-Check wiring for a repo:
-
-```bash
-art doctor --project my-project --agent my-project-hook --cli codex --repo /path/to/repo
-```
-
-Stable script entry points:
-
-```bash
+cd /home/bao-tn/Coding/Projects/arteries
 bash scripts/setup-db.sh
-bash scripts/test.sh
-bash scripts/live-test.sh
-bash scripts/eval.sh "thanks"
-bash scripts/generic-observe.sh "thanks"
-bash scripts/hook-observe-smoke.sh "thanks"
-bash scripts/hook-activate-smoke.sh
-bash scripts/smoke-cli.sh "thanks"
 ```
 
-For CLIs without a JSON hook protocol, use `scripts/generic-observe.sh`. It accepts the prompt as arguments or stdin and prints plain text context only when arteries retrieves a prompt.
+## Command entry points
 
-For Claude/Codex-style hooks, use:
-
-- `hooks/arteries-activate.js` for session start context
-- `hooks/arteries-observe.js` for each user prompt
-- `hooks/hooks.json` as the hook config
-
-To reduce repeated Codex permission prompts, approve the specific script command prefixes you use often, such as `bash scripts/test.sh`, `bash scripts/live-test.sh`, and `bash scripts/smoke-cli.sh`. Avoid approving broad commands like plain `bash`.
-
-
-## Native CLI Setup
-
-Install arteries into another repo with provider-specific Tier 1-3 setup recipes:
-
-```bash
-art setup --cwd /path/to/repo pi
-art setup --cwd /path/to/repo codex
-art setup --cwd /path/to/repo claude
-```
-
-Supported providers:
+If the package is installed, use `art`:
 
 ```bash
 art setup --list
+art trace --repo /path/to/project
+art runs summary --project project-name
+art inspect --project project-name --agent project-name-hook
 ```
 
-For local editable imports, point the runtime at capillaries:
+From this repo without installing, use the wrapper:
 
 ```bash
-art setup --cwd /path/to/repo pi \
-  --arteries-root /path/to/arteries \
+cd /home/bao-tn/Coding/Projects/arteries
+bash scripts/art.sh setup --list
+```
+
+The wrapper sets `PYTHONPATH` for arteries and capillaries. It also remembers the directory you called it from, so setup commands can target the current project without `--cwd`.
+
+## Set up a project
+
+Go to the project you want the agent to work in, then run the setup command for the CLI you use there.
+
+Codex:
+
+```bash
+cd /path/to/project
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex
+```
+
+Pi:
+
+```bash
+cd /path/to/project
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup pi
+```
+
+Claude Code:
+
+```bash
+cd /path/to/project
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup claude
+```
+
+If capillaries is not a sibling of arteries, pass it explicitly:
+
+```bash
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex \
   --capillaries-root /path/to/capillaries
 ```
 
-Verify or remove an integration:
+Use a stable project name when you want Codex, Pi, and Claude activity to land in the same trace:
 
 ```bash
-art setup --cwd /path/to/repo claude --check
-art setup --cwd /path/to/repo claude --remove
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex --project career-ops
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup pi --project career-ops
 ```
 
-Every provider installs a repo-local `.arteries/` runtime with stable scripts. The activate hook starts a fresh run, the observe hook stamps `ARTERIES_PROJECT`, `ARTERIES_AGENT_ID`, `ARTERIES_CLI`, and `ARTERIES_REPO`, and the compact hook builds a continuity packet from ephemeral, persistent, and evergreen memories:
+Verify setup:
+
+```bash
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex --check
+bash .arteries/smoke.sh "arteries setup test"
+```
+
+Remove it:
+
+```bash
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex --remove
+```
+
+## What setup installs
+
+Every provider gets a repo-local runtime:
 
 ```text
 .arteries/config.json
@@ -212,28 +184,278 @@ Every provider installs a repo-local `.arteries/` runtime with stable scripts. T
 .arteries/smoke.sh
 ```
 
-Pi additionally installs `.pi/extensions/arteries.ts` as the Tier 1 native compaction replacement extension. Codex installs a compact prompt file and compact lifecycle hooks. Claude installs prompt/session hooks plus `PreCompact` and `PostCompact` packet hooks.
+The runtime sets:
 
-## Evergreen Review Import
+```text
+ARTERIES_ROOT
+CAPILLARIES_ROOT
+ARTERIES_PROJECT
+ARTERIES_AGENT_ID
+ARTERIES_CLI
+ARTERIES_REPO
+PYTHONPATH
+```
 
-Generate an editable Markdown review file from trusted project docs:
+Provider-specific files:
+
+- Codex: `.codex/config.toml`, `.arteries/codex/compact_prompt.txt`, and an `AGENTS.md` block.
+- Pi: `.pi/extensions/arteries.ts` for compaction replacement.
+- Claude Code: `.claude/settings.local.json` hooks for session start, prompt submit, pre-compact, and post-compact.
+
+Codex config detail: `experimental_compact_prompt_file` is top-level and points to `../.arteries/codex/compact_prompt.txt`, because Codex resolves relative project config paths from the `.codex/` folder.
+
+## What happens during use
+
+After setup, start your CLI in the target project and work as usual.
+
+On session start, arteries starts a run and writes `.arteries/current-run.json`.
+
+On each observed user prompt, `arteries.eval`:
+
+1. logs `turn.observed`
+2. extracts ephemeral memories
+3. builds a `MemoryFrame`
+4. asks capillaries whether prompt retrieval should open
+5. retrieves a prompt if the gate opens
+6. prints the retrieved prompt text back to the CLI hook
+7. compiles ephemeral memories into persistent project memory in the background
+
+On compaction, arteries builds a continuity packet from ephemeral, persistent, and evergreen memory.
+
+## Memory tiers
+
+Arteries stores memory in the `arteries` schema inside the shared `capillaries` database.
+
+Ephemeral memory is per project and per agent process. It is high churn. It captures recent observations before compilation.
+
+Persistent memory is per project. It stores compiled project facts, preferences, and decisions.
+
+Evergreen memory is global. It stores cross-project facts you have explicitly imported or promoted.
+
+Recent retrievals are also stored, so the frame can tell capillaries which prompts have already surfaced.
+
+## Trace data
+
+Arteries writes telemetry to Postgres when these tables exist:
+
+```text
+arteries.agent_runs
+arteries.agent_events
+```
+
+If Postgres is unavailable, it falls back to repo-local JSONL:
+
+```text
+.arteries/runs/*.jsonl
+```
+
+Common event types:
+
+```text
+run.started
+turn.observed
+memory.ephemeral.extracted
+memory.frame.built
+prompt.gate.decided
+prompt.retrieved
+memory.compile.completed
+*.failed
+```
+
+A gate decision and a retrieved prompt are not the same thing. The gate may log a nearest corpus title because that title justified opening search. The retriever can still choose a different prompt.
+
+Trace labels this explicitly:
+
+```json
+{
+  "kind": "gate_decision",
+  "gate_nearest_match_title": "Full Adversarial Check Protocol Breakpoint Reality Check",
+  "search_opened": true
+}
+```
+
+```json
+{
+  "kind": "prompt_retrieved",
+  "retrieved_prompt_id": "60006f86-3983-4351-8a51-d64f5dd08a85"
+}
+```
+
+## Central tracing from this repo
+
+You can inspect another project from the arteries repo:
 
 ```bash
-art evergreen extract \
+cd /home/bao-tn/Coding/Projects/arteries
+bash scripts/art.sh trace \
+  --repo /home/bao-tn/Coding/Projects/career-ops \
+  --events 100 \
+  --memories 20 \
+  --prompt-preview 1000 \
+  --message-preview 1000
+```
+
+The trace output includes:
+
+- current run
+- run summary
+- recent events
+- memory tiers
+- prompt timeline
+- gate nearest-match labels
+- retrieved prompt references: title, file path, content hash, status, source, prompt length, and preview
+- previous, current, and next observed user-turn context around retrieved prompts when that data was logged
+
+Older `turn.observed` events may only have `message_chars`. Newer events include a bounded preview and a SHA-256 hash:
+
+```json
+{
+  "message_chars": 2039,
+  "message_preview": "Update my job preferences...",
+  "message_preview_truncated": true,
+  "message_sha256": "..."
+}
+```
+
+Retrieved turns can also show `retrieval_situation_preview`, which comes from the retrieval log and often preserves the triggering user message even for older runs.
+
+## Lower-level inspection
+
+Inspect memory plus recent events:
+
+```bash
+bash scripts/art.sh inspect \
+  --project career-ops \
+  --agent career-ops-hook \
+  --events 20
+```
+
+Summarize recent activity:
+
+```bash
+bash scripts/art.sh runs summary \
+  --project career-ops \
+  --repo /home/bao-tn/Coding/Projects/career-ops \
+  --limit 100
+```
+
+Show one run:
+
+```bash
+bash scripts/art.sh runs show <run-id> \
+  --repo /home/bao-tn/Coding/Projects/career-ops
+```
+
+Watch a project in a terminal:
+
+```bash
+bash scripts/watch.sh career-ops 10
+```
+
+## Hot reload expectations
+
+Tracing changes are immediate because `bash scripts/art.sh trace` runs the current local source.
+
+Python behavior inside hooks usually updates on the next hook invocation because the hook scripts call `python3 -m arteries...` each time. Still, restart the active CLI session when you change hook config, provider setup, or anything loaded at CLI startup.
+
+Use this rule:
+
+- Trace output changes: no restart.
+- Future `turn.observed` payload changes: restart the CLI session to be certain.
+- Codex `.codex/config.toml` changes: restart Codex.
+- Pi extension changes: restart or reload Pi.
+- Claude hook settings: restart Claude Code or start a new session.
+- Prompt database changes: no CLI restart, unless a separate capillaries server has cached prompt data.
+
+## Evergreen import
+
+Evergreen memory is for durable cross-project facts. Generate a review file from trusted docs:
+
+```bash
+bash scripts/art.sh evergreen extract \
   --project . \
   --out evergreen_review.md
 ```
 
-Review `evergreen_review.md` in an editor. Delete memories you do not want, rewrite wording freely, or move items under `Rejected Memories`. The sidecar `evergreen_review.meta.json` keeps source spans and original text so edited memories can still be tied back to the file they came from.
-
-Preview the import:
+Edit the Markdown file by hand. Delete memories you do not want, rewrite wording, or move items under rejected memories. Preview import:
 
 ```bash
-art evergreen import --review evergreen_review.md
+bash scripts/art.sh evergreen import --review evergreen_review.md
 ```
 
-Write accepted memories to `arteries.evergreen`:
+Write accepted memories:
 
 ```bash
-art evergreen import --review evergreen_review.md --write
+bash scripts/art.sh evergreen import --review evergreen_review.md --write
+```
+
+## Testing
+
+Run local tests without Postgres or model services:
+
+```bash
+bash scripts/test.sh
+```
+
+Run live memory-tier tests against Postgres:
+
+```bash
+PYTHONPATH=src ARTERIES_LIVE_TESTS=1 python3 -m unittest tests.test_live_memory_tiers -v
+```
+
+The live tests create temporary records and clean up after themselves. The persistent compile path mocks the external LLM call, so it only needs Postgres.
+
+## Windows notes
+
+This repo is shell-script first. The least painful Windows path is WSL2 or Git Bash with a Python virtual environment.
+
+Use sibling checkouts such as:
+
+```text
+C:/src/arteries
+C:/src/capillaries
+```
+
+Install both packages in editable mode, start Postgres with `pgvector`, then set the service URLs:
+
+```powershell
+$env:CAPILLARIES_ROOT = "C:/src/capillaries"
+$env:DB_HOST = "127.0.0.1"
+$env:DB_PORT = "5432"
+$env:DB_NAME = "capillaries"
+$env:EMBED_URL = "http://127.0.0.1:8003/v1/embeddings"
+$env:GENERATE_URL = "http://127.0.0.1:8001/v1/chat/completions"
+```
+
+Then initialize the schema:
+
+```powershell
+python -m arteries.setup_db
+```
+
+## Troubleshooting
+
+If setup cannot find capillaries, pass `--capillaries-root`.
+
+If Codex complains about `.codex/config.toml`, check that `experimental_compact_prompt_file` is top-level and points to `../.arteries/codex/compact_prompt.txt`.
+
+If no prompts surface, run trace first. Look for `prompt.gate.decided`. If `search_opened` is false, capillaries decided the prompt corpus was not relevant enough. If search opened but no `prompt.retrieved` appears, inspect capillaries retrieval and model services.
+
+If trace shows only character counts for older turns, that is expected. Message previews were added later. New turns record bounded previews and hashes.
+
+If Postgres is down, arteries still writes fallback JSONL under `.arteries/runs/`, but memory tiers and prompt corpus lookup need the database.
+
+## Stable scripts
+
+These scripts are safe entry points to approve in Codex instead of approving broad `bash` access:
+
+```bash
+bash scripts/setup-db.sh
+bash scripts/test.sh
+bash scripts/live-test.sh
+bash scripts/eval.sh "thanks"
+bash scripts/generic-observe.sh "thanks"
+bash scripts/hook-observe-smoke.sh "thanks"
+bash scripts/hook-activate-smoke.sh
+bash scripts/smoke-cli.sh "thanks"
 ```

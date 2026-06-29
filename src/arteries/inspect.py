@@ -25,7 +25,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "evergreen": _safe(lambda: storage.get_evergreen(limit=10)),
         "recent_events": runlog.recent_events(ns.project, limit=ns.events),
     }
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    print(json.dumps(summary, indent=2, sort_keys=True, default=str))
     return 0
 
 

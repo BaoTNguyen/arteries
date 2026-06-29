@@ -45,6 +45,13 @@ class ArtCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         packet_main.assert_called_once_with(["--message", "manual"])
 
+    def test_trace_dispatches_to_trace_cli(self):
+        with patch.object(cli.trace, "main", return_value=0) as trace_main:
+            result = cli.main(["trace", "--repo", "/tmp/demo"])
+
+        self.assertEqual(result, 0)
+        trace_main.assert_called_once_with(["--repo", "/tmp/demo"])
+
 
 if __name__ == "__main__":
     unittest.main()

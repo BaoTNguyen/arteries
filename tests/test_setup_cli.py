@@ -1,7 +1,10 @@
 import json
+import os
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from arteries import setup_cli
 
@@ -63,15 +66,32 @@ class SetupCliTests(unittest.TestCase):
             self.assertIn(setup_cli.MARKER_START, agents)
             self.assertIn("# Existing", agents)
             self.assertIn(setup_cli.CODEX_MARKER_START, config_toml)
-            self.assertIn("experimental_compact_prompt_file", config_toml)
+            parsed_config = tomllib.loads(config_toml)
+            self.assertEqual(
+                parsed_config["experimental_compact_prompt_file"],
+                "../.arteries/codex/compact_prompt.txt",
+            )
+            self.assertTrue(parsed_config["features"]["hooks"])
+            self.assertTrue(all(isinstance(value, bool) for value in parsed_config["features"].values()))
             self.assertIn("hooks.PreCompact", config_toml)
-            self.assertTrue((root / ".arteries/codex/compact_prompt.txt").exists())
+            compact_path = root / ".codex" / parsed_config["experimental_compact_prompt_file"]
+            self.assertTrue(compact_path.resolve().exists())
             config = json.loads((root / ".arteries/config.json").read_text())
             self.assertEqual(config["cli"], "codex")
             self.assertEqual(setup_cli.main(["codex", "--cwd", str(root), "--check"]), 0)
             self.assertEqual(setup_cli.main(["codex", "--cwd", str(root), "--remove"]), 0)
             self.assertNotIn(setup_cli.MARKER_START, (root / "AGENTS.md").read_text())
             self.assertFalse((root / ".arteries").exists())
+
+    def test_setup_defaults_to_art_wrapper_caller_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict(os.environ, {"ARTERIES_CALLER_CWD": str(root)}):
+                self.assertEqual(setup_cli.main(["pi"]), 0)
+
+            config = json.loads((root / ".arteries/config.json").read_text())
+            self.assertEqual(config["project"], root.name)
+            self.assertEqual(config["cli"], "pi")
 
     def test_setup_accepts_capillaries_root_for_supported_provider(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import sys
 
@@ -31,7 +32,7 @@ async def evaluate(message: str) -> str | None:
     runlog.log_event(
         "turn.observed",
         "arteries",
-        {"message_chars": len(message)},
+        _message_payload(message),
         turn_id=turn_id,
     )
 
@@ -124,6 +125,16 @@ async def evaluate(message: str) -> str | None:
         pass
 
     return prompt_text
+
+
+def _message_payload(message: str) -> dict:
+    preview = message[:500]
+    return {
+        "message_chars": len(message),
+        "message_preview": preview,
+        "message_preview_truncated": len(message) > len(preview),
+        "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+    }
 
 
 async def _compile_background() -> None:
