@@ -26,6 +26,11 @@ class EvaluateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         extract_and_store.assert_called_once_with("I prefer stable hooks")
+        first_event = log_event.call_args_list[0]
+        self.assertEqual(first_event.args[0], "turn.observed")
+        self.assertEqual(first_event.args[2]["message_preview"], "I prefer stable hooks")
+        self.assertEqual(first_event.args[2]["message_chars"], 21)
+        self.assertIn("message_sha256", first_event.args[2])
         self.assertGreaterEqual(log_event.call_count, 3)
 
 

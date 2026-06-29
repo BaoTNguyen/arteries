@@ -1,0 +1,30 @@
+# arteries:start - managed by `art setup codex`
+experimental_compact_prompt_file = "../.arteries/codex/compact_prompt.txt"
+
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+matcher = "startup|resume|clear|compact"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "ARTERIES_CLI=codex bash .arteries/hooks/activate.sh"
+statusMessage = "Activating arteries memory"
+
+[[hooks.PreCompact]]
+matcher = "manual|auto"
+
+[[hooks.PreCompact.hooks]]
+type = "command"
+command = "ARTERIES_CLI=codex bash .arteries/hooks/compact-packet.sh codex-precompact"
+statusMessage = "Building arteries continuity packet"
+
+[[hooks.PostCompact]]
+matcher = "manual|auto"
+
+[[hooks.PostCompact.hooks]]
+type = "command"
+command = "ARTERIES_CLI=codex bash .arteries/hooks/compact-packet.sh codex-postcompact"
+statusMessage = "Recording arteries compact continuity"
+# arteries:end
