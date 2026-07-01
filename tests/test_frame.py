@@ -10,24 +10,21 @@ class BuildFrameTests(unittest.TestCase):
     @patch.object(frame.storage, "get_recurring_domains")
     @patch.object(frame.storage, "get_active_domains")
     @patch.object(frame.storage, "get_evergreen")
-    @patch.object(frame.storage, "get_persistent")
-    @patch.object(frame.storage, "get_ephemeral")
+    @patch.object(frame.memory_select, "select_for_frame")
     def test_builds_all_memory_tiers(
         self,
-        get_ephemeral,
-        get_persistent,
+        select_for_frame,
         get_evergreen,
         get_active_domains,
         get_recurring_domains,
         get_recent_retrievals,
     ):
-        get_ephemeral.return_value = [
+        select_for_frame.return_value = ([
             {"fact": "User is testing the sync extractor", "domains": ["technical"], "confidence": 0.7},
             {"fact": "User wants RLVR for memory promotion", "domains": ["AI"], "confidence": 0.8},
-        ]
-        get_persistent.return_value = [
+        ], [
             {"fact": "Project uses capillaries MemoryFrame", "domains": ["technical"], "confidence": 0.9},
-        ]
+        ])
         get_evergreen.return_value = [
             {"fact": "User prefers small stdlib-first fixes", "domains": ["intent"], "confidence": 1.0},
             {"fact": "User works on agentic coding", "domains": ["AI"], "confidence": 0.85},

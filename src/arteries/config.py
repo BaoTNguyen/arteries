@@ -20,3 +20,18 @@ EMBED_DIM = 768
 
 PROJECT_ID = os.getenv("ARTERIES_PROJECT", "default")
 AGENT_PROCESS_ID = os.getenv("ARTERIES_AGENT_ID", str(os.getpid()))
+
+# --- Memory isolation presets ---
+_PRESETS = {
+    "readonly": {"ARTERIES_PERSISTENT_READ": "relevance", "ARTERIES_EPHEMERAL": "discard"},
+    "clean":    {"ARTERIES_PERSISTENT_READ": "none",      "ARTERIES_EPHEMERAL": "discard"},
+}
+
+_preset = os.getenv("ARTERIES_MEMORY", "").lower()
+if _preset in _PRESETS:
+    for _k, _v in _PRESETS[_preset].items():
+        os.environ.setdefault(_k, _v)
+
+EPHEMERAL_MODE = os.getenv("ARTERIES_EPHEMERAL", "compile")
+PERSISTENT_READ = os.getenv("ARTERIES_PERSISTENT_READ", "relevance")
+RELEVANCE_THRESHOLD = float(os.getenv("ARTERIES_RELEVANCE_THRESHOLD", "0.3"))
