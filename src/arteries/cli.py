@@ -10,7 +10,7 @@ from arteries import doctor, evergreen, inspect, packet, runs, setup_cli, setup_
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace")
+COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "backfill-embeddings")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -56,9 +56,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         return packet.main(list(ns.args))
     if ns.command == "trace":
         return trace.main(ns.args)
+    if ns.command == "backfill-embeddings":
+        return _backfill_embeddings(ns.args)
 
     parser.error(f"unknown command: {ns.command}")
     return 2
+
+
+def _backfill_embeddings(args: Sequence[str]) -> int:
+    p = argparse.ArgumentParser(prog="art backfill-embeddings")
+    p.add_argument("--project", required=True)
+    p.add_argument("--batch", type=int, default=50)
+    ns = p.parse_args(args)
+
+    from arteries.embed import embed_text_sync
+    from arteries import storage
+
+    import psycopg2.extras
+    from arteries.config import DB_CONFIG
+
+    conn = psycopg2.connect(**DB_CONFIG)
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, fact FROM arteries.persistent
+            WHERE project_id = %s AND valid_until IS NULL AND embedding IS NULL
+            LIMIT %s
+            """,
+            (ns.project, ns.batch),
+        )
+        rows = cur.fetchall()
+
+    updated = 0
+    for r in rows:
+        vec = embed_text_sync(r["fact"])
+        if vec:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE arteries.persistent SET embedding = %s::vector WHERE id = %s",
+                    (vec, r["id"]),
+                )
+                conn.commit()
+            updated += 1
+    conn.close()
+    print(f"Backfilled {updated}/{len(rows)} persistent memories")
+    return 0
 
 
 if __name__ == "__main__":

@@ -209,6 +209,8 @@ Existing persistent memories:
 
 def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
     """Write compiled persistent records and mark ephemeral as cleared."""
+    from arteries.embed import embed_text_sync
+
     new_count = 0
     superseded_count = 0
 
@@ -219,6 +221,7 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
                 INSERT INTO arteries.persistent
                     (fact, domains, confidence, project_id, parent_ids)
                 VALUES (%s, %s::jsonb, %s, %s, %s::uuid[])
+                RETURNING id
                 """,
                 (
                     mem["fact"],
@@ -228,6 +231,13 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
                     claimed_ids,
                 ),
             )
+            row_id = cur.fetchone()[0]
+            vec = embed_text_sync(mem["fact"])
+            if vec:
+                cur.execute(
+                    "UPDATE arteries.persistent SET embedding = %s::vector WHERE id = %s",
+                    (vec, row_id),
+                )
             new_count += 1
 
         for sup in result.get("superseded", []):

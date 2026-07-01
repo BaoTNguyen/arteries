@@ -9,17 +9,17 @@ from arteries import packet
 
 class PacketTests(unittest.TestCase):
     def test_build_packet_includes_memory_tiers_and_rules(self):
-        with patch.object(packet.storage, "get_ephemeral", return_value=[{
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([{
             "id": "e1",
             "fact": "Recent user wants Pi first.",
             "domains": ["context"],
             "confidence": 0.8,
-        }]), patch.object(packet.storage, "get_persistent", return_value=[{
+        }], [{
             "id": "p1",
             "fact": "Project integrates coding CLIs through hooks.",
             "domains": ["technical"],
             "confidence": 0.9,
-        }]), patch.object(packet.storage, "get_evergreen", return_value=[{
+        }])), patch.object(packet.storage, "get_evergreen", return_value=[{
             "id": "g1",
             "fact": "Prefer scoped implementations.",
             "domains": ["preference"],
@@ -28,6 +28,7 @@ class PacketTests(unittest.TestCase):
             text = packet.build_packet("manual compact", budget=4000)
 
         self.assertIn("## Current Context", text)
+        self.assertIn("Capabilities:", text)
         self.assertIn("Recent user wants Pi first.", text)
         self.assertIn("Project integrates coding CLIs through hooks.", text)
         self.assertIn("Prefer scoped implementations.", text)
@@ -42,6 +43,7 @@ class PacketTests(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["summary"], "summary")
         self.assertEqual(payload["details"]["source"], "arteries")
+        self.assertIn("cli_capabilities", payload["details"])
 
 
 if __name__ == "__main__":

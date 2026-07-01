@@ -52,7 +52,7 @@ Capillaries owns:
 
 Arteries owns:
 
-- setup for Codex, Pi, and Claude Code
+- explicit setup adapters for Codex, Claude Code, Pi, OpenCode, Hermes, and Cursor
 - `.arteries/` runtime scripts inside target repos
 - ephemeral, persistent, and evergreen memory storage
 - `MemoryFrame` assembly
@@ -120,54 +120,59 @@ The wrapper sets `PYTHONPATH` for arteries and capillaries. It also remembers th
 
 ## Set up a project
 
-Go to the project you want the agent to work in, then run the setup command for the CLI you use there.
+Go to the project you want the agent to work in, then run the setup command for each CLI you use there. Setup is additive: installing Cursor later does not remove an existing Codex, Claude, Pi, OpenCode, or Hermes adapter.
 
-Codex:
+List supported adapters:
 
 ```bash
-cd /path/to/project
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup --list
+```
+
+Install one adapter:
+
+```bash
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add codex
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add claude
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add pi
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add opencode
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add cursor
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add hermes
+```
+
+The older shorthand still works:
+
+```bash
 bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex
 ```
 
-Pi:
+Verify or remove a single adapter at any time:
 
 ```bash
-cd /path/to/project
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup pi
-```
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup check cursor
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup remove cursor
 
-Claude Code:
-
-```bash
-cd /path/to/project
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup claude
+# Equivalent legacy flag style:
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup cursor --check
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup cursor --remove
 ```
 
 If capillaries is not a sibling of arteries, pass it explicitly:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex \
-  --capillaries-root /path/to/capillaries
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add codex   --capillaries-root /path/to/capillaries
 ```
 
-Use a stable project name when you want Codex, Pi, and Claude activity to land in the same trace:
+Use a stable project name when activity from multiple CLIs should land in the same trace:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex --project career-ops
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup pi --project career-ops
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add codex --project career-ops
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add cursor --project career-ops
 ```
 
-Verify setup:
+Smoke test the shared runtime:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex --check
 bash .arteries/smoke.sh "arteries setup test"
-```
-
-Remove it:
-
-```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex --remove
 ```
 
 ## What setup installs
@@ -199,8 +204,11 @@ PYTHONPATH
 Provider-specific files:
 
 - Codex: `.codex/config.toml`, `.arteries/codex/compact_prompt.txt`, and an `AGENTS.md` block.
-- Pi: `.pi/extensions/arteries.ts` for compaction replacement.
-- Claude Code: `.claude/settings.local.json` hooks for session start, prompt submit, pre-compact, and post-compact.
+- Claude Code: `.claude/settings.local.json` hooks for session start, prompt submit, pre-compact, post-compact, and subagent metadata.
+- Pi: `.pi/extensions/arteries.ts` for extension-based compaction replacement.
+- OpenCode: `.opencode/plugins/arteries.ts` for plugin events and compaction context injection.
+- Cursor: `.cursor/rules/arteries.mdc` and `.cursor/mcp.json` for explicit rule/MCP use.
+- Hermes: `HERMES.md` and `.hermes/mcp.json` as a conservative context-file/MCP adapter until a native hook schema is verified.
 
 Codex config detail: `experimental_compact_prompt_file` is top-level and points to `../.arteries/codex/compact_prompt.txt`, because Codex resolves relative project config paths from the `.codex/` folder.
 
@@ -228,11 +236,55 @@ Arteries stores memory in the `arteries` schema inside the shared `capillaries` 
 
 Ephemeral memory is per project and per agent process. It is high churn. It captures recent observations before compilation.
 
-Persistent memory is per project. It stores compiled project facts, preferences, and decisions.
+Persistent memory is per project. It stores compiled project facts, preferences, and decisions. Each persistent memory is embedded at compile time (via the embedding server at port 8003) and retrieved by vector similarity against the current message, so only relevant memories surface in the MemoryFrame.
 
 Evergreen memory is global. It stores cross-project facts you have explicitly imported or promoted.
 
 Recent retrievals are also stored, so the frame can tell capillaries which prompts have already surfaced.
+
+## Relevance-filtered retrieval
+
+Persistent memories are embedded at compile time using the same embedding server that capillaries uses (snowflake-arctic-embed-m-v2.0, 768-dim). At retrieval time, the current user message is embedded and matched against persistent memories via pgvector HNSW cosine search. Only memories above a similarity threshold are included in the MemoryFrame.
+
+This replaces the previous recency-based retrieval and naturally isolates subagents by task — a test-writing agent surfaces test-relevant memories, a code agent surfaces code-relevant memories, without needing scope labels.
+
+The threshold defaults to 0.3 and is configurable:
+
+```bash
+ARTERIES_RELEVANCE_THRESHOLD=0.5
+```
+
+If the embedding server is down or no persistent memories have embeddings yet, retrieval falls back to recency-based ordering.
+
+Backfill existing persistent memories:
+
+```bash
+art backfill-embeddings --project career-ops
+```
+
+## Subagent memory isolation
+
+Subagents can run with restricted memory modes via the `ARTERIES_MEMORY` env var:
+
+| Preset | Persistent read | Ephemeral mode | Use case |
+|--------|----------------|----------------|----------|
+| (unset) | relevance-filtered | compile | Normal agent |
+| `readonly` | relevance-filtered | discard | Reads memory, leaves no trace |
+| `clean` | none | discard | No memory in or out |
+
+```bash
+ARTERIES_MEMORY=readonly bash scripts/eval.sh "temporary analysis"
+ARTERIES_MEMORY=clean bash scripts/eval.sh "scratch work"
+```
+
+In discard mode, ephemeral extractions are kept in-process memory only — no DB writes. They're visible in the MemoryFrame during the agent's lifetime and vanish when the process exits.
+
+Individual env vars override presets:
+
+```bash
+ARTERIES_EPHEMERAL=discard    # compile (default) or discard
+ARTERIES_PERSISTENT_READ=none # relevance (default) or none
+```
 
 ## Trace data
 
@@ -388,6 +440,20 @@ Write accepted memories:
 ```bash
 bash scripts/art.sh evergreen import --review evergreen_review.md --write
 ```
+
+## Evergreen CRUD
+
+Manage evergreen memories directly:
+
+```bash
+art evergreen list
+art evergreen list --json
+art evergreen add "User prefers pytest" --domains "technical,testing" --confidence 0.9
+art evergreen edit <id-prefix> --fact "Updated fact" --domains "technical"
+art evergreen rm <id-prefix>
+```
+
+ID prefixes are matched uniquely — pass enough characters to be unambiguous.
 
 ## Testing
 
