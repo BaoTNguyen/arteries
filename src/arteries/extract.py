@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
+from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PROJECT_ID
 from arteries import storage
 
 # Reuse capillaries' domain taxonomy for consistency
@@ -108,9 +108,25 @@ def extract_from_message(message: str) -> list[Extraction]:
     return extractions
 
 
+_ephemeral_buffer: list[dict] = []
+
+
+def get_ephemeral_buffer() -> list[dict]:
+    return _ephemeral_buffer
+
+
 def extract_and_store(message: str) -> int:
     """Extract from message and insert into ephemeral storage. Returns count inserted."""
     extractions = extract_from_message(message)
+    if EPHEMERAL_MODE == "discard":
+        for ext in extractions:
+            _ephemeral_buffer.append({
+                "fact": ext.fact,
+                "domains": ext.domains,
+                "confidence": ext.confidence,
+                "status": "ephemeral-only",
+            })
+        return len(extractions)
     for ext in extractions:
         storage.insert_ephemeral(
             project_id=PROJECT_ID,

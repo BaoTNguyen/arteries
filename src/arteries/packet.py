@@ -9,7 +9,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import storage
+from arteries import memory_select, storage
+from arteries.cli_caps import get_capabilities
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 
 
@@ -33,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     event = _read_stdin_json() if args.stdin_json else {}
     message = args.message or _event_message(event)
     packet = build_packet(message=message, event=event, budget=args.budget)
+    capabilities = get_capabilities()
 
     if args.format == "pi-compaction-json":
         print(json.dumps({
@@ -42,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
                 "project": PROJECT_ID,
                 "agent_id": AGENT_PROCESS_ID,
                 "memory_tiers": ["ephemeral", "persistent", "evergreen"],
+                "cli_capabilities": capabilities.__dict__,
             },
         }))
     else:
@@ -51,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_packet(message: str = "", event: dict[str, Any] | None = None, budget: int = 6000) -> str:
     event = event or {}
-    memories = _load_memories()
+    memories = _load_memories(message)
     sections = [
         ("Current Context", _current_context(message, event)),
         ("Ephemeral Memory", _format_items(memories, "ephemeral")),
@@ -67,11 +70,12 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
     return _limit(text, budget)
 
 
-def _load_memories() -> list[MemoryItem]:
+def _load_memories(message: str) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
-        items.extend(_rows("ephemeral", storage.get_ephemeral(PROJECT_ID, AGENT_PROCESS_ID, limit=12)))
-        items.extend(_rows("persistent", storage.get_persistent(PROJECT_ID, limit=12)))
+        ephemerals, persistents = memory_select.select_for_frame(message)
+        items.extend(_rows("ephemeral", ephemerals[:12]))
+        items.extend(_rows("persistent", persistents[:12]))
         items.extend(_rows("evergreen", storage.get_evergreen(limit=12)))
     except Exception as exc:
         items.append(MemoryItem(
@@ -98,10 +102,15 @@ def _rows(tier: str, rows: list[dict[str, Any]]) -> list[MemoryItem]:
 
 
 def _current_context(message: str, event: dict[str, Any]) -> list[str]:
+    capabilities = get_capabilities()
     lines = [
         f"Project: {PROJECT_ID}",
         f"Agent: {AGENT_PROCESS_ID}",
-        f"CLI: {os.getenv('ARTERIES_CLI', 'unknown')}",
+        f"CLI: {capabilities.name}",
+        "Capabilities: " + ", ".join(
+            name for name, enabled in capabilities.__dict__.items()
+            if name != "name" and enabled
+        ),
     ]
     if message:
         lines.append(f"Trigger: {message}")

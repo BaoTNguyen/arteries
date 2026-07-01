@@ -81,20 +81,73 @@ def insert_ephemeral(
 def get_persistent(
     project_id: str,
     limit: int = 50,
+    scope: str | None = None,
+) -> list[dict[str, Any]]:
+    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        if scope:
+            cur.execute(
+                """
+                SELECT id, fact, domains, confidence, source_ts, scope
+                FROM arteries.persistent
+                WHERE project_id = %s
+                  AND valid_until IS NULL
+                  AND (scope IS NULL OR scope = %s)
+                ORDER BY source_ts DESC
+                LIMIT %s
+                """,
+                (project_id, scope, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, fact, domains, confidence, source_ts, scope
+                FROM arteries.persistent
+                WHERE project_id = %s
+                  AND valid_until IS NULL
+                ORDER BY source_ts DESC
+                LIMIT %s
+                """,
+                (project_id, limit),
+            )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def get_persistent_by_relevance(
+    project_id: str,
+    query_embedding: list[float],
+    limit: int = 20,
+    threshold: float = 0.3,
 ) -> list[dict[str, Any]]:
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, fact, domains, confidence, source_ts
+            SELECT id, fact, domains, confidence, source_ts,
+                   1 - (embedding <=> %s::vector) AS similarity
             FROM arteries.persistent
             WHERE project_id = %s
               AND valid_until IS NULL
-            ORDER BY source_ts DESC
+              AND embedding IS NOT NULL
+              AND 1 - (embedding <=> %s::vector) >= %s
+            ORDER BY embedding <=> %s::vector
             LIMIT %s
             """,
-            (project_id, limit),
+            (query_embedding, project_id, query_embedding, threshold, query_embedding, limit),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def has_embeddings(project_id: str) -> bool:
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM arteries.persistent
+                WHERE project_id = %s AND valid_until IS NULL AND embedding IS NOT NULL
+            )
+            """,
+            (project_id,),
+        )
+        return cur.fetchone()[0]
 
 
 def get_active_domains(project_id: str) -> list[str]:
@@ -158,6 +211,44 @@ def insert_evergreen(
         )
         conn.commit()
         return str(cur.fetchone()[0])
+
+
+def update_evergreen(
+    evergreen_id: str,
+    fact: str | None = None,
+    domains: list[str] | None = None,
+    confidence: float | None = None,
+) -> bool:
+    sets, params = [], []
+    if fact is not None:
+        sets.append("fact = %s")
+        params.append(fact)
+    if domains is not None:
+        sets.append("domains = %s::jsonb")
+        params.append(psycopg2.extras.Json(domains))
+    if confidence is not None:
+        sets.append("confidence = %s")
+        params.append(confidence)
+    if not sets:
+        return False
+    params.append(evergreen_id)
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE arteries.evergreen SET {', '.join(sets)} WHERE id = %s AND superseded_by IS NULL",
+            params,
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def remove_evergreen(evergreen_id: str) -> bool:
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM arteries.evergreen WHERE id = %s",
+            (evergreen_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def get_recurring_domains() -> list[str]:

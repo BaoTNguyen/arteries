@@ -22,6 +22,7 @@ import io
 import sys
 
 from arteries import runlog
+from arteries.config import EPHEMERAL_MODE
 from arteries.extract import extract_and_store
 from arteries.frame import get_current_frame
 from capillaries.agent.gate import gate as run_gate
@@ -68,7 +69,9 @@ async def evaluate(message: str) -> str | None:
         turn_id=turn_id,
     )
 
-    compile_task = asyncio.create_task(_compile_background())
+    compile_task = None
+    if EPHEMERAL_MODE != "discard":
+        compile_task = asyncio.create_task(_compile_background())
 
     prompt_text = None
     try:
@@ -119,10 +122,11 @@ async def evaluate(message: str) -> str | None:
                     )
                     prompt_text = result.prompt_text
 
-    try:
-        await asyncio.wait_for(asyncio.shield(compile_task), timeout=5.0)
-    except (asyncio.TimeoutError, Exception):
-        pass
+    if compile_task:
+        try:
+            await asyncio.wait_for(asyncio.shield(compile_task), timeout=5.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
 
     return prompt_text
 

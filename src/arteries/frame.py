@@ -17,7 +17,7 @@ from capillaries.agent.memory_types import (
 )
 
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
-from arteries import storage
+from arteries import memory_select, storage
 
 
 def get_current_frame(message: str) -> MemoryFrame:
@@ -28,8 +28,8 @@ def get_current_frame(message: str) -> MemoryFrame:
 
 
 def _build_frame(message: str) -> MemoryFrame:
-    ephemerals = storage.get_ephemeral(PROJECT_ID, AGENT_PROCESS_ID, limit=20)
-    persistents = storage.get_persistent(PROJECT_ID, limit=20)
+    ephemerals, persistents = memory_select.select_for_frame(message)
+
     evergreens = storage.get_evergreen(limit=20)
     retrievals = storage.get_recent_retrievals(PROJECT_ID, AGENT_PROCESS_ID, limit=10)
 

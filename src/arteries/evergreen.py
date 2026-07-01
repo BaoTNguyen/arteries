@@ -425,6 +425,24 @@ def main(argv: list[str] | None = None) -> int:
     import_parser.add_argument("--review", required=True, type=Path)
     import_parser.add_argument("--write", action="store_true")
 
+    list_parser = subparsers.add_parser("list", help="list active evergreen memories")
+    list_parser.add_argument("--limit", type=int, default=50)
+    list_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    add_parser = subparsers.add_parser("add", help="add an evergreen memory directly")
+    add_parser.add_argument("fact", nargs="+", help="the memory text")
+    add_parser.add_argument("--domains", default="", help="comma-separated domains")
+    add_parser.add_argument("--confidence", type=float, default=1.0)
+
+    edit_parser = subparsers.add_parser("edit", help="edit an existing evergreen memory")
+    edit_parser.add_argument("id", help="evergreen memory UUID (prefix match supported)")
+    edit_parser.add_argument("--fact", help="new fact text")
+    edit_parser.add_argument("--domains", help="new comma-separated domains")
+    edit_parser.add_argument("--confidence", type=float, help="new confidence")
+
+    rm_parser = subparsers.add_parser("rm", help="remove an evergreen memory")
+    rm_parser.add_argument("id", help="evergreen memory UUID (prefix match supported)")
+
     args = parser.parse_args(argv)
     if args.command == "extract":
         includes = args.include or DEFAULT_INCLUDE
@@ -445,7 +463,65 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("Run again with --write to insert accepted memories.")
         return 0
+    if args.command == "list":
+        rows = storage.get_evergreen(limit=args.limit)
+        if args.as_json:
+            print(json.dumps(rows, indent=2, default=str))
+        elif not rows:
+            print("No active evergreen memories.")
+        else:
+            for row in rows:
+                domains = ", ".join(row.get("domains") or [])
+                eid = str(row["id"])[:8]
+                print(f"  {eid}  [{domains}]  {row['fact']}")
+        return 0
+    if args.command == "add":
+        fact = " ".join(args.fact)
+        domains = [d.strip() for d in args.domains.split(",") if d.strip()] if args.domains else _infer_domains(fact)
+        eid = storage.insert_evergreen(
+            fact=fact,
+            domains=domains,
+            confidence=args.confidence,
+            source_meta={"source_type": "user_direct"},
+        )
+        print(f"Added: {eid[:8]}  {fact}")
+        return 0
+    if args.command == "edit":
+        resolved = _resolve_id(args.id)
+        if not resolved:
+            return 1
+        domains = [d.strip() for d in args.domains.split(",") if d.strip()] if args.domains else None
+        ok = storage.update_evergreen(resolved, fact=args.fact, domains=domains, confidence=args.confidence)
+        if ok:
+            print(f"Updated: {resolved[:8]}")
+        else:
+            print(f"Not found or already superseded: {args.id}")
+            return 1
+        return 0
+    if args.command == "rm":
+        resolved = _resolve_id(args.id)
+        if not resolved:
+            return 1
+        ok = storage.remove_evergreen(resolved)
+        if ok:
+            print(f"Removed: {resolved[:8]}")
+        else:
+            print(f"Not found: {args.id}")
+            return 1
+        return 0
     return 2
+
+
+def _resolve_id(prefix: str) -> str | None:
+    rows = storage.get_evergreen(limit=1000)
+    matches = [str(r["id"]) for r in rows if str(r["id"]).startswith(prefix)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) == 0:
+        print(f"No evergreen memory matching: {prefix}")
+        return None
+    print(f"Ambiguous prefix '{prefix}', matches: {', '.join(m[:12] for m in matches)}")
+    return None
 
 
 if __name__ == "__main__":
