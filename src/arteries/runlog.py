@@ -17,6 +17,7 @@ import psycopg2
 import psycopg2.extras
 
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
+from arteries.spool import spool_emit
 
 RUN_ENV_KEYS = ("AGENT_RUN_ID", "ARTERIES_RUN_ID")
 
@@ -114,11 +115,22 @@ def log_event(
         "payload": payload or {},
         "created_at": _now_iso(),
     }
+    # stamp episode identity (set by heart per episode) so events join the ledger
+    for key, env_key in (("episode_id", "ARTERIES_EPISODE_ID"), ("task_id", "ARTERIES_TASK_ID")):
+        value = os.getenv(env_key)
+        if value:
+            event["payload"].setdefault(key, value)
+    store = "db"
     try:
         _write_db_run(run)
         _write_db_event(event)
     except Exception:
         _write_jsonl(run, event)
+        store = "jsonl"  # degradation signal: pulse health watches this
+    spool_emit(
+        source, event_type, turn_id=turn_id, store=store,
+        **{k: v for k, v in event["payload"].items() if k not in ("episode_id", "task_id")},
+    )
     return event
 
 

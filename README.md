@@ -203,12 +203,23 @@ PYTHONPATH
 
 Provider-specific files:
 
-- Codex: `.codex/config.toml`, `.arteries/codex/compact_prompt.txt`, and an `AGENTS.md` block.
-- Claude Code: `.claude/settings.local.json` hooks for session start, prompt submit, pre-compact, post-compact, and subagent metadata.
-- Pi: `.pi/extensions/arteries.ts` for extension-based compaction replacement.
-- OpenCode: `.opencode/plugins/arteries.ts` for plugin events and compaction context injection.
-- Cursor: `.cursor/rules/arteries.mdc` and `.cursor/mcp.json` for explicit rule/MCP use.
-- Hermes: `HERMES.md` and `.hermes/mcp.json` as a conservative context-file/MCP adapter until a native hook schema is verified.
+- Codex: `.codex/config.toml`, `.arteries/codex/compact_prompt.txt`, and an `AGENTS.md` block. Codex gets a PreCompact packet hook where hooks are available, plus the compact prompt override as a fallback. Assistant response memory uses transcript capture on prompt submit when available, or the generated assistant observe hook when the host exposes a response event.
+- Claude Code: `.claude/settings.local.json` hooks for session start, prompt submit, pre-compact, post-compact, and subagent metadata. Assistant response memory is captured from the transcript during prompt submit, so no separate Stop hook is needed.
+- Pi: `.pi/extensions/arteries.ts` for extension-based compaction replacement and assistant response observation.
+- OpenCode: `.opencode/plugins/arteries.ts` for plugin events, assistant response observation, and compaction context injection.
+- Cursor: `.cursor/rules/arteries.mdc` and `.cursor/mcp.json` for explicit rule/MCP use, manual assistant response observation, and manual compact packet fallback.
+- Hermes: `HERMES.md` and `.hermes/mcp.json` as a conservative context-file/MCP adapter until a native hook schema is verified. It includes manual assistant response observation and compact packet commands.
+
+Compaction support levels:
+
+| CLI | Support | Behavior |
+|-----|---------|----------|
+| Pi | Native replacement | Returns an Arteries packet as the compaction summary and observes assistant response events exposed by Pi. |
+| OpenCode | Native context injection | Adds the Arteries packet during `experimental.session.compacting` and records assistant response events from the plugin stream. |
+| Claude Code | Native prompt and compact hooks | Emits the packet on PreCompact/PostCompact hooks and records the previous assistant reply from the transcript during UserPromptSubmit. |
+| Codex | Hook plus compact prompt fallback | Runs a PreCompact packet hook where available, installs a compact prompt, and captures assistant replies from transcript-aware prompt hooks or explicit assistant observe events. |
+| Cursor | Manual/rule fallback | Rules tell the agent to run `assistant-observe.sh` for useful assistant replies and `compact-packet.sh` before summarizing long sessions. |
+| Hermes | Manual/context fallback | `HERMES.md` tells Hermes to run `assistant-observe.sh` for useful assistant replies and `compact-packet.sh` when context pressure appears. |
 
 Codex config detail: `experimental_compact_prompt_file` is top-level and points to `../.arteries/codex/compact_prompt.txt`, because Codex resolves relative project config paths from the `.codex/` folder.
 
@@ -228,7 +239,17 @@ On each observed user prompt, `arteries.eval`:
 6. prints the retrieved prompt text back to the CLI hook
 7. compiles ephemeral memories into persistent project memory in the background
 
-On compaction, arteries builds a continuity packet from ephemeral, persistent, and evergreen memory.
+On compaction, arteries builds a continuity packet with:
+
+- current project, agent, CLI, trigger, and capability context
+- the most recent 10 user/assistant exchanges when the CLI provides transcript data
+- recent user turns from Arteries run logs when assistant text is unavailable
+- ephemeral memory for short-lived project observations
+- relevance-filtered persistent project memory
+- evergreen global memory
+- use rules that keep the packet below current user, developer, system, and repo instructions
+
+Arteries never fabricates missing assistant answers. If a CLI only exposes user prompts, the packet marks assistant text as not captured.
 
 ## Memory tiers
 

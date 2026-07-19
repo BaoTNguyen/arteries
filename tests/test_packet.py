@@ -34,6 +34,69 @@ class PacketTests(unittest.TestCase):
         self.assertIn("Prefer scoped implementations.", text)
         self.assertIn("Treat this packet as continuity context", text)
 
+
+    def test_build_packet_includes_recent_pairs_from_event_and_caps_at_ten(self):
+        event = {
+            "messages": [
+                item
+                for idx in range(11)
+                for item in (
+                    {"role": "user", "content": f"question {idx}"},
+                    {"role": "assistant", "content": f"answer {idx}"},
+                )
+            ]
+        }
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.storage, "get_evergreen", return_value=[]):
+            text = packet.build_packet("auto compact", event=event, budget=8000)
+
+        self.assertIn("## Recent Conversation", text)
+        self.assertNotIn("question 0", text)
+        self.assertIn("question 1", text)
+        self.assertIn("answer 10", text)
+        self.assertEqual(text.count("Q: question"), 10)
+
+    def test_build_packet_uses_runlog_user_turns_without_fabricating_answers(self):
+        events = [{
+            "event_type": "turn.observed",
+            "turn_id": "turn-1",
+            "payload": {"message_preview": "user asked for setup"},
+            "created_at": "2026-01-01T00:00:00Z",
+        }]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.storage, "get_evergreen", return_value=[]), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("Q: user asked for setup", text)
+        self.assertIn("A: [not captured by this CLI]", text)
+
+    def test_build_packet_can_pair_assistant_events_from_runlog(self):
+        events = [
+            {
+                "event_type": "assistant.response",
+                "turn_id": "turn-1",
+                "payload": {"assistant_preview": "assistant answered"},
+                "created_at": "2026-01-01T00:00:01Z",
+            },
+            {
+                "event_type": "turn.observed",
+                "turn_id": "turn-1",
+                "payload": {"message_preview": "user asked"},
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.storage, "get_evergreen", return_value=[]), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("Q: user asked", text)
+        self.assertIn("A: assistant answered", text)
+
     def test_pi_json_format_wraps_summary(self):
         out = io.StringIO()
         with patch.object(packet, "build_packet", return_value="summary"):

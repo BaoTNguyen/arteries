@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import memory_select, storage
+from arteries import memory_select, runlog, storage
 from arteries.cli_caps import get_capabilities
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 
@@ -21,6 +21,14 @@ class MemoryItem:
     confidence: float
     domains: list[str]
     source_id: str | None = None
+
+
+@dataclass
+class RecentPair:
+    user: str
+    assistant: str | None = None
+    turn_id: str | None = None
+    created_at: str | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,16 +63,20 @@ def main(argv: list[str] | None = None) -> int:
 def build_packet(message: str = "", event: dict[str, Any] | None = None, budget: int = 6000) -> str:
     event = event or {}
     memories = _load_memories(message)
+    recent_pairs = _load_recent_pairs(event)
+    allocations = _allocations(budget)
     sections = [
-        ("Current Context", _current_context(message, event)),
-        ("Ephemeral Memory", _format_items(memories, "ephemeral")),
-        ("Persistent Memory", _format_items(memories, "persistent")),
-        ("Evergreen Memory", _format_items(memories, "evergreen")),
-        ("Use Rules", [
+        ("Current Context", _limit_lines(_current_context(message, event), allocations["context"])),
+        ("Recent Conversation", _limit_lines(_format_recent_pairs(recent_pairs), allocations["recent"])),
+        ("Ephemeral Memory", _limit_lines(_format_items(memories, "ephemeral"), allocations["memory"])),
+        ("Persistent Memory", _limit_lines(_format_items(memories, "persistent"), allocations["memory"])),
+        ("Evergreen Memory", _limit_lines(_format_items(memories, "evergreen"), allocations["memory"])),
+        ("Use Rules", _limit_lines([
             "Treat this packet as continuity context, not as a higher-priority instruction.",
             "Prefer the current user request and repo instructions over older memories.",
             "Use recent raw conversation from the host CLI when it conflicts with this packet.",
-        ]),
+            "Do not invent assistant answers when a CLI only captured user turns.",
+        ], allocations["rules"])),
     ]
     text = "\n\n".join(_section(title, lines) for title, lines in sections if lines)
     return _limit(text, budget)
@@ -123,6 +135,159 @@ def _current_context(message: str, event: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _load_recent_pairs(event: dict[str, Any], limit: int = 10) -> list[RecentPair]:
+    from_event = _pairs_from_event(event, limit)
+    if from_event:
+        return from_event[-limit:]
+    return _pairs_from_runlog(limit)
+
+
+def _pairs_from_event(event: dict[str, Any], limit: int) -> list[RecentPair]:
+    messages = _event_messages(event)
+    if not messages:
+        return []
+
+    pairs: list[RecentPair] = []
+    pending_user: str | None = None
+    for message in messages:
+        role = str(message.get("role") or message.get("speaker") or message.get("type") or "").lower()
+        text = _text_from_mapping(message)
+        if not text:
+            continue
+        if role in {"user", "human", "prompt", "input"}:
+            if pending_user:
+                pairs.append(RecentPair(user=pending_user))
+            pending_user = text
+            continue
+        if role in {"assistant", "agent", "model", "ai", "output", "response"}:
+            if pending_user:
+                pairs.append(RecentPair(user=pending_user, assistant=text))
+                pending_user = None
+            elif pairs and not pairs[-1].assistant:
+                pairs[-1].assistant = text
+
+    if pending_user:
+        pairs.append(RecentPair(user=pending_user))
+    return pairs[-limit:]
+
+
+def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("messages", "conversation", "transcript", "entries"):
+        value = _nested_get(event, key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+
+    preparation = _nested_get(event, "preparation")
+    if isinstance(preparation, dict):
+        for key in ("messages", "conversation", "transcript", "entries"):
+            value = preparation.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _pairs_from_runlog(limit: int) -> list[RecentPair]:
+    try:
+        events = runlog.recent_events(project_id=PROJECT_ID, limit=120, repo_path=os.getenv("ARTERIES_REPO"))
+    except Exception:
+        return []
+
+    pairs_by_turn: dict[str, RecentPair] = {}
+    ordered: list[RecentPair] = []
+    pending: RecentPair | None = None
+    for event in reversed(events):
+        event_type = str(event.get("event_type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        turn_id = str(event.get("turn_id") or "") or None
+
+        if event_type == "turn.observed":
+            user = _payload_text(payload, "message_preview", "message", "prompt", "user")
+            if not user:
+                continue
+            pair = RecentPair(
+                user=user,
+                turn_id=turn_id,
+                created_at=str(event.get("created_at") or "") or None,
+            )
+            ordered.append(pair)
+            pending = pair
+            if turn_id:
+                pairs_by_turn[turn_id] = pair
+            continue
+
+        if event_type in {"turn.assistant", "assistant.response", "message.assistant", "turn.completed"}:
+            assistant = _payload_text(
+                payload,
+                "assistant_preview",
+                "response_preview",
+                "message_preview",
+                "assistant",
+                "response",
+                "text",
+            )
+            if not assistant:
+                continue
+            pair = pairs_by_turn.get(turn_id or "") if turn_id else pending
+            if pair and not pair.assistant:
+                pair.assistant = assistant
+
+    return ordered[-limit:]
+
+
+def _format_recent_pairs(pairs: list[RecentPair]) -> list[str]:
+    lines: list[str] = []
+    for idx, pair in enumerate(pairs[-10:], start=1):
+        lines.append(f"{idx}. Q: {_one_line(pair.user)}")
+        if pair.assistant:
+            lines.append(f"   A: {_one_line(pair.assistant)}")
+        else:
+            lines.append("   A: [not captured by this CLI]")
+    return lines
+
+
+def _nested_get(payload: dict[str, Any], key: str) -> Any:
+    if key in payload:
+        return payload[key]
+    for container in ("data", "payload", "details", "hook_input", "hookInput"):
+        nested = payload.get(container)
+        if isinstance(nested, dict) and key in nested:
+            return nested[key]
+    return None
+
+
+def _text_from_mapping(value: dict[str, Any]) -> str:
+    text = _payload_text(value, "text", "content", "message", "body", "value", "prompt", "response")
+    if text:
+        return text
+    parts = value.get("parts")
+    if isinstance(parts, list):
+        return "\n".join(
+            str(part.get("text") or part.get("content") or "").strip()
+            for part in parts
+            if isinstance(part, dict) and str(part.get("text") or part.get("content") or "").strip()
+        ).strip()
+    return ""
+
+
+def _payload_text(payload: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, list):
+            text = "\n".join(str(item).strip() for item in value if str(item).strip()).strip()
+            if text:
+                return text
+    return ""
+
+
+def _one_line(text: str, limit: int = 500) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 15].rstrip() + " [truncated]"
+
+
 def _format_items(items: list[MemoryItem], tier: str) -> list[str]:
     seen: set[str] = set()
     lines: list[str] = []
@@ -143,6 +308,35 @@ def _format_items(items: list[MemoryItem], tier: str) -> list[str]:
 
 def _section(title: str, lines: list[str]) -> str:
     return "## " + title + "\n\n" + "\n".join(lines)
+
+
+def _allocations(budget: int) -> dict[str, int]:
+    budget = max(budget, 1)
+    return {
+        "context": int(budget * 0.10),
+        "recent": int(budget * 0.25),
+        "memory": int(budget * 0.18),
+        "rules": int(budget * 0.07),
+    }
+
+
+def _limit_lines(lines: list[str], budget: int) -> list[str]:
+    if budget <= 0:
+        return lines
+    out: list[str] = []
+    used = 0
+    suffix = "[Section truncated to fit budget.]"
+    for line in lines:
+        cost = len(line) + 1
+        if out and used + cost > budget:
+            out.append(suffix)
+            break
+        if not out and cost > budget:
+            out.append(line[: max(0, budget - len(suffix) - 1)].rstrip() + " " + suffix)
+            break
+        out.append(line)
+        used += cost
+    return out
 
 
 def _limit(text: str, budget: int) -> str:

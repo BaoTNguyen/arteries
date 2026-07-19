@@ -2,12 +2,12 @@
 MemoryFrame assembly from live storage.
 
 Reads from arteries' three tiers and the retrieval log, builds the
-MemoryFrame that capillaries consumes. This is the integration seam.
+MemoryFrame. When capillaries is installed, it consumes these directly.
 """
 
 from __future__ import annotations
 
-from capillaries.agent.memory_types import (
+from arteries.memory_types import (
     CachedRetrieval,
     EphemeralMemory,
     EvergreenMemory,
