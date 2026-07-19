@@ -19,11 +19,11 @@ HERMES_MARKER_END = "<!-- arteries:hermes:end -->"
 PROVIDERS = ("pi", "codex", "claude", "opencode", "hermes", "cursor")
 PROVIDER_LEVELS = {
     "pi": "native extension: prompt/context hooks and compaction replacement",
-    "codex": "native hooks plus AGENTS.md context",
-    "claude": "native hooks",
+    "codex": "native hooks, AGENTS.md context, and compact prompt override",
+    "claude": "native hooks with prompt-time transcript assistant memory and compaction packet capture",
     "opencode": "native plugin with compaction context injection",
-    "hermes": "generic MCP/context-file adapter",
-    "cursor": "MCP plus Cursor rules adapter",
+    "hermes": "generic MCP/context-file adapter with manual compact packet fallback",
+    "cursor": "MCP plus Cursor rules adapter with manual compact packet fallback",
 }
 
 
@@ -168,20 +168,13 @@ fi
 set -euo pipefail
 
 {env}
-script_dir="$(cd "$(dirname "$0")" && pwd)"
 if [[ -t 0 ]]; then
   event_json="{{}}"
 else
   event_json="$(cat)"
 fi
 
-eval "$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli "$ARTERIES_CLI" --event UserPromptSubmit --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --format shell)"
-if [[ $# -gt 0 ]]; then
-  prompt="$*"
-else
-  prompt="$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli "$ARTERIES_CLI" --event UserPromptSubmit --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --field message)"
-fi
-bash "$script_dir/observe.sh" "$prompt"
+printf '%s' "$event_json" | python3 -m arteries.hook_observe --cli "$ARTERIES_CLI" --event UserPromptSubmit --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" "$@"
 '''
     hook_event = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -196,6 +189,31 @@ message="${{1:-event}}"
 eval "$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli "$ARTERIES_CLI" --event "$message" --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --format shell)"
 python3 -m arteries.runs start --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --cli "$ARTERIES_CLI" --repo "$ARTERIES_REPO" >/dev/null 2>&1 || true
 '''
+    assistant_observe = f'''#!/usr/bin/env bash
+set -euo pipefail
+
+{env}
+if [[ $# -gt 0 ]]; then
+  response="$*"
+else
+  response="$(cat)"
+fi
+
+python3 -m arteries.assistant "$response"
+'''
+    hook_assistant = f'''#!/usr/bin/env bash
+set -euo pipefail
+
+{env}
+if [[ -t 0 ]]; then
+  event_json="{{}}"
+else
+  event_json="$(cat)"
+fi
+message="${{1:-assistant_response}}"
+printf '%s' "$event_json" | python3 -m arteries.assistant --stdin-json --cli "$ARTERIES_CLI" --event "$message" --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID"
+'''
+
     activate = f'''#!/usr/bin/env bash
 set -euo pipefail
 
@@ -268,6 +286,8 @@ bash "$script_dir/hooks/activate.sh"
         hooks / "generic-observe.sh": generic,
         hooks / "hook-observe.sh": hook_observe,
         hooks / "hook-event.sh": hook_event,
+        hooks / "assistant-observe.sh": assistant_observe,
+        hooks / "hook-assistant-observe.sh": hook_assistant,
         hooks / "activate.sh": activate,
         hooks / "compact-packet.sh": compact,
         hooks / "hook-compact-packet.sh": hook_compact,
@@ -277,6 +297,115 @@ bash "$script_dir/hooks/activate.sh"
     for path, body in files.items():
         path.write_text(body, encoding="utf-8")
         path.chmod(0o755)
+
+    _install_js_hooks(ctx)
+
+def _install_js_hooks(ctx: Context) -> None:
+    hooks = _arteries_dir(ctx) / "hooks"
+    activate_js = hooks / "arteries-activate.js"
+    observe_js = hooks / "arteries-observe.js"
+
+    activate_js.write_text(f'''#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+
+const isCopilot = Boolean(process.env.COPILOT_PLUGIN_DATA);
+const isCodex = !isCopilot && Boolean(process.env.PLUGIN_DATA);
+
+const context = `ARTERIES MEMORY SYSTEM ACTIVE.
+
+This repo is connected to arteries project \\`{ctx.project_name}\\`.
+Arteries observes turns, builds ephemeral/persistent/evergreen memory, and may surface retrieved prompts as visible context.`;
+
+function writeOutput(output) {{
+  if (isCopilot) {{
+    process.stdout.write(JSON.stringify(output ? {{ additionalContext: output }} : {{}}));
+    return;
+  }}
+  if (isCodex) {{
+    process.stdout.write(JSON.stringify({{
+      systemMessage: 'ARTERIES:ACTIVE',
+      hookSpecificOutput: {{ hookEventName: 'SessionStart', additionalContext: output }},
+    }}));
+    return;
+  }}
+  process.stdout.write(output);
+}}
+
+try {{ writeOutput(context); }} catch (e) {{}}
+''', encoding="utf-8")
+    activate_js.chmod(0o755)
+
+    observe_js.write_text('''#!/usr/bin/env node
+const fs = require('fs');
+const { execFileSync } = require('child_process');
+const path = require('path');
+
+const isCopilot = Boolean(process.env.COPILOT_PLUGIN_DATA);
+const isCodex = !isCopilot && Boolean(process.env.PLUGIN_DATA);
+
+function writeOutput(output) {
+  if (isCopilot) {
+    process.stdout.write(JSON.stringify(output ? { additionalContext: output } : {}));
+    return;
+  }
+  if (isCodex) {
+    process.stdout.write(JSON.stringify({
+      systemMessage: 'ARTERIES:RETRIEVAL',
+      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: output },
+    }));
+    return;
+  }
+  process.stdout.write(output || '');
+}
+
+function loadConfig() {
+  try {
+    const configPath = path.join(__dirname, '..', 'config.json');
+    return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch (e) { return {}; }
+}
+
+let input = '';
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  try {
+    const data = JSON.parse(input.replace(/^\\xef\\xbb\\xbf/, ''));
+    const prompt = (data.prompt || '').trim();
+    if (!prompt) { writeOutput(''); return; }
+
+    const config = loadConfig();
+    const arteriesRoot = config.arteries_root || process.env.ARTERIES_ROOT || process.cwd();
+    const capRoot = config.capillaries_root || process.env.CAPILLARIES_ROOT;
+
+    const env = { ...process.env };
+    env.ARTERIES_CLI = env.ARTERIES_CLI || 'codex';
+    env.ARTERIES_EVENT = env.ARTERIES_EVENT || 'UserPromptSubmit';
+    const srcPath = path.join(arteriesRoot, 'src');
+    let pypath = srcPath;
+    if (capRoot) {
+      const capSrc = path.join(capRoot, 'src');
+      if (fs.existsSync(capSrc)) pypath = `${srcPath}:${capSrc}`;
+    }
+    env.PYTHONPATH = env.PYTHONPATH ? `${pypath}:${env.PYTHONPATH}` : pypath;
+
+    const transcriptPath = data.transcript_path || data.transcriptPath || data.transcript_file || data.transcriptFile || data.session_file || data.sessionFile;
+    if (transcriptPath) env.ARTERIES_TRANSCRIPT = transcriptPath;
+
+    const result = execFileSync('python3', ['-m', 'arteries.eval', prompt], {
+      timeout: 5000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env,
+    }).trim();
+
+    if (result) {
+      writeOutput('ARTERIES RETRIEVED PROMPT — use this to guide your response:\\n\\n' + result);
+    } else {
+      writeOutput('');
+    }
+  } catch (e) { writeOutput(''); }
+});
+''', encoding="utf-8")
+    observe_js.chmod(0o755)
+
 
 def _remove_runtime(ctx: Context) -> None:
     path = _arteries_dir(ctx)
@@ -292,10 +421,14 @@ def _runtime_ok(ctx: Context) -> bool:
         "hooks/generic-observe.sh",
         "hooks/hook-observe.sh",
         "hooks/hook-event.sh",
+        "hooks/assistant-observe.sh",
+        "hooks/hook-assistant-observe.sh",
         "hooks/activate.sh",
         "hooks/compact-packet.sh",
         "hooks/hook-compact-packet.sh",
         "hooks/pi-compact-json.sh",
+        "hooks/arteries-activate.js",
+        "hooks/arteries-observe.js",
         "smoke.sh",
     ])
 
@@ -437,11 +570,12 @@ def _codex_agents_section() -> str:
     return f'''{MARKER_START}
 ## Arteries Memory
 
-At session start, run `ARTERIES_CLI=codex bash .arteries/hooks/activate.sh` to start a new arteries run and load context.
-On each user prompt, run `ARTERIES_CLI=codex bash .arteries/hooks/generic-observe.sh "<prompt>"` and use any returned text as additional context.
-When context pressure or compaction happens, run `ARTERIES_CLI=codex bash .arteries/hooks/compact-packet.sh codex-compact` and preserve the packet as continuity context.
+At session start, run `PLUGIN_DATA=1 node .arteries/hooks/arteries-activate.js` and include the output as session context.
+On each user prompt, pipe the prompt JSON to `PLUGIN_DATA=1 node .arteries/hooks/arteries-observe.js` and use any returned `additionalContext` to guide your response.
+When compacting, run `ARTERIES_CLI=codex bash .arteries/hooks/hook-compact-packet.sh codex-compact` and preserve the returned continuity packet.
+When an assistant response is available from a hook or transcript event, pipe that event to `ARTERIES_CLI=codex bash .arteries/hooks/hook-assistant-observe.sh codex-assistant` so Arteries can extract assistant-discovered project memory.
 
-Arteries observes turns, builds memory, may surface retrieved prompts, and produces compact continuity packets.
+Arteries observes turns and assistant responses, builds memory, may surface retrieved prompts, and produces compact continuity packets as additional context.
 {MARKER_END}'''
 
 
@@ -452,8 +586,15 @@ matcher = "startup|resume|clear|compact"
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "ARTERIES_CLI=codex bash .arteries/hooks/activate.sh"
+command = "PLUGIN_DATA=1 node .arteries/hooks/arteries-activate.js"
 statusMessage = "Activating arteries memory"
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "PLUGIN_DATA=1 node .arteries/hooks/arteries-observe.js"
+statusMessage = "arteries"
 
 [[hooks.PreCompact]]
 matcher = "manual|auto"
@@ -462,14 +603,6 @@ matcher = "manual|auto"
 type = "command"
 command = "ARTERIES_CLI=codex bash .arteries/hooks/hook-compact-packet.sh codex-precompact"
 statusMessage = "Building arteries continuity packet"
-
-[[hooks.PostCompact]]
-matcher = "manual|auto"
-
-[[hooks.PostCompact.hooks]]
-type = "command"
-command = "ARTERIES_CLI=codex bash .arteries/hooks/hook-compact-packet.sh codex-postcompact"
-statusMessage = "Recording arteries compact continuity"
 
 [[hooks.SubagentStart]]
 matcher = "*"
@@ -492,14 +625,18 @@ statusMessage = "Recording arteries subagent metadata"
 def _codex_compact_prompt() -> str:
     return """When compacting this coding session, preserve continuity for Arteries.
 
+Prefer any Arteries continuity packet produced by `.arteries/hooks/hook-compact-packet.sh`. It already organizes continuity into current context, the most recent 10 Q/A pairs, ephemeral memory, persistent project memory, evergreen memory, and use rules.
+
 Include:
 - current user intent and unresolved task state
+- the most recent 10 user/assistant exchanges when available
+- relevant ephemeral and persistent project memories
+- evergreen cross-project memories
 - recent decisions and constraints
 - files read, files modified, commands run, and validation status
 - blockers, open questions, and next steps
-- any Arteries continuity packet already present
 
-Do not let older memory override explicit current user instructions, developer instructions, system instructions, or repo instructions. Keep the result concise and operational.
+Do not let older memory override explicit current user instructions, developer instructions, system instructions, or repo instructions. Do not invent missing assistant answers. Keep the result concise and operational.
 """
 
 
@@ -551,7 +688,30 @@ def _pi_extension() -> str:
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 
+function assistantMessage(event: any): string {
+  const msg = event?.message ?? event?.response ?? event?.assistant ?? event?.data?.message;
+  const role = msg?.role ?? event?.role ?? event?.data?.role;
+  if (typeof msg === "string") {
+    return role === "assistant" || event?.type === "assistant_response" ? msg : "";
+  }
+  if (role && role !== "assistant") return "";
+  const text = msg?.text ?? msg?.content ?? event?.text ?? event?.content;
+  return typeof text === "string" ? text.trim() : "";
+}
+
+function observeAssistant(event: any) {
+  if (!assistantMessage(event)) return;
+  execFileSync("bash", [".arteries/hooks/hook-assistant-observe.sh", "pi-assistant"], {
+    input: JSON.stringify(event),
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+  });
+}
+
 export default function arteries(pi: ExtensionAPI) {
+  pi.on("message_updated", async (event) => observeAssistant(event));
+  pi.on("assistant_response", async (event) => observeAssistant(event));
+
   pi.on("session_before_compact", async (event) => {
     const result = execFileSync("bash", [".arteries/hooks/pi-compact-json.sh"], {
       input: JSON.stringify(event),
@@ -661,6 +821,15 @@ function userMessage(event: any): string {
   return typeof text === "string" ? text.trim() : "";
 }
 
+function assistantMessage(event: any): string {
+  const msg = event?.message ?? event?.properties?.message ?? event?.data?.message ?? event?.response;
+  if (typeof msg === "string") return event?.role === "assistant" ? msg : "";
+  const role = msg?.role ?? event?.role ?? event?.properties?.role ?? event?.data?.role;
+  if (role && role !== "assistant") return "";
+  const text = msg?.text ?? msg?.content ?? msg?.parts?.map((p: any) => p?.text ?? "").join("\n");
+  return typeof text === "string" ? text.trim() : "";
+}
+
 export const ArteriesPlugin = async () => ({
   "shell.env": async (_input: any, output: any) => {
     output.env.ARTERIES_CLI = output.env.ARTERIES_CLI ?? "opencode";
@@ -674,6 +843,9 @@ export const ArteriesPlugin = async () => ({
     const message = userMessage(event);
     if (message) {
       runArteries([".arteries/hooks/hook-observe.sh", message], event);
+    }
+    if (assistantMessage(event)) {
+      runArteries([".arteries/hooks/hook-assistant-observe.sh", "opencode-assistant"], event);
     }
   },
 
@@ -736,7 +908,13 @@ When a user prompt starts work that would benefit from memory or a reusable prom
 ARTERIES_CLI=cursor bash .arteries/hooks/generic-observe.sh "<user prompt>"
 ```
 
-Use any returned Arteries prompt as ordinary context, below system/developer/user instructions. For long sessions or before summarizing context, run:
+Use any returned Arteries prompt as ordinary context, below system/developer/user instructions. When an assistant response includes project facts, decisions, or root-cause findings, run:
+
+```bash
+ARTERIES_CLI=cursor bash .arteries/hooks/assistant-observe.sh "<assistant response>"
+```
+
+For long sessions or before summarizing context, run:
 
 ```bash
 ARTERIES_CLI=cursor bash .arteries/hooks/compact-packet.sh cursor-compact
@@ -797,6 +975,7 @@ This project has an explicit Hermes adapter installed. Use these commands when H
 ```bash
 ARTERIES_CLI=hermes bash .arteries/hooks/activate.sh
 ARTERIES_CLI=hermes bash .arteries/hooks/generic-observe.sh "<user prompt>"
+ARTERIES_CLI=hermes bash .arteries/hooks/assistant-observe.sh "<assistant response>"
 ARTERIES_CLI=hermes bash .arteries/hooks/compact-packet.sh hermes-compact
 ```
 

@@ -32,13 +32,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default=os.getenv("ARTERIES_PROJECT", "default"))
     parser.add_argument("--agent", default=os.getenv("ARTERIES_AGENT_ID"))
     parser.add_argument("--format", choices=("json", "shell"), default="json")
-    parser.add_argument("--field", choices=("message",), help="print a single normalized field")
+    parser.add_argument("--field", choices=("message", "transcript"), help="print a single normalized field")
     args = parser.parse_args(argv)
 
     raw = _read_payload()
     normalized = normalize(raw, cli=args.cli, fallback_event=args.event, project_id=args.project, agent_id=args.agent)
     if args.field == "message":
         print(_message(raw))
+        return 0
+    if args.field == "transcript":
+        print(_transcript(raw))
         return 0
     if args.format == "shell":
         print(_shell_exports(normalized))
@@ -97,6 +100,18 @@ def _message(payload: dict[str, Any]) -> str:
     ) or ""
 
 
+def _transcript(payload: dict[str, Any]) -> str:
+    return _first_text(
+        payload,
+        "transcript_path",
+        "transcriptPath",
+        "transcript_file",
+        "transcriptFile",
+        "session_file",
+        "sessionFile",
+    ) or ""
+
+
 def _read_payload() -> dict[str, Any]:
     raw = sys.stdin.read().strip()
     if not raw:
@@ -132,6 +147,10 @@ def _canonical_event(name: str | None) -> str:
         "tui_prompt_append": "prompt",
         "tui.prompt.append": "prompt",
         "before_agent_start": "prompt",
+        "assistantresponse": "assistant_response",
+        "assistant_response": "assistant_response",
+        "agent_response": "assistant_response",
+        "stop": "assistant_response",
         "sessionstart": "session_start",
         "session_start": "session_start",
         "session_created": "session_start",

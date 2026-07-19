@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, evergreen, inspect, packet, runs, setup_cli, setup_db, trace
+from arteries import doctor, evergreen, inspect, packet, remember, runs, setup_cli, setup_db, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "backfill-embeddings")
+COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -56,11 +56,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         return packet.main(list(ns.args))
     if ns.command == "trace":
         return trace.main(ns.args)
+    if ns.command == "decisions":
+        return _decisions(ns.args)
+    if ns.command == "ingest":
+        return _ingest(ns.args)
     if ns.command == "backfill-embeddings":
         return _backfill_embeddings(ns.args)
+    if ns.command == "remember":
+        return remember.main(ns.args)
 
     parser.error(f"unknown command: {ns.command}")
     return 2
+
+
+def _decisions(args: Sequence[str]) -> int:
+    p = argparse.ArgumentParser(prog="art decisions", description="Inspect the decision ledger.")
+    p.add_argument("--project", default=None)
+    p.add_argument("--episode", default=None, help="filter by episode id")
+    p.add_argument("--limit", type=int, default=25)
+    p.add_argument("--json", action="store_true")
+    ns = p.parse_args(args)
+
+    import json as _json
+
+    from arteries import actionlog
+
+    rows = actionlog.recent_decisions(project_id=ns.project, episode=ns.episode, limit=ns.limit)
+    if ns.json:
+        print(_json.dumps(rows, indent=2, default=str))
+        return 0
+    if not rows:
+        print("no decisions recorded")
+        return 0
+    for r in rows:
+        created = str(r.get("created_at", ""))[:19]
+        ep = r.get("episode_id") or "-"
+        print(f"{created}  {r['decision_type']:<22} {r['chosen_action']:<26} ep={ep}")
+    return 0
+
+
+def _ingest(args: Sequence[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="art ingest",
+        description="Backfill episode rewards from heart runs dir or episodes.jsonl.",
+    )
+    p.add_argument("path", help="heart runs directory or episodes.jsonl export")
+    ns = p.parse_args(args)
+
+    from arteries import actionlog
+
+    n = actionlog.ingest_heart_episodes(ns.path)
+    print(f"ingested {n} episode rewards")
+    return 0
 
 
 def _backfill_embeddings(args: Sequence[str]) -> int:

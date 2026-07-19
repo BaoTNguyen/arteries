@@ -9,6 +9,7 @@
 // The heavy lifting (memory extraction, MemoryFrame population) runs
 // in the arteries Python process. This hook is the bridge.
 
+const fs = require('fs');
 const { execFileSync } = require('child_process');
 const path = require('path');
 
@@ -53,8 +54,15 @@ process.stdin.on('end', () => {
     // retrieval needed.
     const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || process.cwd();
     const env = { ...process.env };
+    env.ARTERIES_CLI = env.ARTERIES_CLI || 'codex';
+    env.ARTERIES_EVENT = env.ARTERIES_EVENT || 'UserPromptSubmit';
     const srcPath = path.join(pluginRoot, 'src');
-    env.PYTHONPATH = env.PYTHONPATH ? `${srcPath}:${env.PYTHONPATH}` : srcPath;
+    const capSrc = process.env.CAPILLARIES_ROOT
+      ? path.join(process.env.CAPILLARIES_ROOT, 'src')
+      : path.join(pluginRoot, '..', 'capillaries', 'src');
+    // ponytail: capillaries path is best-effort; arteries works without it
+    const extra = fs.existsSync(capSrc) ? `${srcPath}:${capSrc}` : srcPath;
+    env.PYTHONPATH = env.PYTHONPATH ? `${extra}:${env.PYTHONPATH}` : extra;
 
     const result = execFileSync(
       'python3',

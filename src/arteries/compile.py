@@ -40,6 +40,19 @@ COMPILE_SYSTEM = """You are a memory compiler. You receive raw conversation extr
 4. Deduplicate — if an ephemeral record says the same thing as an existing persistent memory, skip it.
 5. Assign confidence 0.0-1.0 based on how certain the fact is (corrections and explicit statements = high, inferred context = lower).
 
+Records marked [SUBAGENT] came from an automated subagent, not directly from the user. Apply a higher bar:
+- Only keep subagent records that state verifiable facts about the codebase or project.
+- Discard subagent interpretations of user intent ("the user wants X") — only the user's own words count for intent.
+- Discard subagent reasoning narration and intermediate conclusions.
+- If a subagent record restates something already in persistent memory, skip it even if the wording differs.
+
+Records marked [ASSISTANT] are stripped LLM responses. Extract only:
+- Discovered facts about the codebase, environment, or dependencies.
+- Decisions with rationale (chose X over Y because Z).
+- Root cause diagnoses.
+- Constraints or limitations discovered during work.
+Discard everything else: narration, restatements of the user's request, code descriptions, and status updates.
+
 Respond with JSON only:
 {
   "new_memories": [
@@ -115,7 +128,11 @@ def _release_stale_claims(conn) -> int:
 
 
 def _claim_ephemeral(conn) -> list[dict]:
-    """Atomically claim uncompiled ephemeral records for this compilation pass."""
+    """Atomically claim uncompiled ephemeral records for this compilation pass.
+
+    Claims both the parent's own records AND any subagent records that
+    tagged this agent as their parent_agent_id.
+    """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
@@ -124,15 +141,15 @@ def _claim_ephemeral(conn) -> list[dict]:
             WHERE id IN (
                 SELECT id FROM arteries.ephemeral
                 WHERE project_id = %s
-                  AND agent_process_id = %s
+                  AND (agent_process_id = %s OR parent_agent_id = %s)
                   AND status = 'uncompiled'
                 ORDER BY source_ts ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, fact, domains, confidence, source_ts
+            RETURNING id, fact, domains, confidence, source_ts, parent_agent_id, source
             """,
-            (PROJECT_ID, AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
+            (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
         )
         conn.commit()
         return [dict(r) for r in cur.fetchall()]
@@ -171,10 +188,15 @@ async def _llm_compile(
     persistent: list[dict],
 ) -> dict:
     """Call the LLM to compile ephemeral records into persistent memories."""
-    eph_text = "\n".join(
-        f"[{i+1}] (conf={r['confidence']}, domains={r['domains']}) {r['fact']}"
-        for i, r in enumerate(ephemeral)
-    )
+    def _eph_line(i: int, r: dict) -> str:
+        tag = ""
+        if r.get("parent_agent_id"):
+            tag = "[SUBAGENT] "
+        elif r.get("source") == "assistant":
+            tag = "[ASSISTANT] "
+        return f"[{i+1}] {tag}(conf={r['confidence']}, domains={r['domains']}) {r['fact']}"
+
+    eph_text = "\n".join(_eph_line(i, r) for i, r in enumerate(ephemeral))
 
     per_text = "None yet." if not persistent else "\n".join(
         f"[{r['id']}] (domains={r['domains']}) {r['fact']}"

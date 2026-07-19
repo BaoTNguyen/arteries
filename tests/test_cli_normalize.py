@@ -64,6 +64,37 @@ class CliNormalizeTests(unittest.TestCase):
         self.assertEqual(event.agent_id, "child")
         self.assertEqual(event.parent_agent_id, "parent")
 
+
+    def test_assistant_response_events_normalize_consistently(self):
+        event = normalize(
+            {"hookEventName": "AssistantResponse", "transcript_path": "/tmp/transcript.jsonl"},
+            cli="claude",
+            project_id="demo",
+            agent_id="demo-hook",
+        )
+
+        self.assertEqual(event.event, "assistant_response")
+        self.assertEqual(event.agent_role, "parent")
+        self.assertEqual(event.agent_id, "demo-hook")
+
+    def test_transcript_field_cli(self):
+        payload = json.dumps({"event": "UserPromptSubmit", "transcript_path": "/tmp/transcript.jsonl"})
+        transcript = subprocess.check_output(
+            [
+                sys.executable,
+                "-m",
+                "arteries.cli_normalize",
+                "--cli",
+                "claude",
+                "--field",
+                "transcript",
+            ],
+            input=payload,
+            text=True,
+        )
+
+        self.assertEqual(transcript.strip(), "/tmp/transcript.jsonl")
+
     def test_shell_exports_and_message_field_cli(self):
         payload = json.dumps({"event": "UserPromptSubmit", "prompt": "Build it"})
         shell = subprocess.check_output(
