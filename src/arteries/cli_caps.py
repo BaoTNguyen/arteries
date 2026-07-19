@@ -11,6 +11,7 @@ class CliCapabilities:
     name: str
     observes_subagents: bool = False
     observes_compaction: bool = False
+    observes_assistant: bool = False
     can_inject_context: bool = False
     can_replace_compaction: bool = False
     can_override_compact_prompt: bool = False
@@ -22,6 +23,7 @@ _CAPABILITIES = {
         name="pi",
         observes_subagents=True,
         observes_compaction=True,
+        observes_assistant=True,
         can_inject_context=True,
         can_replace_compaction=True,
     ),
@@ -29,18 +31,21 @@ _CAPABILITIES = {
         name="claude",
         observes_subagents=True,
         observes_compaction=True,
+        observes_assistant=True,
         can_inject_context=True,
     ),
     "claude-code": CliCapabilities(
         name="claude-code",
         observes_subagents=True,
         observes_compaction=True,
+        observes_assistant=True,
         can_inject_context=True,
     ),
     "codex": CliCapabilities(
         name="codex",
         observes_subagents=True,
         observes_compaction=True,
+        observes_assistant=True,
         can_inject_context=True,
         can_override_compact_prompt=True,
     ),
@@ -48,17 +53,20 @@ _CAPABILITIES = {
         name="opencode",
         observes_subagents=True,
         observes_compaction=True,
+        observes_assistant=True,
         can_inject_context=True,
         can_replace_compaction=True,
         can_override_compact_prompt=True,
     ),
     "cursor": CliCapabilities(
         name="cursor",
+        observes_assistant=True,
         can_inject_context=True,
     ),
     # Hermes is intentionally conservative until its hook/event model is known.
     "hermes": CliCapabilities(
         name="hermes",
+        observes_assistant=True,
         can_inject_context=True,
     ),
 }

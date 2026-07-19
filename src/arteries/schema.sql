@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS arteries.ephemeral (
     project_id      TEXT NOT NULL,
     agent_process_id TEXT NOT NULL,
     parent_agent_id  TEXT,
+    source          TEXT NOT NULL DEFAULT 'user',        -- user | assistant
     status          TEXT NOT NULL DEFAULT 'uncompiled',  -- uncompiled | compiling | cleared
     valid_from      TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_until     TIMESTAMPTZ
@@ -24,6 +25,8 @@ CREATE TABLE IF NOT EXISTS arteries.ephemeral (
 CREATE INDEX IF NOT EXISTS idx_eph_agent
     ON arteries.ephemeral (project_id, agent_process_id)
     WHERE status = 'uncompiled';
+
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'user';
 
 CREATE INDEX IF NOT EXISTS idx_eph_domains
     ON arteries.ephemeral USING gin (domains);
@@ -41,9 +44,12 @@ CREATE TABLE IF NOT EXISTS arteries.persistent (
     source_project_id TEXT,
     parent_ids      UUID[] DEFAULT '{}',   -- lineage: ephemeral records compiled from
     child_ids       UUID[] DEFAULT '{}',   -- lineage: evergreen records compiled into
+    scope           TEXT,             -- NULL = auto-compiled, 'user' = art remember
     valid_from      TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_until     TIMESTAMPTZ
 );
+
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS scope TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_per_project
     ON arteries.persistent (project_id)
@@ -133,3 +139,60 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_run_created
 
 CREATE INDEX IF NOT EXISTS idx_agent_events_type
     ON arteries.agent_events (event_type, created_at DESC);
+
+-- Decision/action ledger: events say what happened; decisions say what was
+-- available, what was chosen, and what it cost. episode ids are TEXT because
+-- heart generates its own (timestamp-hex) episode identifiers.
+
+CREATE TABLE IF NOT EXISTS arteries.episodes (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL,
+    agent_id        TEXT,
+    task_id         TEXT,
+    run_id          UUID,
+    status          TEXT NOT NULL DEFAULT 'running',
+    metadata        JSONB NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ended_at        TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS arteries.decisions (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    episode_id        TEXT,
+    run_id            UUID,
+    turn_id           TEXT,
+    project_id        TEXT NOT NULL,
+    agent_id          TEXT,
+    decision_type     TEXT NOT NULL,
+    observation       JSONB NOT NULL DEFAULT '{}',
+    available_actions JSONB NOT NULL DEFAULT '[]',
+    chosen_action     TEXT NOT NULL,
+    cost              JSONB NOT NULL DEFAULT '{}',
+    metadata          JSONB NOT NULL DEFAULT '{}',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS arteries.rewards (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    episode_id     TEXT,
+    decision_id    UUID,
+    run_id         UUID,
+    project_id     TEXT NOT NULL,
+    reward_type    TEXT NOT NULL,
+    value          REAL NOT NULL,
+    components     JSONB NOT NULL DEFAULT '{}',
+    source         TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_project_created
+    ON arteries.episodes (project_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_episode_created
+    ON arteries.decisions (episode_id, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_type_created
+    ON arteries.decisions (decision_type, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_rewards_episode_created
+    ON arteries.rewards (episode_id, created_at ASC);

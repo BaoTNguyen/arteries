@@ -20,11 +20,14 @@ EMBED_DIM = 768
 
 PROJECT_ID = os.getenv("ARTERIES_PROJECT", "default")
 AGENT_PROCESS_ID = os.getenv("ARTERIES_AGENT_ID", str(os.getpid()))
+PARENT_AGENT_ID = os.getenv("ARTERIES_PARENT_AGENT") or None
 
 # --- Memory isolation presets ---
+# subagent: writes ephemeral tagged with parent, compiled at higher bar
 _PRESETS = {
     "readonly": {"ARTERIES_PERSISTENT_READ": "relevance", "ARTERIES_EPHEMERAL": "discard"},
     "clean":    {"ARTERIES_PERSISTENT_READ": "none",      "ARTERIES_EPHEMERAL": "discard"},
+    "subagent": {"ARTERIES_PERSISTENT_READ": "relevance", "ARTERIES_EPHEMERAL": "compile"},
 }
 
 _preset = os.getenv("ARTERIES_MEMORY", "").lower()

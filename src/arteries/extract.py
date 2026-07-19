@@ -16,22 +16,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PROJECT_ID
+from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PARENT_AGENT_ID, PROJECT_ID
 from arteries import storage
 
-# Reuse capillaries' domain taxonomy for consistency
-DOMAIN_KEYWORDS: dict[str, list[str]] = {
-    "technical": ["code", "programming", "software", "api", "server", "database", "docker", "kubernetes", "devops", "infrastructure", "backend", "frontend", "web", "app", "algorithm", "system", "architecture", "python", "javascript", "java", "go", "rust", "sql", "linux", "git", "testing", "debugging", "refactor"],
-    "AI": ["ai", "machine learning", "ml", "model", "llm", "gpt", "embedding", "training", "inference", "prompt", "rag", "vector", "nlp", "neural", "deep learning", "transformer", "classification", "clustering"],
-    "business": ["business", "revenue", "growth", "market", "customer", "sales", "marketing", "strategy", "company", "enterprise", "roi", "kpi", "metric", "budget", "cost", "pricing"],
-    "strategy": ["strategy", "strategic", "roadmap", "vision", "goal", "objective", "planning", "competitive", "advantage", "positioning"],
-    "product": ["product", "feature", "user experience", "ux", "ui", "design", "requirement", "specification", "roadmap", "launch"],
-    "finance": ["finance", "financial", "investment", "budget", "cost", "revenue", "profit", "pricing", "valuation", "financial model", "forecast", "cash flow"],
-    "career": ["career", "job", "resume", "interview", "promotion", "salary", "skills", "professional", "development", "leadership"],
-    "learning": ["learn", "study", "education", "course", "training", "knowledge", "skill", "practice", "teach"],
-    "personal": ["personal", "life", "habit", "goal", "productivity", "health", "wellness", "organization"],
-    "writing": ["write", "writing", "content", "copy", "blog", "article", "documentation", "story", "narrative"],
-}
+# Capillaries owns the domain taxonomy; import it so the two ends of the
+# memory channel can't drift. inference.py is a light module (re + dataclasses).
+from capillaries.agent.inference import DOMAIN_KEYWORDS
 
 # Patterns that signal extractable facts
 PREFERENCE_PATTERNS = re.compile(
@@ -134,6 +124,7 @@ def extract_and_store(message: str) -> int:
             fact=ext.fact,
             domains=ext.domains,
             confidence=ext.confidence,
+            parent_agent_id=PARENT_AGENT_ID,
         )
     return len(extractions)
 
@@ -164,3 +155,65 @@ def _classify_sentence(sentence: str) -> tuple[str, float] | None:
     if CONTEXT_PATTERNS.search(sentence):
         return ("context", 0.7)
     return None
+
+
+# -- Assistant response → single ephemeral record for LLM compilation ---------
+
+_NARRATION = re.compile(
+    r"^(let me|i'll|i will|now i|here's|here is|looking at|checking|reading|updating|creating)\b",
+    re.IGNORECASE,
+)
+_CODE_FENCE = re.compile(r"^```")
+
+
+def strip_assistant_response(text: str) -> str:
+    """Remove code blocks, tool output, and narration. Returns substantive prose."""
+    lines = text.splitlines()
+    out: list[str] = []
+    in_fence = False
+    for line in lines:
+        if _CODE_FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _NARRATION.match(stripped):
+            continue
+        out.append(stripped)
+    return "\n".join(out)
+
+
+def store_assistant_response(text: str) -> int:
+    """Strip and store an assistant response as a single ephemeral record.
+
+    No pattern matching — the compilation LLM decides what's worth keeping.
+    Returns 1 if stored, 0 if stripped to nothing.
+    """
+    stripped = strip_assistant_response(text)
+    if len(stripped.split()) < MIN_EXTRACTABLE_WORDS:
+        return 0
+    # ponytail: cap at 1500 chars — longer responses are mostly code/narration anyway
+    stripped = stripped[:1500]
+    domains = _infer_domains(stripped.lower())
+    if EPHEMERAL_MODE == "discard":
+        _ephemeral_buffer.append({
+            "fact": stripped,
+            "domains": domains,
+            "confidence": 0.5,
+            "status": "ephemeral-only",
+            "source": "assistant",
+        })
+        return 1
+    storage.insert_ephemeral(
+        project_id=PROJECT_ID,
+        agent_process_id=AGENT_PROCESS_ID,
+        fact=stripped,
+        domains=domains,
+        confidence=0.5,
+        parent_agent_id=PARENT_AGENT_ID,
+        source="assistant",
+    )
+    return 1

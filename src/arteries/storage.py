@@ -52,14 +52,15 @@ def insert_ephemeral(
     confidence: float = 1.0,
     parent_agent_id: str | None = None,
     embedding: list[float] | None = None,
+    source: str = "user",
 ) -> str:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO arteries.ephemeral
                 (fact, embedding, domains, confidence, project_id,
-                 agent_process_id, parent_agent_id)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
+                 agent_process_id, parent_agent_id, source)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -70,6 +71,7 @@ def insert_ephemeral(
                 project_id,
                 agent_process_id,
                 parent_agent_id,
+                source,
             ),
         )
         conn.commit()
@@ -148,6 +150,74 @@ def has_embeddings(project_id: str) -> bool:
             (project_id,),
         )
         return cur.fetchone()[0]
+
+
+def insert_persistent(
+    project_id: str,
+    fact: str,
+    domains: list[str],
+    confidence: float = 1.0,
+    scope: str | None = None,
+    embedding: list[float] | None = None,
+) -> str:
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO arteries.persistent
+                (fact, embedding, domains, confidence, project_id, scope)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                fact,
+                embedding,
+                psycopg2.extras.Json(domains),
+                confidence,
+                project_id,
+                scope,
+            ),
+        )
+        conn.commit()
+        return str(cur.fetchone()[0])
+
+
+def update_persistent(
+    persistent_id: str,
+    project_id: str,
+    fact: str | None = None,
+    domains: list[str] | None = None,
+    confidence: float | None = None,
+) -> bool:
+    sets, params = [], []
+    if fact is not None:
+        sets.append("fact = %s")
+        params.append(fact)
+    if domains is not None:
+        sets.append("domains = %s::jsonb")
+        params.append(psycopg2.extras.Json(domains))
+    if confidence is not None:
+        sets.append("confidence = %s")
+        params.append(confidence)
+    if not sets:
+        return False
+    params.extend([persistent_id, project_id])
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE arteries.persistent SET {', '.join(sets)} WHERE id = %s AND project_id = %s AND valid_until IS NULL",
+            params,
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def remove_persistent(persistent_id: str, project_id: str) -> bool:
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE arteries.persistent SET valid_until = now() WHERE id = %s AND project_id = %s AND valid_until IS NULL",
+            (persistent_id, project_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def get_active_domains(project_id: str) -> list[str]:
