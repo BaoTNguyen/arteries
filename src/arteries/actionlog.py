@@ -84,6 +84,9 @@ def log_reward(
     decision_id: str | None = None,
     turn_id: str | None = None,
     repo_path: str | Path | None = None,
+    tokens_in: int | None = None,
+    tokens_out: int | None = None,
+    cost_usd: float | None = None,
 ) -> dict[str, Any]:
     run = _run(repo_path)
     record = {
@@ -96,6 +99,9 @@ def log_reward(
         "value": float(value),
         "components": components or {},
         "source": source,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": cost_usd,
         "created_at": _now_iso(),
     }
     store = _persist(record, "reward", run, repo_path)
@@ -162,6 +168,7 @@ def ingest_heart_episodes(path: str | Path, repo_path: str | Path | None = None)
                 continue
             os.environ["ARTERIES_EPISODE_ID"] = ep["episode_id"]
             os.environ["ARTERIES_TASK_ID"] = ep.get("task_id") or ""
+            usage = ep.get("usage") or {}
             log_reward(
                 "episode",
                 ep.get("reward", {}).get("total", 0.0),
@@ -169,6 +176,9 @@ def ingest_heart_episodes(path: str | Path, repo_path: str | Path | None = None)
                             "outcome": ep.get("outcome")},
                 source="heart",
                 repo_path=repo_path,
+                tokens_in=usage.get("tokens_in"),
+                tokens_out=usage.get("tokens_out"),
+                cost_usd=usage.get("cost_usd"),
             )
             count += 1
     finally:
@@ -235,14 +245,15 @@ def _db_insert_reward(record: dict) -> None:
             """
             INSERT INTO arteries.rewards
                 (id, episode_id, decision_id, run_id, project_id, reward_type,
-                 value, components, source)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                 value, components, source, tokens_in, tokens_out, cost_usd)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
             """,
             (
                 record["id"], record["episode_id"], record.get("decision_id"),
                 record["run_id"], record["project_id"], record["reward_type"],
                 record["value"], json.dumps(record["components"], default=str),
-                record["source"],
+                record["source"], record.get("tokens_in"), record.get("tokens_out"),
+                record.get("cost_usd"),
             ),
         )
         conn.commit()
