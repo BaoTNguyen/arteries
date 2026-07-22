@@ -10,7 +10,7 @@ from arteries import doctor, evergreen, inspect, packet, remember, runs, setup_c
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember")
+COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -64,9 +64,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _backfill_embeddings(ns.args)
     if ns.command == "remember":
         return remember.main(ns.args)
+    if ns.command == "spawn":
+        return _spawn(list(ns.args))
+    if ns.command == "search":
+        return _search(ns.args)
 
     parser.error(f"unknown command: {ns.command}")
     return 2
+
+
+def _spawn(args: list[str]) -> int:
+    """Run a child agent command with subagent memory attribution.
+
+    The child writes ephemeral tagged with this agent as parent; the parent's
+    compilation pass claims those records and applies the [SUBAGENT] bar.
+    """
+    import os
+    import sys
+    import uuid
+
+    if args and args[0] == "--":
+        args = args[1:]
+    if not args:
+        print("usage: art spawn -- <command> [args...]", file=sys.stderr)
+        return 2
+
+    from arteries.config import AGENT_PROCESS_ID
+
+    env = os.environ.copy()
+    env["ARTERIES_PARENT_AGENT_ID"] = AGENT_PROCESS_ID
+    env["ARTERIES_AGENT_ID"] = f"{AGENT_PROCESS_ID}-sub-{uuid.uuid4().hex[:8]}"
+    env["ARTERIES_AGENT_ROLE"] = "subagent"
+    env.setdefault("ARTERIES_MEMORY", "subagent")
+    os.execvpe(args[0], args, env)
+
+
+def _search(args: Sequence[str]) -> int:
+    p = argparse.ArgumentParser(prog="art search", description="Full-text search over observed turns.")
+    p.add_argument("query", nargs="+")
+    p.add_argument("--project", default=None)
+    p.add_argument("--limit", type=int, default=15)
+    ns = p.parse_args(args)
+    query = " ".join(ns.query)
+
+    import psycopg2
+    import psycopg2.extras
+
+    from arteries.config import DB_CONFIG, PROJECT_ID
+
+    project = ns.project or PROJECT_ID
+    tsv = ("to_tsvector('english', coalesce(payload->>'message_preview','') || ' ' || "
+           "coalesce(payload->>'assistant_preview',''))")
+    with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT created_at, event_type,
+                   coalesce(payload->>'message_preview', payload->>'assistant_preview') AS text,
+                   ts_rank({tsv}, websearch_to_tsquery('english', %s)) AS rank
+            FROM arteries.agent_events
+            WHERE project_id = %s
+              AND {tsv} @@ websearch_to_tsquery('english', %s)
+            ORDER BY rank DESC, created_at DESC
+            LIMIT %s
+            """,
+            (query, project, query, ns.limit),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        print("no matches")
+        return 0
+    for r in rows:
+        role = "assistant" if r["event_type"] == "assistant.response" else "user"
+        text = " ".join((r["text"] or "").split())
+        if len(text) > 160:
+            text = text[:160] + "…"
+        print(f"{str(r['created_at'])[:19]}  {role:<9} {text}")
+    return 0
 
 
 def _decisions(args: Sequence[str]) -> int:

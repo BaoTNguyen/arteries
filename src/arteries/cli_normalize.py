@@ -7,9 +7,10 @@ import hashlib
 import json
 import os
 import shlex
-import sys
 from dataclasses import asdict, dataclass
 from typing import Any
+
+from arteries.eventjson import SESSION_TRANSCRIPT_KEYS, nested_get, read_stdin_json
 
 
 @dataclass
@@ -35,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--field", choices=("message", "transcript"), help="print a single normalized field")
     args = parser.parse_args(argv)
 
-    raw = _read_payload()
+    raw = read_stdin_json()
     normalized = normalize(raw, cli=args.cli, fallback_event=args.event, project_id=args.project, agent_id=args.agent)
     if args.field == "message":
         print(_message(raw))
@@ -101,26 +102,21 @@ def _message(payload: dict[str, Any]) -> str:
 
 
 def _transcript(payload: dict[str, Any]) -> str:
-    return _first_text(
-        payload,
-        "transcript_path",
-        "transcriptPath",
-        "transcript_file",
-        "transcriptFile",
-        "session_file",
-        "sessionFile",
-    ) or ""
+    return _first_text(payload, *SESSION_TRANSCRIPT_KEYS) or ""
 
 
-def _read_payload() -> dict[str, Any]:
-    raw = sys.stdin.read().strip()
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        return {"raw": raw}
-    return value if isinstance(value, dict) else {"value": value}
+def apply_event_env(event: NormalizedCliEvent) -> None:
+    """Export a normalized event into the process env for downstream config reads."""
+    os.environ["ARTERIES_CLI"] = event.cli
+    os.environ["ARTERIES_EVENT"] = event.event
+    os.environ["ARTERIES_AGENT_ID"] = event.agent_id
+    os.environ["ARTERIES_AGENT_ROLE"] = event.agent_role
+    if event.parent_agent_id:
+        os.environ["ARTERIES_PARENT_AGENT_ID"] = event.parent_agent_id
+    if event.session_id:
+        os.environ["ARTERIES_SESSION_ID"] = event.session_id
+    if event.cwd:
+        os.environ["ARTERIES_EVENT_CWD"] = event.cwd
 
 
 def _event_name(payload: dict[str, Any], fallback: str | None) -> str | None:
@@ -202,20 +198,11 @@ def _agent_id(base_agent: str, cli: str, event: str, payload: dict[str, Any], ro
 
 
 def _first_text(payload: dict[str, Any], *keys: str) -> str | None:
+    # unlike eventjson.first_text, non-string scalars (ids, pids) stringify
     for key in keys:
-        value = _nested_get(payload, key)
+        value = nested_get(payload, key)
         if value is not None and value != "":
             return str(value)
-    return None
-
-
-def _nested_get(payload: dict[str, Any], key: str) -> Any:
-    if key in payload:
-        return payload[key]
-    for container in ("data", "payload", "details", "hook_input", "hookInput"):
-        nested = payload.get(container)
-        if isinstance(nested, dict) and key in nested:
-            return nested[key]
     return None
 
 
