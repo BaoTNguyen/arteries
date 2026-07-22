@@ -143,13 +143,13 @@ def _claim_ephemeral(conn) -> list[dict]:
                 WHERE project_id = %s
                   AND (agent_process_id = %s OR parent_agent_id = %s)
                   AND status = 'uncompiled'
-                ORDER BY source_ts ASC
+                ORDER BY (agent_process_id = %s) DESC, source_ts ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING id, fact, domains, confidence, source_ts, parent_agent_id, source
             """,
-            (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
+            (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
         )
         conn.commit()
         return [dict(r) for r in cur.fetchall()]
@@ -282,14 +282,3 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
         conn.commit()
 
     return {"new": new_count, "superseded": superseded_count}
-
-
-async def compile_loop(max_passes: int = 5) -> list[dict]:
-    """Run compilation passes until nothing left or max_passes reached."""
-    results = []
-    for _ in range(max_passes):
-        r = await compile_once()
-        results.append(r)
-        if r["status"] == "nothing_to_compile":
-            break
-    return results

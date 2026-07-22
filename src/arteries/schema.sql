@@ -140,6 +140,13 @@ CREATE INDEX IF NOT EXISTS idx_agent_events_run_created
 CREATE INDEX IF NOT EXISTS idx_agent_events_type
     ON arteries.agent_events (event_type, created_at DESC);
 
+-- Full-text search over observed turn previews (`art search`)
+CREATE INDEX IF NOT EXISTS idx_agent_events_search
+    ON arteries.agent_events
+    USING gin (to_tsvector('english',
+        coalesce(payload->>'message_preview', '') || ' ' ||
+        coalesce(payload->>'assistant_preview', '')));
+
 -- Decision/action ledger: events say what happened; decisions say what was
 -- available, what was chosen, and what it cost. episode ids are TEXT because
 -- heart generates its own (timestamp-hex) episode identifiers.
