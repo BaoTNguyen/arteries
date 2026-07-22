@@ -7,8 +7,8 @@ and context markers. Inserts them as ephemeral records.
 
 This is the bootstrap extractor — heuristic-based, meant to be replaced
 by a fine-tuned 1-3B model trained with RLVR once enough signal exists.
-The async LLM track (not yet built) handles deep extraction on a one-turn
-delay; the sync track covers the current turn from the 10-pair window.
+The async LLM track (compile.py) handles deep extraction in the background;
+the sync track covers the current turn.
 """
 
 from __future__ import annotations
