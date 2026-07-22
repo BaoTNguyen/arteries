@@ -13,7 +13,22 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
+import os
+
 from arteries.config import DB_CONFIG
+
+# Age-based confidence decay, applied at read time only (stored values untouched).
+# scope='user' rows are exempt: explicitly remembered facts don't rot.
+# ponytail: age-only decay, no usage signal — revisit when heart reward ingest closes the loop
+DECAY_DAYS = float(os.getenv("ARTERIES_DECAY_DAYS", "30"))
+DECAY_FLOOR = 0.3
+_DECAYED_CONFIDENCE = f"""
+    CASE WHEN scope = 'user' THEN confidence
+         ELSE confidence * GREATEST(
+             exp(-EXTRACT(EPOCH FROM (now() - source_ts)) / 86400.0 / {DECAY_DAYS}),
+             {DECAY_FLOOR})
+    END AS confidence
+"""
 
 
 def _conn():
@@ -88,8 +103,8 @@ def get_persistent(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         if scope:
             cur.execute(
-                """
-                SELECT id, fact, domains, confidence, source_ts, scope
+                f"""
+                SELECT id, fact, domains, {_DECAYED_CONFIDENCE}, source_ts, scope
                 FROM arteries.persistent
                 WHERE project_id = %s
                   AND valid_until IS NULL
@@ -101,8 +116,8 @@ def get_persistent(
             )
         else:
             cur.execute(
-                """
-                SELECT id, fact, domains, confidence, source_ts, scope
+                f"""
+                SELECT id, fact, domains, {_DECAYED_CONFIDENCE}, source_ts, scope
                 FROM arteries.persistent
                 WHERE project_id = %s
                   AND valid_until IS NULL
@@ -122,8 +137,8 @@ def get_persistent_by_relevance(
 ) -> list[dict[str, Any]]:
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """
-            SELECT id, fact, domains, confidence, source_ts,
+            f"""
+            SELECT id, fact, domains, {_DECAYED_CONFIDENCE}, source_ts,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM arteries.persistent
             WHERE project_id = %s

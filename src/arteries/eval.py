@@ -23,9 +23,9 @@ import os
 import sys
 
 from arteries import actionlog, runlog
-from arteries.config import EPHEMERAL_MODE, PERSISTENT_READ
-from arteries.assistant import read_last_assistant
-from arteries.extract import extract_and_store, store_assistant_response
+from arteries.config import EPHEMERAL_MODE, PERSISTENT_READ, RETRIEVAL_MIN_CONFIDENCE
+from arteries.assistant import capture_response, read_last_assistant
+from arteries.extract import extract_and_store
 from arteries.frame import get_current_frame
 
 # capillaries is a hard dependency of arteries (the frame contract types
@@ -151,7 +151,8 @@ async def evaluate(message: str) -> str | None:
                 except Exception as exc:
                     runlog.log_failure("prompt.retrieve.failed", "capillaries", exc, turn_id=turn_id)
                 else:
-                    accepted = result.mode != "none" and result.confidence >= 0.3
+                    accepted = (result.mode != "none"
+                                and result.confidence >= RETRIEVAL_MIN_CONFIDENCE)
                     actionlog.log_decision(
                         "retrieval.select",
                         chosen_action="accept_retrieval" if accepted else "reject_retrieval",
@@ -183,16 +184,28 @@ async def evaluate(message: str) -> str | None:
                         prompt_text = result.prompt_text
 
     if compile_task:
+        stats = None
         try:
-            await asyncio.wait_for(asyncio.shield(compile_task), timeout=5.0)
+            stats = await asyncio.wait_for(asyncio.shield(compile_task), timeout=5.0)
         except (asyncio.TimeoutError, Exception):
             pass
+        # trust loop: one terse line so the user sees what got remembered.
+        # compile is async, so this is best-effort — slow passes surface nothing.
+        if stats and stats.get("status") == "compiled":
+            new = stats.get("new_persistent", 0)
+            superseded = stats.get("superseded", 0)
+            if new or superseded:
+                notice = (
+                    f"[arteries] +{new} remembered, {superseded} superseded "
+                    "— 'art remember list' to review or 'art remember rm <id>' to veto"
+                )
+                prompt_text = f"{prompt_text}\n\n{notice}" if prompt_text else notice
 
     return prompt_text
 
 
 def _message_payload(message: str) -> dict:
-    preview = message[:500]
+    preview = message[:2000]
     return {
         "message_chars": len(message),
         "message_preview": preview,
@@ -201,12 +214,13 @@ def _message_payload(message: str) -> dict:
     }
 
 
-async def _compile_background() -> None:
+async def _compile_background() -> dict | None:
     try:
         from arteries.compile import compile_once
-        await compile_once()
+        return await compile_once()
     except Exception as exc:
         runlog.log_failure("memory.compile.failed", "arteries", exc)
+        return None
 
 
 @contextlib.contextmanager
@@ -226,26 +240,8 @@ def _capture_last_response(turn_id: str) -> None:
         return
     try:
         text = read_last_assistant(transcript)
-        if not text or len(text) < 40:
-            return
-        stored = store_assistant_response(text)
-        preview = text[:500]
-        runlog.log_event(
-            "assistant.response",
-            "arteries",
-            {
-                "assistant_preview": preview,
-                "assistant_preview_truncated": len(text) > len(preview),
-                "assistant_chars": len(text),
-            },
-            turn_id=turn_id,
-        )
-        runlog.log_event(
-            "memory.assistant.stored",
-            "arteries",
-            {"stored": stored, "input_chars": len(text)},
-            turn_id=turn_id,
-        )
+        if text and len(text) >= 40:
+            capture_response(text, turn_id=turn_id, prior_turn=True)
     except Exception:
         pass
 

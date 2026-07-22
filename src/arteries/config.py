@@ -20,7 +20,8 @@ EMBED_DIM = 768
 
 PROJECT_ID = os.getenv("ARTERIES_PROJECT", "default")
 AGENT_PROCESS_ID = os.getenv("ARTERIES_AGENT_ID", str(os.getpid()))
-PARENT_AGENT_ID = os.getenv("ARTERIES_PARENT_AGENT") or None
+# both names accepted: cli_normalize/hooks set ARTERIES_PARENT_AGENT_ID
+PARENT_AGENT_ID = os.getenv("ARTERIES_PARENT_AGENT_ID") or os.getenv("ARTERIES_PARENT_AGENT") or None
 
 # --- Memory isolation presets ---
 # subagent: writes ephemeral tagged with parent, compiled at higher bar
@@ -38,3 +39,11 @@ if _preset in _PRESETS:
 EPHEMERAL_MODE = os.getenv("ARTERIES_EPHEMERAL", "compile")
 PERSISTENT_READ = os.getenv("ARTERIES_PERSISTENT_READ", "relevance")
 RELEVANCE_THRESHOLD = float(os.getenv("ARTERIES_RELEVANCE_THRESHOLD", "0.3"))
+
+# Minimum rerank confidence before a retrieved prompt is injected into the
+# agent's context. Measured against the reembedded corpus: planner-style turns
+# score ~0.98, while implementation turns land in 0.01-0.56 with no correlation
+# to usefulness -- at 0.3 an episode writing a 20-line string function was
+# served "Delegate Like a Parallel Coworker" at 0.53. 0.6 keeps the former and
+# drops the latter. Lower it once the corpus covers implementation work.
+RETRIEVAL_MIN_CONFIDENCE = float(os.getenv("ARTERIES_RETRIEVAL_MIN_CONFIDENCE", "0.6"))
