@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from typing import Any
 
 import httpx
@@ -264,16 +265,33 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
 
         for sup in result.get("superseded", []):
             pid = sup.get("persistent_id")
-            if pid:
-                cur.execute(
-                    """
-                    UPDATE arteries.persistent
-                    SET valid_until = now()
-                    WHERE id = %s AND project_id = %s AND valid_until IS NULL
-                    """,
-                    (pid, PROJECT_ID),
-                )
+            if not pid:
+                continue
+            # Validate in Python — a bad literal would abort the whole
+            # transaction (dropping the new_memories inserted just above), and
+            # the LLM does invent ids. A UUID that matches no live row is also a
+            # miss worth surfacing: the contradiction it claimed goes unretired.
+            try:
+                uuid.UUID(str(pid))
+            except (ValueError, AttributeError, TypeError):
+                runlog.log_event("memory.compile.bad_supersede", "arteries",
+                                 {"persistent_id": str(pid), "reason": "not a uuid"},
+                                 project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
+                continue
+            cur.execute(
+                """
+                UPDATE arteries.persistent
+                SET valid_until = now()
+                WHERE id = %s AND project_id = %s AND valid_until IS NULL
+                """,
+                (pid, PROJECT_ID),
+            )
+            if cur.rowcount:
                 superseded_count += cur.rowcount
+            else:
+                runlog.log_event("memory.compile.bad_supersede", "arteries",
+                                 {"persistent_id": str(pid), "reason": "no live match"},
+                                 project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
 
         cur.execute(
             "UPDATE arteries.ephemeral SET status = 'cleared' WHERE id = ANY(%s::uuid[])",
@@ -282,3 +300,10 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
         conn.commit()
 
     return {"new": new_count, "superseded": superseded_count}
+
+
+if __name__ == "__main__":
+    # `python -m arteries.compile` — one pass for ARTERIES_AGENT_ID, without
+    # pulling the full `art` CLI import chain. Used by an orchestrator to flush
+    # its subagents' ephemeral after they exit.
+    print(asyncio.run(compile_once()))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_packet(message: str = "", event: dict[str, Any] | None = None, budget: int = 6000) -> str:
     event = event or {}
-    memories = _load_memories(message)
+    memories = _load_memories(message, event)
     recent_pairs = _load_recent_pairs(event)
     allocations = _allocations(budget)
     sections = [
@@ -80,7 +81,7 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
     return _limit(text, budget)
 
 
-def _load_memories(message: str) -> list[MemoryItem]:
+def _load_memories(message: str, event: dict[str, Any] | None = None) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
         ephemerals, persistents = memory_select.select_for_frame(message)
@@ -94,7 +95,40 @@ def _load_memories(message: str) -> list[MemoryItem]:
             confidence=1.0,
             domains=[],
         ))
-    return items
+    return _dedupe_memories(items, _previous_summary(event or {}))
+
+
+def _previous_summary(event: dict[str, Any]) -> str:
+    return _norm(str(event.get("previousSummary") or event.get("previous_summary") or ""))
+
+
+def _norm(text: str) -> str:
+    # tokenize to alnum words so punctuation ("spaces." vs "spaces,") and casing
+    # don't defeat containment/dedup comparisons
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[MemoryItem]:
+    """Drop the same fact showing up in more than one tier (common: a
+    `remember --also-evergreen` fact lives in persistent AND evergreen), and drop
+    anything the host CLI's previous summary already carries. Both waste the very
+    budget a continuity packet exists to conserve. First occurrence wins, so tier
+    order (ephemeral, persistent, evergreen) is preserved. Status lines are never
+    dropped."""
+    seen: set[str] = set()
+    out: list[MemoryItem] = []
+    for item in items:
+        if item.tier == "status":
+            out.append(item)
+            continue
+        key = _norm(item.text)
+        if not key or key in seen:
+            continue
+        if previous_summary and key in previous_summary:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def _rows(tier: str, rows: list[dict[str, Any]]) -> list[MemoryItem]:
