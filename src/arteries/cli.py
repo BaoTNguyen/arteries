@@ -10,7 +10,7 @@ from arteries import doctor, evergreen, inspect, packet, remember, runs, setup_c
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search")
+COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -68,6 +68,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _spawn(list(ns.args))
     if ns.command == "search":
         return _search(ns.args)
+    if ns.command == "compile":
+        return _compile(ns.args)
 
     parser.error(f"unknown command: {ns.command}")
     return 2
@@ -81,7 +83,6 @@ def _spawn(args: list[str]) -> int:
     """
     import os
     import sys
-    import uuid
 
     if args and args[0] == "--":
         args = args[1:]
@@ -90,13 +91,20 @@ def _spawn(args: list[str]) -> int:
         return 2
 
     from arteries.config import AGENT_PROCESS_ID
+    from arteries.subagent import subagent_env
 
-    env = os.environ.copy()
-    env["ARTERIES_PARENT_AGENT_ID"] = AGENT_PROCESS_ID
-    env["ARTERIES_AGENT_ID"] = f"{AGENT_PROCESS_ID}-sub-{uuid.uuid4().hex[:8]}"
-    env["ARTERIES_AGENT_ROLE"] = "subagent"
+    env = {**os.environ, **subagent_env(AGENT_PROCESS_ID)}
     env.setdefault("ARTERIES_MEMORY", "subagent")
     os.execvpe(args[0], args, env)
+
+
+def _compile(args: list[str]) -> int:
+    """Run one compilation pass now, for the agent in ARTERIES_AGENT_ID. An
+    orchestrator uses this to flush its subagents' ephemeral up to project memory
+    after they exit (their own async compile never runs in a one-shot child)."""
+    from arteries.compile import compile_once
+    print(asyncio.run(compile_once()))
+    return 0
 
 
 def _search(args: Sequence[str]) -> int:

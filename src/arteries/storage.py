@@ -13,22 +13,12 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-import os
-
 from arteries.config import DB_CONFIG
 
-# Age-based confidence decay, applied at read time only (stored values untouched).
-# scope='user' rows are exempt: explicitly remembered facts don't rot.
-# ponytail: age-only decay, no usage signal — revisit when heart reward ingest closes the loop
-DECAY_DAYS = float(os.getenv("ARTERIES_DECAY_DAYS", "30"))
-DECAY_FLOOR = 0.3
-_DECAYED_CONFIDENCE = f"""
-    CASE WHEN scope = 'user' THEN confidence
-         ELSE confidence * GREATEST(
-             exp(-EXTRACT(EPOCH FROM (now() - source_ts)) / 86400.0 / {DECAY_DAYS}),
-             {DECAY_FLOOR})
-    END AS confidence
-"""
+# Confidence is read back as stored. Age-based decay lived here and was removed —
+# age alone was the wrong signal (a stale-but-still-true fact decayed like a
+# wrong one, and a re-confirmed fact didn't recover). A usefulness-driven method
+# will replace it later; until then, no decay.
 
 
 def _conn():
@@ -103,8 +93,8 @@ def get_persistent(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         if scope:
             cur.execute(
-                f"""
-                SELECT id, fact, domains, {_DECAYED_CONFIDENCE}, source_ts, scope
+                """
+                SELECT id, fact, domains, confidence, source_ts, scope
                 FROM arteries.persistent
                 WHERE project_id = %s
                   AND valid_until IS NULL
@@ -116,8 +106,8 @@ def get_persistent(
             )
         else:
             cur.execute(
-                f"""
-                SELECT id, fact, domains, {_DECAYED_CONFIDENCE}, source_ts, scope
+                """
+                SELECT id, fact, domains, confidence, source_ts, scope
                 FROM arteries.persistent
                 WHERE project_id = %s
                   AND valid_until IS NULL
@@ -137,8 +127,8 @@ def get_persistent_by_relevance(
 ) -> list[dict[str, Any]]:
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            f"""
-            SELECT id, fact, domains, {_DECAYED_CONFIDENCE}, source_ts,
+            """
+            SELECT id, fact, domains, confidence, source_ts,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM arteries.persistent
             WHERE project_id = %s
@@ -267,6 +257,31 @@ def get_evergreen(limit: int = 50) -> list[dict[str, Any]]:
             (limit,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def touch_evergreen(ids: list[str]) -> None:
+    """Bump access_count for evergreen rows surfaced into a frame.
+
+    get_evergreen orders by access_count DESC, but nothing incremented it, so the
+    reinforcement was dead and ordering collapsed to source_ts. This closes that:
+    a fact that keeps getting surfaced floats up. Best-effort — never breaks the
+    read path that calls it.
+    # ponytail: counts surfacings, not usefulness — a usefulness signal (e.g.
+    # from arteries.rewards) would be better but is deferred. Rich-get-richer is
+    # bounded by the limit on how many rows a frame ever surfaces.
+    """
+    if not ids:
+        return
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE arteries.evergreen SET access_count = access_count + 1 "
+                "WHERE id = ANY(%s::uuid[])",
+                (ids,),
+            )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def insert_evergreen(

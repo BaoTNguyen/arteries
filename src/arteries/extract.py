@@ -19,9 +19,15 @@ from dataclasses import dataclass
 from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PARENT_AGENT_ID, PROJECT_ID
 from arteries import storage
 
-# Capillaries owns the domain taxonomy; import it so the two ends of the
-# memory channel can't drift. inference.py is a light module (re + dataclasses).
-from capillaries.agent.inference import DOMAIN_KEYWORDS
+# Capillaries owns the domain taxonomy; prefer it so the two ends of the memory
+# channel can't drift. But extraction is a pure-memory op — it must not hard-fail
+# just because capillaries isn't installed. Fall back to arteries' own taxonomy
+# (evergreen.DOMAIN_KEYWORDS) when capillaries is absent; drift only in that
+# degraded mode, never when capillaries is present.
+try:
+    from capillaries.agent.inference import DOMAIN_KEYWORDS
+except Exception:  # capillaries not installed / not importable
+    from arteries.evergreen import DOMAIN_KEYWORDS
 
 # Patterns that signal extractable facts
 PREFERENCE_PATTERNS = re.compile(
