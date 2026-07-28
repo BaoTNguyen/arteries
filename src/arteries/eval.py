@@ -23,9 +23,9 @@ import os
 import sys
 
 from arteries import actionlog, runlog
-from arteries.config import EPHEMERAL_MODE, PERSISTENT_READ
-from arteries.assistant import read_last_assistant
-from arteries.extract import extract_and_store, store_assistant_response
+from arteries.config import EPHEMERAL_MODE, PERSISTENT_READ, RETRIEVAL_MIN_CONFIDENCE
+from arteries.assistant import capture_response, read_last_assistant
+from arteries.extract import extract_and_store
 from arteries.frame import get_current_frame
 
 # capillaries is a hard dependency of arteries (the frame contract types
@@ -96,9 +96,14 @@ async def evaluate(message: str) -> str | None:
         turn_id=turn_id,
     )
 
-    compile_task = None
     if EPHEMERAL_MODE != "discard":
-        compile_task = asyncio.create_task(_compile_background())
+        # ponytail: detach compile into its own process instead of awaiting it
+        # inline. The hook is a one-shot process, so an in-process asyncio task
+        # only survives if awaited — which used to block the prompt up to 5s on
+        # the compile LLM call and tripped the UserPromptSubmit timeout. A
+        # detached process outlives the hook and does the same work off the hot
+        # path; the "+N remembered" notice just surfaces on the next turn.
+        _spawn_detached_compile()
 
     prompt_text = None
     # heart sets ARTERIES_RETRIEVAL=off for retrieval-ablation episodes
@@ -146,12 +151,21 @@ async def evaluate(message: str) -> str | None:
 
             if decision.search:
                 try:
-                    with _dependency_stdout_to_stderr():
-                        result = await cap_find(message, memory=frame)
+                    # capillaries' serving_log reads ARTERIES_TURN_ID to tie a
+                    # served result back to this turn (serving.py); no other
+                    # convention reaches that deep. Serial per turn, so process
+                    # env is safe. Scoped to the call so it never leaks.
+                    os.environ["ARTERIES_TURN_ID"] = turn_id
+                    try:
+                        with _dependency_stdout_to_stderr():
+                            result = await cap_find(message, memory=frame)
+                    finally:
+                        os.environ.pop("ARTERIES_TURN_ID", None)
                 except Exception as exc:
                     runlog.log_failure("prompt.retrieve.failed", "capillaries", exc, turn_id=turn_id)
                 else:
-                    accepted = result.mode != "none" and result.confidence >= 0.3
+                    accepted = (result.mode != "none"
+                                and result.confidence >= RETRIEVAL_MIN_CONFIDENCE)
                     actionlog.log_decision(
                         "retrieval.select",
                         chosen_action="accept_retrieval" if accepted else "reject_retrieval",
@@ -182,17 +196,11 @@ async def evaluate(message: str) -> str | None:
                         )
                         prompt_text = result.prompt_text
 
-    if compile_task:
-        try:
-            await asyncio.wait_for(asyncio.shield(compile_task), timeout=5.0)
-        except (asyncio.TimeoutError, Exception):
-            pass
-
     return prompt_text
 
 
 def _message_payload(message: str) -> dict:
-    preview = message[:500]
+    preview = message[:2000]
     return {
         "message_chars": len(message),
         "message_preview": preview,
@@ -201,10 +209,22 @@ def _message_payload(message: str) -> dict:
     }
 
 
-async def _compile_background() -> None:
+def _spawn_detached_compile() -> None:
+    """Fire-and-forget the ephemeral->persistent compile in its own process.
+
+    start_new_session detaches it from the hook's process group so it keeps
+    running after the hook returns. It inherits cwd + ARTERIES_* env, which is
+    all compile_once needs.
+    """
+    import subprocess
     try:
-        from arteries.compile import compile_once
-        await compile_once()
+        subprocess.Popen(
+            [sys.executable, "-m", "arteries.compile"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     except Exception as exc:
         runlog.log_failure("memory.compile.failed", "arteries", exc)
 
@@ -226,26 +246,8 @@ def _capture_last_response(turn_id: str) -> None:
         return
     try:
         text = read_last_assistant(transcript)
-        if not text or len(text) < 40:
-            return
-        stored = store_assistant_response(text)
-        preview = text[:500]
-        runlog.log_event(
-            "assistant.response",
-            "arteries",
-            {
-                "assistant_preview": preview,
-                "assistant_preview_truncated": len(text) > len(preview),
-                "assistant_chars": len(text),
-            },
-            turn_id=turn_id,
-        )
-        runlog.log_event(
-            "memory.assistant.stored",
-            "arteries",
-            {"stored": stored, "input_chars": len(text)},
-            turn_id=turn_id,
-        )
+        if text and len(text) >= 40:
+            capture_response(text, turn_id=turn_id, prior_turn=True)
     except Exception:
         pass
 

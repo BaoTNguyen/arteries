@@ -115,6 +115,11 @@ export ARTERIES_PROJECT="${{ARTERIES_PROJECT:-{ctx.project_name}}}"
 export ARTERIES_AGENT_ID="${{ARTERIES_AGENT_ID:-{_agent_id(ctx.project_name)}}}"
 export ARTERIES_CLI="${{ARTERIES_CLI:-{cli_name}}}"
 export ARTERIES_REPO="${{ARTERIES_REPO:-$PROJECT_ROOT}}"
+# capillaries' cross-encoder defaults to CPU, where a warm rerank costs ~1.7s
+# against a 10s hook budget; on GPU the same call is ~0.12s. Cold start is
+# ~4.5s either way, so this only pays off once something stays warm — but it
+# costs nothing to set, and it is what makes a warm path worth building.
+export RERANKER_DEVICE="${{RERANKER_DEVICE:-cuda}}"
 '''
 
 
@@ -226,6 +231,33 @@ ARTERIES MEMORY SYSTEM ACTIVE.
 This repo is connected to arteries project `{ctx.project_name}`.
 Arteries observes turns, builds ephemeral/persistent/evergreen memory, and may surface retrieved prompts as visible context.
 EOF
+
+python3 - <<'PYEOF' 2>/dev/null || true
+from arteries import storage
+
+rows = storage.get_evergreen(limit=8)
+if rows:
+    print()
+    print("Evergreen preferences (authoritative source: arteries):")
+    for r in rows:
+        print(f"- {{r['fact']}}")
+PYEOF
+'''
+    hook_subagent_stop = f'''#!/usr/bin/env bash
+set -euo pipefail
+
+{env}
+if [[ -t 0 ]]; then
+  event_json="{{}}"
+else
+  event_json="$(cat)"
+fi
+# attribute the subagent's report to a child id so the parent's compile
+# pass claims it via parent_agent_id and applies the [SUBAGENT] bar
+export ARTERIES_PARENT_AGENT_ID="$ARTERIES_AGENT_ID"
+export ARTERIES_AGENT_ID="$ARTERIES_AGENT_ID-sub"
+export ARTERIES_AGENT_ROLE=subagent
+printf '%s' "$event_json" | python3 -m arteries.assistant --stdin-json --require-agent-transcript --cli "$ARTERIES_CLI" --event SubagentStop --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID"
 '''
     compact = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -289,6 +321,7 @@ bash "$script_dir/hooks/activate.sh"
         hooks / "assistant-observe.sh": assistant_observe,
         hooks / "hook-assistant-observe.sh": hook_assistant,
         hooks / "activate.sh": activate,
+        hooks / "hook-subagent-stop.sh": hook_subagent_stop,
         hooks / "compact-packet.sh": compact,
         hooks / "hook-compact-packet.sh": hook_compact,
         hooks / "pi-compact-json.sh": pi_compact,
@@ -424,6 +457,7 @@ def _runtime_ok(ctx: Context) -> bool:
         "hooks/assistant-observe.sh",
         "hooks/hook-assistant-observe.sh",
         "hooks/activate.sh",
+        "hooks/hook-subagent-stop.sh",
         "hooks/compact-packet.sh",
         "hooks/hook-compact-packet.sh",
         "hooks/pi-compact-json.sh",
@@ -487,9 +521,9 @@ def _claude_hooks() -> dict:
             "matcher": "*",
             "hooks": [{
                 "type": "command",
-                "command": "ARTERIES_CLI=claude bash .arteries/hooks/hook-event.sh SubagentStop",
+                "command": "ARTERIES_CLI=claude bash .arteries/hooks/hook-subagent-stop.sh",
                 "timeout": 5,
-                "statusMessage": "Recording arteries subagent metadata...",
+                "statusMessage": "Capturing arteries subagent report...",
             }],
         }],
     }
@@ -509,6 +543,18 @@ def _install_claude(ctx: Context) -> Result:
     settings = _read_json(path)
     hooks = settings.setdefault("hooks", {})
     wanted = _claude_hooks()
+    # prune arteries hook commands that are no longer part of the wanted set
+    wanted_commands = {g["hooks"][0]["command"] for gs in wanted.values() for g in gs}
+    for event in list(hooks.keys()):
+        hooks[event] = [
+            group for group in hooks[event]
+            if not any(
+                ".arteries/hooks/" in str(hook.get("command", "")) and hook.get("command") not in wanted_commands
+                for hook in group.get("hooks", [])
+            )
+        ]
+        if not hooks[event]:
+            del hooks[event]
     for event, groups in wanted.items():
         existing = hooks.setdefault(event, [])
         for group in groups:

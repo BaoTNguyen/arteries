@@ -7,6 +7,8 @@ MemoryFrame. When capillaries is installed, it consumes these directly.
 
 from __future__ import annotations
 
+import logging
+
 from arteries.memory_types import (
     CachedRetrieval,
     EphemeralMemory,
@@ -19,11 +21,17 @@ from arteries.memory_types import (
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries import memory_select, storage
 
+logger = logging.getLogger(__name__)
+
 
 def get_current_frame(message: str) -> MemoryFrame:
     try:
         return _build_frame(message)
     except Exception:
+        # An empty frame is a valid "no memories yet" answer, so a swallowed
+        # failure here (Postgres down, embedder down) is invisible — it looks
+        # identical to a healthy empty frame. Log so the two can be told apart.
+        logger.warning("frame build failed; returning empty MemoryFrame", exc_info=True)
         return MemoryFrame()
 
 
@@ -31,6 +39,8 @@ def _build_frame(message: str) -> MemoryFrame:
     ephemerals, persistents = memory_select.select_for_frame(message)
 
     evergreens = storage.get_evergreen(limit=20)
+    # reinforce what we surfaced — this is the only writer of access_count
+    storage.touch_evergreen([str(r["id"]) for r in evergreens if r.get("id")])
     retrievals = storage.get_recent_retrievals(PROJECT_ID, AGENT_PROCESS_ID, limit=10)
 
     active_domains = storage.get_active_domains(PROJECT_ID)

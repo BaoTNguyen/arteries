@@ -15,6 +15,11 @@ import psycopg2.extras
 
 from arteries.config import DB_CONFIG
 
+# Confidence is read back as stored. Age-based decay lived here and was removed —
+# age alone was the wrong signal (a stale-but-still-true fact decayed like a
+# wrong one, and a re-confirmed fact didn't recover). A usefulness-driven method
+# will replace it later; until then, no decay.
+
 
 def _conn():
     return psycopg2.connect(**DB_CONFIG)
@@ -252,6 +257,31 @@ def get_evergreen(limit: int = 50) -> list[dict[str, Any]]:
             (limit,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def touch_evergreen(ids: list[str]) -> None:
+    """Bump access_count for evergreen rows surfaced into a frame.
+
+    get_evergreen orders by access_count DESC, but nothing incremented it, so the
+    reinforcement was dead and ordering collapsed to source_ts. This closes that:
+    a fact that keeps getting surfaced floats up. Best-effort — never breaks the
+    read path that calls it.
+    # ponytail: counts surfacings, not usefulness — a usefulness signal (e.g.
+    # from arteries.rewards) would be better but is deferred. Rich-get-richer is
+    # bounded by the limit on how many rows a frame ever surfaces.
+    """
+    if not ids:
+        return
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE arteries.evergreen SET access_count = access_count + 1 "
+                "WHERE id = ANY(%s::uuid[])",
+                (ids,),
+            )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def insert_evergreen(
