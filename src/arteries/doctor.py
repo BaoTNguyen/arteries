@@ -38,6 +38,15 @@ def check(project: str, agent: str, cli: str, repo: Path) -> dict[str, Any]:
         "fallback_path": str(fallback),
     }
 
+    # subagent attribution breaks silently when the agent id falls back to a PID:
+    # parent/child ids never match and tagged records are never claimed
+    checks["agent_id_pinned"] = bool(os.getenv("ARTERIES_AGENT_ID"))
+    if not checks["agent_id_pinned"]:
+        checks["agent_id_warning"] = (
+            "ARTERIES_AGENT_ID is unset; agent id falls back to the process PID, "
+            "so subagent records tagged with a parent id will never be claimed."
+        )
+
     db_ok, schema_ok, db_error = _check_db()
     checks["db_ok"] = db_ok
     checks["schema_ok"] = schema_ok

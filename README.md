@@ -13,6 +13,31 @@ Capillaries decides whether a prompt from your private corpus should be used. Ar
 
 The goal is not to make another agent. The goal is to make the agents you already use carry project memory and leave an audit trail.
 
+## Where it sits in the stack
+
+Arteries is the memory and tracing layer in a five-repo agent stack:
+
+```text
+capillaries  prompt/skill retrieval
+arteries     memory + trace substrate               <- this repo
+heart        orchestration + environment + reward
+plexus       goal decomposition + acceptance loop
+marrow       RL training on heart's episodes
+```
+
+Capillaries decides which prompt fits. Arteries gives that decision a memory frame and records what happened. Heart runs coding agents that ride arteries' hooks; marrow later trains on the decision ledger arteries leaves behind. Dependencies point one way: arteries imports capillaries, never the reverse.
+
+## What sets it apart
+
+Every coding CLI is bolting on its own memory feature, each incompatible with the next. Arteries takes the opposite bet — one memory substrate, many front-ends:
+
+- **One memory across six CLIs.** Codex, Claude Code, Pi, OpenCode, Cursor, and Hermes all read and write the same project memory through explicit per-CLI adapters. Switch tools mid-project and the context follows you instead of resetting.
+- **Memory that surfaces by relevance, not recency.** Persistent memories are embedded at compile time and matched against the current message by vector similarity. A test-writing subagent surfaces test memories, a code agent surfaces code memories — task isolation falls out of the embeddings, with no scope labels to maintain.
+- **Three tiers with real half-lives.** Ephemeral (per process, high churn), persistent (per project, compiled facts), evergreen (global, explicitly promoted). Observations get compiled up the tiers in the background; they don't all live forever at the same weight.
+- **An audit trail that keeps gate and retrieval honest.** A gate opening on a nearest-match title and the prompt actually retrieved are logged as distinct events, with bounded previews and SHA-256 hashes. You can reconstruct why a prompt surfaced months later.
+- **It never fabricates.** If a CLI only exposes user turns, the continuity packet marks the assistant side as not captured rather than inventing a plausible reply.
+- **Degrades instead of failing.** Postgres down? Telemetry falls back to repo-local JSONL. Embedding server down? Retrieval falls back to recency. The hooks keep working.
+
 ## What problem it solves
 
 Coding CLIs forget too much between sessions, and each CLI has its own hook or extension model. If you use Codex in one project, Pi in another, and Claude Code somewhere else, the useful context gets scattered.
