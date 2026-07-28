@@ -6,6 +6,7 @@ preserving the existing default behavior when no CLI/subagent metadata exists.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 
@@ -14,6 +15,8 @@ from arteries.cli_caps import CliCapabilities, get_capabilities
 from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PERSISTENT_READ, PROJECT_ID, RELEVANCE_THRESHOLD
 from arteries.embed import embed_text_sync
 from arteries.extract import get_ephemeral_buffer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,13 +75,21 @@ def _select_persistent(message: str, context: AgentContext) -> list[dict]:
         return []
     if PERSISTENT_READ == "relevance":
         query_emb = embed_text_sync(message)
-        if query_emb and storage.has_embeddings(context.project_id):
+        has_emb = bool(query_emb) and storage.has_embeddings(context.project_id)
+        if query_emb and has_emb:
             return storage.get_persistent_by_relevance(
                 context.project_id,
                 query_emb,
                 limit=20,
                 threshold=RELEVANCE_THRESHOLD,
             )
+        # Relevance was requested but we couldn't do it — no query embedding
+        # (embedder down) or no stored embeddings. We fall back to recency, which
+        # is a different, weaker read; say so rather than degrade silently.
+        logger.info(
+            "persistent read fell back to recency: query_emb=%s has_embeddings=%s",
+            bool(query_emb), has_emb,
+        )
     return storage.get_persistent(context.project_id, limit=20)
 
 
