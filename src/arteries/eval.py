@@ -96,9 +96,14 @@ async def evaluate(message: str) -> str | None:
         turn_id=turn_id,
     )
 
-    compile_task = None
     if EPHEMERAL_MODE != "discard":
-        compile_task = asyncio.create_task(_compile_background())
+        # ponytail: detach compile into its own process instead of awaiting it
+        # inline. The hook is a one-shot process, so an in-process asyncio task
+        # only survives if awaited — which used to block the prompt up to 5s on
+        # the compile LLM call and tripped the UserPromptSubmit timeout. A
+        # detached process outlives the hook and does the same work off the hot
+        # path; the "+N remembered" notice just surfaces on the next turn.
+        _spawn_detached_compile()
 
     prompt_text = None
     # heart sets ARTERIES_RETRIEVAL=off for retrieval-ablation episodes
@@ -146,8 +151,16 @@ async def evaluate(message: str) -> str | None:
 
             if decision.search:
                 try:
-                    with _dependency_stdout_to_stderr():
-                        result = await cap_find(message, memory=frame)
+                    # capillaries' serving_log reads ARTERIES_TURN_ID to tie a
+                    # served result back to this turn (serving.py); no other
+                    # convention reaches that deep. Serial per turn, so process
+                    # env is safe. Scoped to the call so it never leaks.
+                    os.environ["ARTERIES_TURN_ID"] = turn_id
+                    try:
+                        with _dependency_stdout_to_stderr():
+                            result = await cap_find(message, memory=frame)
+                    finally:
+                        os.environ.pop("ARTERIES_TURN_ID", None)
                 except Exception as exc:
                     runlog.log_failure("prompt.retrieve.failed", "capillaries", exc, turn_id=turn_id)
                 else:
@@ -183,24 +196,6 @@ async def evaluate(message: str) -> str | None:
                         )
                         prompt_text = result.prompt_text
 
-    if compile_task:
-        stats = None
-        try:
-            stats = await asyncio.wait_for(asyncio.shield(compile_task), timeout=5.0)
-        except (asyncio.TimeoutError, Exception):
-            pass
-        # trust loop: one terse line so the user sees what got remembered.
-        # compile is async, so this is best-effort — slow passes surface nothing.
-        if stats and stats.get("status") == "compiled":
-            new = stats.get("new_persistent", 0)
-            superseded = stats.get("superseded", 0)
-            if new or superseded:
-                notice = (
-                    f"[arteries] +{new} remembered, {superseded} superseded "
-                    "— 'art remember list' to review or 'art remember rm <id>' to veto"
-                )
-                prompt_text = f"{prompt_text}\n\n{notice}" if prompt_text else notice
-
     return prompt_text
 
 
@@ -214,13 +209,24 @@ def _message_payload(message: str) -> dict:
     }
 
 
-async def _compile_background() -> dict | None:
+def _spawn_detached_compile() -> None:
+    """Fire-and-forget the ephemeral->persistent compile in its own process.
+
+    start_new_session detaches it from the hook's process group so it keeps
+    running after the hook returns. It inherits cwd + ARTERIES_* env, which is
+    all compile_once needs.
+    """
+    import subprocess
     try:
-        from arteries.compile import compile_once
-        return await compile_once()
+        subprocess.Popen(
+            [sys.executable, "-m", "arteries.compile"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     except Exception as exc:
         runlog.log_failure("memory.compile.failed", "arteries", exc)
-        return None
 
 
 @contextlib.contextmanager
