@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from arteries import memory_select, runlog, storage
 from arteries.cli_caps import get_capabilities
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
+from arteries.eventjson import event_messages, payload_text, read_stdin_json, text_from_mapping
 
 
 @dataclass
@@ -27,8 +28,6 @@ class MemoryItem:
 class RecentPair:
     user: str
     assistant: str | None = None
-    turn_id: str | None = None
-    created_at: str | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stdin-json", action="store_true", help="read CLI event JSON from stdin")
     args = parser.parse_args(argv)
 
-    event = _read_stdin_json() if args.stdin_json else {}
+    event = read_stdin_json() if args.stdin_json else {}
     message = args.message or _event_message(event)
     packet = build_packet(message=message, event=event, budget=args.budget)
     capabilities = get_capabilities()
@@ -62,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_packet(message: str = "", event: dict[str, Any] | None = None, budget: int = 6000) -> str:
     event = event or {}
-    memories = _load_memories(message)
+    memories = _load_memories(message, event)
     recent_pairs = _load_recent_pairs(event)
     allocations = _allocations(budget)
     sections = [
@@ -82,7 +81,7 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
     return _limit(text, budget)
 
 
-def _load_memories(message: str) -> list[MemoryItem]:
+def _load_memories(message: str, event: dict[str, Any] | None = None) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
         ephemerals, persistents = memory_select.select_for_frame(message)
@@ -96,7 +95,40 @@ def _load_memories(message: str) -> list[MemoryItem]:
             confidence=1.0,
             domains=[],
         ))
-    return items
+    return _dedupe_memories(items, _previous_summary(event or {}))
+
+
+def _previous_summary(event: dict[str, Any]) -> str:
+    return _norm(str(event.get("previousSummary") or event.get("previous_summary") or ""))
+
+
+def _norm(text: str) -> str:
+    # tokenize to alnum words so punctuation ("spaces." vs "spaces,") and casing
+    # don't defeat containment/dedup comparisons
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[MemoryItem]:
+    """Drop the same fact showing up in more than one tier (common: a
+    `remember --also-evergreen` fact lives in persistent AND evergreen), and drop
+    anything the host CLI's previous summary already carries. Both waste the very
+    budget a continuity packet exists to conserve. First occurrence wins, so tier
+    order (ephemeral, persistent, evergreen) is preserved. Status lines are never
+    dropped."""
+    seen: set[str] = set()
+    out: list[MemoryItem] = []
+    for item in items:
+        if item.tier == "status":
+            out.append(item)
+            continue
+        key = _norm(item.text)
+        if not key or key in seen:
+            continue
+        if previous_summary and key in previous_summary:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def _rows(tier: str, rows: list[dict[str, Any]]) -> list[MemoryItem]:
@@ -143,7 +175,7 @@ def _load_recent_pairs(event: dict[str, Any], limit: int = 10) -> list[RecentPai
 
 
 def _pairs_from_event(event: dict[str, Any], limit: int) -> list[RecentPair]:
-    messages = _event_messages(event)
+    messages = event_messages(event)
     if not messages:
         return []
 
@@ -151,7 +183,7 @@ def _pairs_from_event(event: dict[str, Any], limit: int) -> list[RecentPair]:
     pending_user: str | None = None
     for message in messages:
         role = str(message.get("role") or message.get("speaker") or message.get("type") or "").lower()
-        text = _text_from_mapping(message)
+        text = text_from_mapping(message)
         if not text:
             continue
         if role in {"user", "human", "prompt", "input"}:
@@ -171,21 +203,6 @@ def _pairs_from_event(event: dict[str, Any], limit: int) -> list[RecentPair]:
     return pairs[-limit:]
 
 
-def _event_messages(event: dict[str, Any]) -> list[dict[str, Any]]:
-    for key in ("messages", "conversation", "transcript", "entries"):
-        value = _nested_get(event, key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-
-    preparation = _nested_get(event, "preparation")
-    if isinstance(preparation, dict):
-        for key in ("messages", "conversation", "transcript", "entries"):
-            value = preparation.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-    return []
-
-
 def _pairs_from_runlog(limit: int) -> list[RecentPair]:
     try:
         events = runlog.recent_events(project_id=PROJECT_ID, limit=120, repo_path=os.getenv("ARTERIES_REPO"))
@@ -201,14 +218,10 @@ def _pairs_from_runlog(limit: int) -> list[RecentPair]:
         turn_id = str(event.get("turn_id") or "") or None
 
         if event_type == "turn.observed":
-            user = _payload_text(payload, "message_preview", "message", "prompt", "user")
+            user = payload_text(payload, "message_preview", "message", "prompt", "user")
             if not user:
                 continue
-            pair = RecentPair(
-                user=user,
-                turn_id=turn_id,
-                created_at=str(event.get("created_at") or "") or None,
-            )
+            pair = RecentPair(user=user)
             ordered.append(pair)
             pending = pair
             if turn_id:
@@ -216,7 +229,7 @@ def _pairs_from_runlog(limit: int) -> list[RecentPair]:
             continue
 
         if event_type in {"turn.assistant", "assistant.response", "message.assistant", "turn.completed"}:
-            assistant = _payload_text(
+            assistant = payload_text(
                 payload,
                 "assistant_preview",
                 "response_preview",
@@ -228,6 +241,14 @@ def _pairs_from_runlog(limit: int) -> list[RecentPair]:
             if not assistant:
                 continue
             pair = pairs_by_turn.get(turn_id or "") if turn_id else pending
+            if payload.get("prior_turn"):
+                # transcript capture runs at the start of turn N and describes
+                # turn N-1, so attach to the pair before the one sharing turn_id
+                anchor = pairs_by_turn.get(turn_id or "")
+                if anchor is not None and anchor in ordered and ordered.index(anchor) > 0:
+                    pair = ordered[ordered.index(anchor) - 1]
+                else:
+                    pair = next((p for p in reversed(ordered) if not p.assistant), None)
             if pair and not pair.assistant:
                 pair.assistant = assistant
 
@@ -243,42 +264,6 @@ def _format_recent_pairs(pairs: list[RecentPair]) -> list[str]:
         else:
             lines.append("   A: [not captured by this CLI]")
     return lines
-
-
-def _nested_get(payload: dict[str, Any], key: str) -> Any:
-    if key in payload:
-        return payload[key]
-    for container in ("data", "payload", "details", "hook_input", "hookInput"):
-        nested = payload.get(container)
-        if isinstance(nested, dict) and key in nested:
-            return nested[key]
-    return None
-
-
-def _text_from_mapping(value: dict[str, Any]) -> str:
-    text = _payload_text(value, "text", "content", "message", "body", "value", "prompt", "response")
-    if text:
-        return text
-    parts = value.get("parts")
-    if isinstance(parts, list):
-        return "\n".join(
-            str(part.get("text") or part.get("content") or "").strip()
-            for part in parts
-            if isinstance(part, dict) and str(part.get("text") or part.get("content") or "").strip()
-        ).strip()
-    return ""
-
-
-def _payload_text(payload: dict[str, Any], *keys: str) -> str:
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        if isinstance(value, list):
-            text = "\n".join(str(item).strip() for item in value if str(item).strip()).strip()
-            if text:
-                return text
-    return ""
 
 
 def _one_line(text: str, limit: int = 500) -> str:
@@ -344,17 +329,6 @@ def _limit(text: str, budget: int) -> str:
         return text
     suffix = "\n\n[Packet truncated to fit budget.]"
     return text[:max(0, budget - len(suffix))].rstrip() + suffix
-
-
-def _read_stdin_json() -> dict[str, Any]:
-    raw = sys.stdin.read().strip()
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        return {"raw": raw}
-    return value if isinstance(value, dict) else {"value": value}
 
 
 def _event_message(event: dict[str, Any]) -> str:

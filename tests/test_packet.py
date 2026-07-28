@@ -7,6 +7,31 @@ from unittest.mock import patch
 from arteries import packet
 
 
+class DedupeTests(unittest.TestCase):
+    def _item(self, tier, text):
+        return packet.MemoryItem(tier=tier, text=text, confidence=1.0, domains=[])
+
+    def test_same_fact_across_tiers_kept_once_first_tier_wins(self):
+        # remember --also-evergreen writes the same fact to persistent + evergreen
+        items = [
+            self._item("persistent", "Prefer scoped implementations."),
+            self._item("evergreen", "prefer scoped implementations."),  # case/space dup
+        ]
+        out = packet._dedupe_memories(items, previous_summary="")
+        self.assertEqual([i.tier for i in out], ["persistent"])
+
+    def test_fact_already_in_previous_summary_is_dropped(self):
+        items = [self._item("evergreen", "User prefers tabs over spaces.")]
+        out = packet._dedupe_memories(
+            items, previous_summary=packet._norm("Earlier: user prefers tabs over spaces, noted."))
+        self.assertEqual(out, [])
+
+    def test_status_lines_survive_dedup(self):
+        items = [self._item("status", "Memory storage was unavailable.")]
+        out = packet._dedupe_memories(items, previous_summary="memory storage was unavailable.")
+        self.assertEqual(len(out), 1)
+
+
 class PacketTests(unittest.TestCase):
     def test_build_packet_includes_memory_tiers_and_rules(self):
         with patch.object(packet.memory_select, "select_for_frame", return_value=([{
