@@ -244,19 +244,62 @@ def get_active_domains(project_id: str) -> list[str]:
 
 # -- Evergreen ----------------------------------------------------------------
 
-def get_evergreen(limit: int = 50) -> list[dict[str, Any]]:
+def get_evergreen(
+    limit: int = 50,
+    query_embedding: list[float] | None = None,
+) -> list[dict[str, Any]]:
+    """Evergreen memories, ranked by relevance when a query vector is given.
+
+    Without one this is recency, which is what it always was -- and was wrong:
+    the tier holding ground truth was the only one not relevance-ranked.
+
+    Rows imported through the review flow are never embedded, so a project can
+    hold evergreen facts with NULL vectors. NULLS LAST ranks them below anything
+    that actually matched; dropping them would lose hand-curated memory.
+    """
+    order = ("embedding <=> %(vec)s::vector NULLS LAST, source_ts DESC"
+             if query_embedding else "source_ts DESC")
+    similarity = ("CASE WHEN embedding IS NULL THEN NULL "
+                  "ELSE 1 - (embedding <=> %(vec)s::vector) END AS similarity"
+                  if query_embedding else "NULL::real AS similarity")
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """
-            SELECT id, fact, domains, confidence, source_ts, source_meta
+            f"""
+            SELECT id, fact, domains, confidence, source_ts, source_meta,
+                   {similarity}
             FROM arteries.evergreen
             WHERE superseded_by IS NULL
-            ORDER BY access_count DESC, source_ts DESC
-            LIMIT %s
+            ORDER BY {order}
+            LIMIT %(limit)s
             """,
-            (limit,),
+            {"vec": query_embedding, "limit": limit},
         )
         return [dict(r) for r in cur.fetchall()]
+
+def max_ephemeral_similarity(
+    project_id: str,
+    agent_process_id: str,
+    query_embedding: list[float],
+) -> float:
+    """How well this turn is already covered by the current session's memory.
+
+    Feeds the retrieval gate: if the situation is one we already have context
+    for, calling capillaries again is wasted work. Returns 0.0 when nothing is
+    embedded yet, which reads as "no coverage" and keeps retrieval on.
+    """
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT coalesce(max(1 - (embedding <=> %s::vector)), 0.0)
+            FROM arteries.ephemeral
+            WHERE project_id = %s
+              AND agent_process_id = %s
+              AND embedding IS NOT NULL
+              AND status <> 'cleared'
+            """,
+            (query_embedding, project_id, agent_process_id),
+        )
+        return float(cur.fetchone()[0])
 
 
 def touch_evergreen(ids: list[str]) -> None:

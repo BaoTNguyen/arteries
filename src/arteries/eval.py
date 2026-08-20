@@ -25,6 +25,7 @@ import sys
 from arteries import actionlog, runlog
 from arteries.config import EPHEMERAL_MODE, PERSISTENT_READ, RETRIEVAL_MIN_CONFIDENCE
 from arteries.assistant import capture_response, read_last_assistant
+from arteries.embed import embed_text_sync
 from arteries.extract import extract_and_store
 from arteries.frame import get_current_frame
 
@@ -45,8 +46,14 @@ async def evaluate(message: str) -> str | None:
 
     _capture_last_response(turn_id)
 
+    # One embedding per turn, computed here and used three times: to stamp the
+    # ephemeral records this message produces, to query persistent and evergreen
+    # by relevance, and to measure how well the session already covers this
+    # turn. Embedding per record instead would put N calls on the hook path.
+    msg_vec = embed_text_sync(message, is_query=True)
+
     try:
-        extracted = extract_and_store(message)
+        extracted = extract_and_store(message, embedding=msg_vec)
     except Exception as exc:
         runlog.log_failure("memory.extract.failed", "arteries", exc, turn_id=turn_id)
         runlog.log_failure("turn.failed", "arteries", exc, turn_id=turn_id)
@@ -67,7 +74,7 @@ async def evaluate(message: str) -> str | None:
     )
 
     try:
-        frame = get_current_frame(message)
+        frame = get_current_frame(message, embedding=msg_vec)
     except Exception as exc:
         runlog.log_failure("memory.frame.failed", "arteries", exc, turn_id=turn_id)
         runlog.log_failure("turn.failed", "arteries", exc, turn_id=turn_id)
