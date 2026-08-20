@@ -149,7 +149,10 @@ def log_failure(
     return log_event(
         event_type,
         source,
-        {"error": str(exc)[:300], "error_type": type(exc).__name__},
+        # repr, not str: httpx timeout exceptions stringify to "", which is how
+        # 82 consecutive compile failures logged an empty error field and read
+        # as healthy on the control plane.
+        {"error": (str(exc) or repr(exc))[:300], "error_type": type(exc).__name__},
         project_id=project_id,
         run_id=run_id,
         turn_id=turn_id,

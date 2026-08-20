@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from typing import Any
 
@@ -29,9 +30,19 @@ import psycopg2.extras
 from arteries import runlog
 from arteries.config import AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL, PROJECT_ID
 
-MAX_EPHEMERAL_BATCH = 20
+MAX_EPHEMERAL_BATCH = 10
 MAX_PERSISTENT_CONTEXT = 15
 STALE_CLAIM_MINUTES = 2
+
+# Compilation is generation-bound, not prompt-bound: a 20-record batch measured
+# 0.43s to prefill 5.7k tokens and ~40s to generate 1.3k. The old 30s ceiling
+# cut every single pass off mid-generation -- 82 consecutive ReadTimeouts, and
+# not one persistent memory ever written. With the batch at 10 and the discard
+# rationale gone from the response, a pass generates ~500 tokens (~16s at the
+# 32 tok/s a 27B gets across two 3090s). 60s is ~3x that headroom.
+# ponytail: if this starts timing out again, the fix is a smaller compile model
+# or a smaller batch -- not a bigger number.
+COMPILE_TIMEOUT = float(os.getenv("ARTERIES_COMPILE_TIMEOUT", "60"))
 
 COMPILE_SYSTEM = """You are a memory compiler. You receive raw conversation extracts (ephemeral memories) and existing long-term memories (persistent). Your job:
 
@@ -54,16 +65,12 @@ Records marked [ASSISTANT] are stripped LLM responses. Extract only:
 - Constraints or limitations discovered during work.
 Discard everything else: narration, restatements of the user's request, code descriptions, and status updates.
 
-Respond with JSON only:
-{
-  "new_memories": [
-    {"fact": "...", "domains": ["..."], "confidence": 0.9}
-  ],
-  "superseded": [
-    {"persistent_id": "uuid", "reason": "replaced by: ..."}
-  ],
-  "skipped": ["reason ephemeral record N was not worth keeping"]
-}
+Respond with compact JSON only -- no indentation, no whitespace between keys:
+{"new_memories":[{"fact":"...","domains":["..."],"confidence":0.9}],"superseded":[{"persistent_id":"uuid","reason":"replaced by: ..."}]}
+
+Do not explain what you discarded. Compilation is generation-bound on local
+hardware, and prose about rejected records costs more time than the memories
+themselves.
 
 Be aggressive about filtering. Only keep facts that would be useful in a future conversation about this project. Skip greetings, transient debugging steps, and anything too vague to act on."""
 
@@ -96,7 +103,20 @@ async def compile_once() -> dict[str, Any]:
             runlog.log_event("memory.compile.completed", "arteries", stats, project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
             return stats
 
-        written = _write_results(conn, result, [r["id"] for r in claimed])
+        try:
+            written = _write_results(conn, result, [r["id"] for r in claimed])
+        except Exception as e:
+            # Previously unguarded. A failure here (most likely an embedding
+            # dimension mismatch) aborts the transaction, rolls back the inserts,
+            # and used to leave the batch stuck in 'compiling' with no path back.
+            conn.rollback()
+            _release_claimed(conn, [r["id"] for r in claimed])
+            stats = {"status": "write_error", "error": repr(e), "claimed": len(claimed)}
+            runlog.log_failure("memory.compile.write_failed", "arteries", e,
+                               project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
+            runlog.log_event("memory.compile.completed", "arteries", stats,
+                             project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
+            return stats
         stats = {
             "status": "compiled",
             "claimed": len(claimed),
@@ -112,16 +132,19 @@ async def compile_once() -> dict[str, Any]:
 def _release_stale_claims(conn) -> int:
     """Return old compiling records to uncompiled after a cancelled worker."""
     with conn.cursor() as cur:
+        # Not scoped to this agent_process_id. A claim is stranded precisely
+        # when the process that made it is gone, so scoping the sweep to the
+        # caller means nobody ever releases it -- records sat in 'compiling'
+        # for days that way. Any live worker sweeps for all of them.
         cur.execute(
             """
             UPDATE arteries.ephemeral
             SET status = 'uncompiled'
             WHERE project_id = %s
-              AND agent_process_id = %s
               AND status = 'compiling'
               AND source_ts < now() - (%s || ' minutes')::interval
             """,
-            (PROJECT_ID, AGENT_PROCESS_ID, STALE_CLAIM_MINUTES),
+            (PROJECT_ID, STALE_CLAIM_MINUTES),
         )
         released = cur.rowcount
         conn.commit()
@@ -222,7 +245,7 @@ Existing persistent memories:
                 "temperature": 0.1,
                 "response_format": {"type": "json_object"},
             },
-            timeout=30.0,
+            timeout=COMPILE_TIMEOUT,
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]

@@ -11,6 +11,7 @@ from typing import Any
 
 from arteries import memory_select, runlog, storage
 from arteries.cli_caps import get_capabilities
+from arteries.embed import embed_text_sync
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries.eventjson import event_messages, payload_text, read_stdin_json, text_from_mapping
 
@@ -81,13 +82,50 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
     return _limit(text, budget)
 
 
+# Packet entry criteria. The old rule was "top 12 of each tier", which is not a
+# criterion at all -- 36 candidates went in unranked and whichever ones happened
+# to fit the 18% memory budget survived, so what reached the agent was decided by
+# truncation order rather than by relevance. Now every candidate is scored, weak
+# ones are refused entry, and truncation can only ever drop the worst survivor.
+#
+# The floor applies only to rows that carry a similarity, i.e. ones chosen by the
+# relevance query. Ephemeral is selected by a different policy (this session,
+# this agent, recency) and has no similarity to be judged on; scoring it against
+# a scale it never competed on would silently empty the tier.
+MEMORY_SIMILARITY_FLOOR = float(os.getenv("ARTERIES_PACKET_FLOOR", "0.45"))
+MAX_PACKET_MEMORIES = 15
+NEUTRAL_SIMILARITY = 0.5
+TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95, "evergreen": 0.90}
+
+
+def _score(tier: str, row: dict[str, Any]) -> float | None:
+    """Blended entry score, or None if the row fails the floor."""
+    similarity = row.get("similarity")
+    if similarity is not None and float(similarity) < MEMORY_SIMILARITY_FLOOR:
+        return None
+    sim = NEUTRAL_SIMILARITY if similarity is None else float(similarity)
+    return sim * float(row.get("confidence") or 1.0) * TIER_WEIGHT[tier]
+
+
 def _load_memories(message: str, event: dict[str, Any] | None = None) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
-        ephemerals, persistents = memory_select.select_for_frame(message)
-        items.extend(_rows("ephemeral", ephemerals[:12]))
-        items.extend(_rows("persistent", persistents[:12]))
-        items.extend(_rows("evergreen", storage.get_evergreen(limit=12)))
+        msg_vec = embed_text_sync(message, is_query=True) if message else None
+        ephemerals, persistents = memory_select.select_for_frame(message, embedding=msg_vec)
+        evergreens = storage.get_evergreen(limit=20, query_embedding=msg_vec)
+
+        scored: list[tuple[float, str, dict[str, Any]]] = []
+        for tier, rows in (("ephemeral", ephemerals),
+                           ("persistent", persistents),
+                           ("evergreen", evergreens)):
+            for row in rows:
+                score = _score(tier, row)
+                if score is not None:
+                    scored.append((score, tier, row))
+        scored.sort(key=lambda t: t[0], reverse=True)
+
+        for _score_value, tier, row in scored[:MAX_PACKET_MEMORIES]:
+            items.extend(_rows(tier, [row]))
     except Exception as exc:
         items.append(MemoryItem(
             tier="status",

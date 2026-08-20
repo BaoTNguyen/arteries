@@ -43,10 +43,14 @@ def context_from_env() -> AgentContext:
     )
 
 
-def select_for_frame(message: str, context: AgentContext | None = None) -> tuple[list[dict], list[dict]]:
+def select_for_frame(
+    message: str,
+    context: AgentContext | None = None,
+    embedding: list[float] | None = None,
+) -> tuple[list[dict], list[dict]]:
     context = context or context_from_env()
     ephemerals = _select_ephemeral(context)
-    persistents = _select_persistent(message, context)
+    persistents = _select_persistent(message, context, embedding)
     return ephemerals, persistents
 
 
@@ -70,11 +74,15 @@ def _should_include_parent_ephemeral(context: AgentContext) -> bool:
     return context.capabilities.observes_subagents
 
 
-def _select_persistent(message: str, context: AgentContext) -> list[dict]:
+def _select_persistent(
+    message: str,
+    context: AgentContext,
+    embedding: list[float] | None = None,
+) -> list[dict]:
     if PERSISTENT_READ == "none":
         return []
     if PERSISTENT_READ == "relevance":
-        query_emb = embed_text_sync(message)
+        query_emb = embedding or embed_text_sync(message, is_query=True)
         has_emb = bool(query_emb) and storage.has_embeddings(context.project_id)
         if query_emb and has_emb:
             return storage.get_persistent_by_relevance(
