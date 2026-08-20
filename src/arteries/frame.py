@@ -24,9 +24,9 @@ from arteries import memory_select, storage
 logger = logging.getLogger(__name__)
 
 
-def get_current_frame(message: str) -> MemoryFrame:
+def get_current_frame(message: str, embedding: list[float] | None = None) -> MemoryFrame:
     try:
-        return _build_frame(message)
+        return _build_frame(message, embedding)
     except Exception:
         # An empty frame is a valid "no memories yet" answer, so a swallowed
         # failure here (Postgres down, embedder down) is invisible — it looks
@@ -35,10 +35,10 @@ def get_current_frame(message: str) -> MemoryFrame:
         return MemoryFrame()
 
 
-def _build_frame(message: str) -> MemoryFrame:
-    ephemerals, persistents = memory_select.select_for_frame(message)
+def _build_frame(message: str, embedding: list[float] | None = None) -> MemoryFrame:
+    ephemerals, persistents = memory_select.select_for_frame(message, embedding=embedding)
 
-    evergreens = storage.get_evergreen(limit=20)
+    evergreens = storage.get_evergreen(limit=20, query_embedding=embedding)
     # reinforce what we surfaced — this is the only writer of access_count
     storage.touch_evergreen([str(r["id"]) for r in evergreens if r.get("id")])
     retrievals = storage.get_recent_retrievals(PROJECT_ID, AGENT_PROCESS_ID, limit=10)

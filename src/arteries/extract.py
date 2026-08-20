@@ -111,8 +111,14 @@ def get_ephemeral_buffer() -> list[dict]:
     return _ephemeral_buffer
 
 
-def extract_and_store(message: str) -> int:
-    """Extract from message and insert into ephemeral storage. Returns count inserted."""
+def extract_and_store(message: str, embedding: list[float] | None = None) -> int:
+    """Extract from message and insert into ephemeral storage. Returns count inserted.
+
+    Every extraction from one turn came from one message, so they all share that
+    message's vector -- there is nothing to gain from embedding each row
+    separately, and doing so would put N HTTP calls on the hook path. The caller
+    embeds the message once and hands the vector down.
+    """
     extractions = extract_from_message(message)
     if EPHEMERAL_MODE == "discard":
         for ext in extractions:
@@ -131,6 +137,7 @@ def extract_and_store(message: str) -> int:
             domains=ext.domains,
             confidence=ext.confidence,
             parent_agent_id=PARENT_AGENT_ID,
+            embedding=embedding,
         )
     return len(extractions)
 
