@@ -8,7 +8,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS arteries.ephemeral (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     fact            TEXT NOT NULL,
-    embedding       VECTOR(768),
+    embedding       VECTOR(EMBED_DIM),
     domains         JSONB NOT NULL DEFAULT '[]',
     confidence      REAL NOT NULL DEFAULT 1.0,
     source_ts       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS idx_eph_domains
 CREATE TABLE IF NOT EXISTS arteries.persistent (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     fact            TEXT NOT NULL,
-    embedding       VECTOR(768),
+    embedding       VECTOR(EMBED_DIM),
     domains         JSONB NOT NULL DEFAULT '[]',
     confidence      REAL NOT NULL DEFAULT 1.0,
     source_ts       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_per_embedding
 CREATE TABLE IF NOT EXISTS arteries.evergreen (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     fact            TEXT NOT NULL,
-    embedding       VECTOR(768),
+    embedding       VECTOR(EMBED_DIM),
     domains         JSONB NOT NULL DEFAULT '[]',
     confidence      REAL NOT NULL DEFAULT 1.0,
     source_ts       TIMESTAMPTZ NOT NULL DEFAULT now(),
