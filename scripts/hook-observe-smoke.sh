@@ -2,8 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-CAPILLARIES_SRC="${CAPILLARIES_ROOT:-../capillaries}/src"
-export PYTHONPATH="src:${CAPILLARIES_SRC}:${PYTHONPATH:-}"
+source scripts/_env.sh
 export PLUGIN_DATA=1
 export CLAUDE_PLUGIN_ROOT="$PWD"
 
