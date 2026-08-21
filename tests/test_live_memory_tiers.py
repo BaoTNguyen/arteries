@@ -8,7 +8,7 @@ import psycopg2
 import psycopg2.extras
 
 from arteries import compile as compiler
-from arteries import extract, frame, storage
+from arteries import extract, frame, memory_select, storage
 from arteries.config import DB_CONFIG
 
 
@@ -27,6 +27,13 @@ class LiveMemoryTierTests(unittest.TestCase):
             patch.object(compiler, "AGENT_PROCESS_ID", self.agent_id),
             patch.object(extract, "PROJECT_ID", self.project_id),
             patch.object(extract, "AGENT_PROCESS_ID", self.agent_id),
+            # frame delegates tier selection to memory_select, which binds its
+            # own module-level copies of these at import. Patching only frame's
+            # left selection pointed at the real project, so the frame came back
+            # empty and swallowed by get_current_frame's except. The env patch
+            # below cannot fix it either -- config reads os.environ at import.
+            patch.object(memory_select, "PROJECT_ID", self.project_id),
+            patch.object(memory_select, "AGENT_PROCESS_ID", self.agent_id),
             patch.dict(os.environ, {
                 "ARTERIES_PROJECT": self.project_id,
                 "ARTERIES_AGENT_ID": self.agent_id,

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,8 @@ import psycopg2
 import psycopg2.extras
 
 from arteries.config import DB_CONFIG
+
+logger = logging.getLogger(__name__)
 
 # cognee matches at 0.8 and it is a reasonable default: high enough that
 # "postgres" does not capture "postgrest", low enough to absorb plurals and
@@ -198,14 +201,13 @@ def _lookup(db_config: dict | None = None) -> dict[str, tuple[str, str, str]]:
     global _cache
     if _cache is not None:
         return _cache
+    # Any failure here -- no database, no schema, no ontology_terms table --
+    # is the same situation as no ontology loaded: everything grounds unmatched
+    # and nothing raises. Grounding is an enhancement, never a gate, and it runs
+    # inside compile passes that must not die because a table is missing.
+    conn = None
     try:
         conn = psycopg2.connect(**(db_config or DB_CONFIG))
-    except Exception:
-        # No database is the same situation as no ontology: everything grounds
-        # unmatched, nothing fails. Grounding is an enhancement, not a gate.
-        _cache = {}
-        return _cache
-    try:
         with conn.cursor() as cur:
             cur.execute("SELECT uri, label, normalized, aliases, kind FROM arteries.ontology_terms")
             table: dict[str, tuple[str, str, str]] = {}
@@ -218,8 +220,12 @@ def _lookup(db_config: dict | None = None) -> dict[str, tuple[str, str, str]]:
                         continue
                     table[key] = (uri, kind, label)
             _cache = table
+    except Exception:
+        logger.debug("ontology lookup unavailable; grounding disabled", exc_info=True)
+        _cache = {}
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     return _cache
 
 
@@ -340,7 +346,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "stats":
-        rows = stats()
+        try:
+            rows = stats()
+        except Exception as exc:
+            print(f"cannot read the T-Box: {exc.__class__.__name__} -- "
+                  f"run `art setup-db` first")
+            return 1
         if not rows:
             print("no ontology loaded -- everything will ground as unmatched")
             return 0

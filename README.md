@@ -102,7 +102,7 @@ For memory and retrieval to work, keep these available locally:
 - the `capillaries` database
 - an OpenAI-compatible embedding endpoint, usually `http://127.0.0.1:8003/v1/embeddings`
 - an OpenAI-compatible chat/completions endpoint, usually `http://127.0.0.1:8001/v1/chat/completions`
-- capillaries importable on `PYTHONPATH`
+- capillaries importable (see [Development environment](#development-environment))
 
 Defaults live in `src/arteries/config.py` and environment variables can override them:
 
@@ -123,6 +123,90 @@ cd /home/bao-tn/Coding/Projects/arteries
 bash scripts/setup-db.sh
 ```
 
+## Development environment
+
+Work inside a virtualenv. Everything below assumes one at `.venv`.
+
+```bash
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install -e ../capillaries      # sibling first, it is not on PyPI
+.venv/bin/pip install -e '.[ontology]'
+```
+
+`--system-site-packages` is deliberate: capillaries drags in the ML stack
+(dspy, scikit-learn, pandas, the reranker), and there is no reason to build a
+second copy of it per checkout. If you would rather have a hermetic
+environment, drop the flag — the install just takes longer.
+
+Every script in `scripts/` sources `scripts/_env.sh`, which prefers
+`.venv/bin/python` and falls back to `python3` with `PYTHONPATH` set. So both
+of these work, and the first one is the one to prefer:
+
+```bash
+bash scripts/test.sh          # uses .venv when present
+.venv/bin/art ontology stats  # console script, installed by the editable install
+```
+
+The fallback exists so a fresh checkout runs before anyone has made a venv. It
+cannot see optional extras, so `art ontology load` will tell you to install
+rdflib rather than failing halfway.
+
+### What imports what
+
+Arteries declares two hard dependencies and one optional extra:
+
+| Import | Declared in | Used by | Notes |
+| --- | --- | --- | --- |
+| `psycopg2` | `dependencies` | everything touching Postgres | |
+| `httpx` | `dependencies` | `embed.py`, `compile.py` | |
+| `rdflib` | `[ontology]` extra | `ontology.load` only | never imported at runtime; grounding reads the cached T-Box out of Postgres and matches with stdlib `difflib` |
+
+Capillaries is a hard requirement that **cannot be declared** — it is not on
+PyPI, so naming it in `pyproject.toml` would resolve to a stranger's package.
+Install the sibling checkout first. Arteries imports four things from it:
+
+| Import | Where | Degrades if missing? |
+| --- | --- | --- |
+| `capillaries.config.paths` (`EMBED_MODEL`, `EMBED_DIM`, `EMBED_URL`, `QUERY_PREFIX`) | `config.py` | yes — falls back to local defaults |
+| `capillaries.agent.inference.DOMAIN_KEYWORDS` | `extract.py` | yes — falls back to `evergreen.DOMAIN_KEYWORDS` |
+| `capillaries.agent.gate.gate` | `eval.py` | no — hard import |
+| `capillaries.find.find` | `eval.py` | no — hard import |
+
+The embedding config is a **shared contract**, not an arteries setting: both
+projects write vectors into the same Postgres, so the model and dimension have
+to agree. They silently disagreed once — capillaries moved to
+Qwen3-Embedding-0.6B at 1024 dims while arteries stayed on arctic-embed at 768,
+which would have failed every embedding write. Importing the values rather than
+restating them is what stops that recurring. `migrate_embed_dim.py` resizes an
+existing database when the model changes.
+
+## Ontology grounding
+
+Extracted names are grounded against a vocabulary so that "vector store",
+"vector database", and "the pgvector store" collapse to one node instead of
+fragmenting the graph into synonyms.
+
+```bash
+.venv/bin/art ontology load prov-o.ttl --source prov-o
+.venv/bin/art ontology load skos.rdf --source skos
+.venv/bin/art ontology stats
+.venv/bin/art ontology resolve "was derived from"
+```
+
+Any format rdflib reads works: Turtle, RDF/XML, N-Triples, JSON-LD. Reloading
+the same `--source` replaces its terms, so editing a `.ttl` and re-running is
+the expected loop.
+
+PROV-O is the recommended starting vocabulary. `wasDerivedFrom`,
+`wasRevisionOf`, `wasGeneratedBy`, and `wasInvalidatedBy` map onto lineage
+arteries already tracks in `parent_ids`, `superseded_by`, and the compile run
+that produced a fact. SKOS covers the domain taxonomy.
+
+A name the ontology does not recognise is **kept with `ontology_valid = false`**,
+never dropped — a vocabulary you are still growing must not eat the facts it
+does not cover yet. A wrong canonicalization asserts a false identity; a miss
+costs nothing, so the matching cutoff is tuned to prefer the miss.
+
 ## Command entry points
 
 If the package is installed, use `art`:
@@ -141,7 +225,7 @@ cd /home/bao-tn/Coding/Projects/arteries
 bash scripts/art.sh setup --list
 ```
 
-The wrapper sets `PYTHONPATH` for arteries and capillaries. It also remembers the directory you called it from, so setup commands can target the current project without `--cwd`.
+The wrapper resolves the interpreter through `scripts/_env.sh`. It also remembers the directory you called it from, so setup commands can target the current project without `--cwd`.
 
 ## Set up a project
 
@@ -506,14 +590,19 @@ ID prefixes are matched uniquely — pass enough characters to be unambiguous.
 Run local tests without Postgres or model services:
 
 ```bash
-bash scripts/test.sh
+bash scripts/test.sh              # unittest, via scripts/_env.sh
+.venv/bin/python -m pytest tests/ -q
 ```
 
-Run live memory-tier tests against Postgres:
+Run live tests against Postgres:
 
 ```bash
-PYTHONPATH=src ARTERIES_LIVE_TESTS=1 python3 -m unittest tests.test_live_memory_tiers -v
+ARTERIES_LIVE_TESTS=1 .venv/bin/python -m pytest tests/ -q
 ```
+
+The live set covers the memory tiers and the ontology loader. The loader test
+needs the `[ontology]` extra; without it that one test skips rather than
+failing.
 
 The live tests create temporary records and clean up after themselves. The persistent compile path mocks the external LLM call, so it only needs Postgres.
 

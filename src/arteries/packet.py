@@ -104,7 +104,7 @@ def _score(tier: str, row: dict[str, Any]) -> float | None:
     if similarity is not None and float(similarity) < MEMORY_SIMILARITY_FLOOR:
         return None
     sim = NEUTRAL_SIMILARITY if similarity is None else float(similarity)
-    return sim * float(row.get("confidence") or 1.0) * TIER_WEIGHT[tier]
+    return sim * float(row.get("confidence") or 1.0) * TIER_WEIGHT.get(tier, 1.0)
 
 
 def _load_memories(message: str, event: dict[str, Any] | None = None) -> list[MemoryItem]:
