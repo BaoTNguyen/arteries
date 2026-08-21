@@ -125,7 +125,26 @@ bash scripts/setup-db.sh
 
 ## Development environment
 
-Work inside a virtualenv. Everything below assumes one at `.venv`.
+Work inside a virtualenv at `.venv`. uv is the primary path, matching
+capillaries:
+
+```bash
+uv sync --extra ontology
+```
+
+That is the whole setup. It creates `.venv`, installs arteries editable,
+resolves capillaries from the sibling checkout via `[tool.uv.sources]`, and
+pulls rdflib for the ontology loader. A cold sync takes about seven seconds
+because uv shares its cache with the capillaries checkout next door.
+
+`uv.lock` is committed. Re-lock after changing dependencies:
+
+```bash
+uv lock
+uv run pytest tests/ -q
+```
+
+Plain pip still works for anyone without uv:
 
 ```bash
 python3 -m venv --system-site-packages .venv
@@ -133,18 +152,17 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -e '.[ontology]'
 ```
 
-`--system-site-packages` is deliberate: capillaries drags in the ML stack
-(dspy, scikit-learn, pandas, the reranker), and there is no reason to build a
-second copy of it per checkout. If you would rather have a hermetic
-environment, drop the flag — the install just takes longer.
+`--system-site-packages` on the pip path avoids rebuilding capillaries' ML
+stack (dspy, scikit-learn, pandas, the reranker) per checkout. uv does not need
+the flag; its cache hardlinks instead of copying.
 
 Every script in `scripts/` sources `scripts/_env.sh`, which prefers
 `.venv/bin/python` and falls back to `python3` with `PYTHONPATH` set. So both
 of these work, and the first one is the one to prefer:
 
 ```bash
-bash scripts/test.sh          # uses .venv when present
-.venv/bin/art ontology stats  # console script, installed by the editable install
+bash scripts/test.sh              # uses .venv when present, whoever created it
+uv run art ontology stats         # or .venv/bin/art, same thing
 ```
 
 The fallback exists so a fresh checkout runs before anyone has made a venv. It
@@ -160,10 +178,18 @@ Arteries declares two hard dependencies and one optional extra:
 | `psycopg2` | `dependencies` | everything touching Postgres | |
 | `httpx` | `dependencies` | `embed.py`, `compile.py` | |
 | `rdflib` | `[ontology]` extra | `ontology.load` only | never imported at runtime; grounding reads the cached T-Box out of Postgres and matches with stdlib `difflib` |
+| `pytest` | `dev` group | tests | `uv sync` installs it; pip ignores groups |
 
-Capillaries is a hard requirement that **cannot be declared** — it is not on
-PyPI, so naming it in `pyproject.toml` would resolve to a stranger's package.
-Install the sibling checkout first. Arteries imports four things from it:
+`uv sync --extra ontology` gets all of the above. `pip install -e '.[ontology]'`
+gets everything except the `dev` group, which is where capillaries lives — see
+below.
+
+Capillaries is a hard requirement that pip cannot resolve — it is not on PyPI,
+so naming it in `dependencies` would fetch a stranger's package. It is declared
+in the `dev` dependency group with `[tool.uv.sources]` pinning it to
+`../capillaries`, which gives uv a real declaration while leaving
+`pip install -e .` working, since PEP 735 groups are opt-in. On the pip path,
+install the sibling yourself. Arteries imports four things from it:
 
 | Import | Where | Degrades if missing? |
 | --- | --- | --- |
@@ -187,10 +213,10 @@ Extracted names are grounded against a vocabulary so that "vector store",
 fragmenting the graph into synonyms.
 
 ```bash
-.venv/bin/art ontology load prov-o.ttl --source prov-o
-.venv/bin/art ontology load skos.rdf --source skos
-.venv/bin/art ontology stats
-.venv/bin/art ontology resolve "was derived from"
+uv run art ontology load prov-o.ttl --source prov-o
+uv run art ontology load skos.rdf --source skos
+uv run art ontology stats
+uv run art ontology resolve "was derived from"
 ```
 
 Any format rdflib reads works: Turtle, RDF/XML, N-Triples, JSON-LD. Reloading
@@ -591,13 +617,13 @@ Run local tests without Postgres or model services:
 
 ```bash
 bash scripts/test.sh              # unittest, via scripts/_env.sh
-.venv/bin/python -m pytest tests/ -q
+uv run pytest tests/ -q
 ```
 
 Run live tests against Postgres:
 
 ```bash
-ARTERIES_LIVE_TESTS=1 .venv/bin/python -m pytest tests/ -q
+ARTERIES_LIVE_TESTS=1 uv run pytest tests/ -q
 ```
 
 The live set covers the memory tiers and the ontology loader. The loader test
