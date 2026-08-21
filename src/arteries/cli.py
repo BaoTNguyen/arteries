@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, evergreen, inspect, packet, remember, runs, setup_cli, setup_db, trace
+from arteries import doctor, evergreen, inspect, ontology, packet, remember, runs, setup_cli, setup_db, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "evergreen", "ontology", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -35,6 +35,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return setup_cli.main(ns.args)
     if ns.command == "evergreen":
         return evergreen.main(ns.args)
+
+    if ns.command == "ontology":
+        return ontology.main(ns.args)
     if ns.command == "setup-db":
         setup_db.setup()
         return 0
