@@ -203,3 +203,118 @@ CREATE INDEX IF NOT EXISTS idx_decisions_type_created
 
 CREATE INDEX IF NOT EXISTS idx_rewards_episode_created
     ON arteries.rewards (episode_id, created_at ASC);
+
+-- ============================================================================
+-- Knowledge graph: T-Box (the ontology) and A-Box (entities, edges, documents)
+--
+-- The tiers above stay tables with vectors. This is the layer that gives them
+-- structure: canonical entities instead of restated strings, typed edges
+-- instead of UUID[] columns, and provenance that survives a supersede.
+-- ============================================================================
+
+-- T-Box: the ontology, cached from an RDF file so nothing at runtime needs
+-- rdflib. `art ontology load` writes this; everything else only reads it.
+CREATE TABLE IF NOT EXISTS arteries.ontology_terms (
+    uri             TEXT PRIMARY KEY,
+    label           TEXT NOT NULL,
+    normalized      TEXT NOT NULL,   -- lowercased, underscored: the match key
+    parent_uri      TEXT,            -- rdfs:subClassOf / subPropertyOf, for BFS
+    kind            TEXT NOT NULL DEFAULT 'class',  -- class | property | individual
+    aliases         TEXT[] NOT NULL DEFAULT '{}',  -- extra match keys (URI fragment, altLabels)
+    comment         TEXT,
+    source          TEXT NOT NULL,   -- which ontology file it came from
+    loaded_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_onto_normalized ON arteries.ontology_terms (normalized);
+CREATE INDEX IF NOT EXISTS idx_onto_kind ON arteries.ontology_terms (kind, normalized);
+CREATE INDEX IF NOT EXISTS idx_onto_parent ON arteries.ontology_terms (parent_uri);
+
+-- Must precede the index below: CREATE TABLE IF NOT EXISTS is a no-op on an
+-- existing table, so a database created before aliases existed has no column
+-- for the index to build on.
+ALTER TABLE arteries.ontology_terms
+    ADD COLUMN IF NOT EXISTS aliases TEXT[] NOT NULL DEFAULT '{}';
+
+CREATE INDEX IF NOT EXISTS idx_onto_aliases ON arteries.ontology_terms USING gin (aliases);
+
+-- Entities: the canonical names a claim can be about. The UNIQUE constraint is
+-- first-pass entity resolution -- two extractions that normalize to the same
+-- name become one node. ontology_valid records whether the T-Box recognised it,
+-- exactly as cognee flags it: unmatched entities are kept, not dropped.
+CREATE TABLE IF NOT EXISTS arteries.entities (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id      TEXT NOT NULL,
+    name            TEXT NOT NULL,   -- canonical (ontology label when matched)
+    raw_name        TEXT NOT NULL,   -- what the extractor actually said
+    kind            TEXT NOT NULL DEFAULT 'concept',  -- concept | module | dependency
+    ontology_class  TEXT,            -- URI into ontology_terms, NULL if unmatched
+    ontology_valid  BOOLEAN NOT NULL DEFAULT false,
+    match_score     REAL,            -- difflib ratio that produced the match
+    embedding       VECTOR(EMBED_DIM),
+    metadata        JSONB NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical
+    ON arteries.entities (project_id, kind, lower(name));
+CREATE INDEX IF NOT EXISTS idx_entities_class ON arteries.entities (ontology_class);
+
+-- Documents and chunks. These are *project docs that become claims*, not the
+-- prompt corpus -- capillaries owns public.prompt_chunks for that.
+CREATE TABLE IF NOT EXISTS arteries.documents (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id      TEXT NOT NULL,
+    path            TEXT NOT NULL,
+    digest          TEXT NOT NULL,   -- skip re-ingest when unchanged
+    kind            TEXT NOT NULL DEFAULT 'markdown',
+    metadata        JSONB NOT NULL DEFAULT '{}',
+    ingested_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_path
+    ON arteries.documents (project_id, path);
+
+CREATE TABLE IF NOT EXISTS arteries.chunks (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id     UUID NOT NULL REFERENCES arteries.documents(id) ON DELETE CASCADE,
+    project_id      TEXT NOT NULL,
+    ord             INT NOT NULL,
+    text            TEXT NOT NULL,
+    line_start      INT,
+    line_end        INT,
+    embedding       VECTOR(EMBED_DIM)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_document ON arteries.chunks (document_id, ord);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+    ON arteries.chunks USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- Typed edges over every node kind above. src/dst ids are TEXT because the
+-- things being linked have heterogeneous key types: UUID for memories and
+-- entities, TEXT for episodes and prompt ids.
+CREATE TABLE IF NOT EXISTS arteries.memory_edges (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id      TEXT NOT NULL,
+    src_kind        TEXT NOT NULL,   -- ephemeral|persistent|evergreen|entity|chunk|document
+    src_id          TEXT NOT NULL,
+    dst_kind        TEXT NOT NULL,
+    dst_id          TEXT NOT NULL,
+    rel             TEXT NOT NULL,   -- derived_from|supersedes|mentions|is_a|is_part_of...
+    weight          REAL NOT NULL DEFAULT 1.0,   -- decays traversal score per hop
+    ontology_valid  BOOLEAN NOT NULL DEFAULT false,
+    metadata        JSONB NOT NULL DEFAULT '{}', -- e.g. {"reason": ...} on supersedes
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    valid_until     TIMESTAMPTZ      -- same tombstone convention as persistent
+);
+
+CREATE INDEX IF NOT EXISTS idx_edges_src
+    ON arteries.memory_edges (project_id, src_kind, src_id) WHERE valid_until IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edges_dst
+    ON arteries.memory_edges (project_id, dst_kind, dst_id) WHERE valid_until IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edges_rel
+    ON arteries.memory_edges (project_id, rel) WHERE valid_until IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
+    ON arteries.memory_edges (project_id, src_kind, src_id, rel, dst_kind, dst_id)
+    WHERE valid_until IS NULL;

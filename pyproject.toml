@@ -12,7 +12,14 @@ requires-python = ">=3.10"
 #   pip install -e ../capillaries && pip install -e .
 dependencies = [
     "psycopg2-binary>=2.9.0",
+    "httpx>=0.24.0",
 ]
+
+# rdflib is needed only by `art ontology load`, which runs by hand, once, when
+# you change your vocabulary. Grounding at runtime reads the parsed T-Box out of
+# Postgres and matches with stdlib difflib, so the hook path never imports it.
+[project.optional-dependencies]
+ontology = ["rdflib>=7.0.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
