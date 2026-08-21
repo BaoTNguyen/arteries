@@ -7,8 +7,11 @@ name = "arteries"
 version = "0.1.0"
 description = "Always-on memory layer for prompt retrieval"
 requires-python = ">=3.10"
-# capillaries is required but undeclared: it isn't on PyPI, so declaring it
-# would resolve to a stranger's package. Install the sibling first:
+# capillaries cannot go in `dependencies`: it isn't on PyPI, so pip would
+# resolve the name to a stranger's package. It lives in the `dev` group below
+# instead, where [tool.uv.sources] pins it to the sibling checkout -- uv gets a
+# real declaration, and `pip install -e .` still works because PEP 735 groups
+# are opt-in. Without uv, install the sibling first:
 #   pip install -e ../capillaries && pip install -e .
 dependencies = [
     "psycopg2-binary>=2.9.0",
@@ -20,6 +23,19 @@ dependencies = [
 # Postgres and matches with stdlib difflib, so the hook path never imports it.
 [project.optional-dependencies]
 ontology = ["rdflib>=7.0.0"]
+
+# `uv sync` installs this by default; pip ignores it unless asked. Capillaries
+# is a hard runtime requirement, not a dev convenience -- it sits here only
+# because this is the one place a local path can be declared without breaking
+# pip. See the note above `dependencies`.
+[dependency-groups]
+dev = [
+    "capillaries",
+    "pytest>=8.0",
+]
+
+[tool.uv.sources]
+capillaries = { path = "../capillaries", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]
