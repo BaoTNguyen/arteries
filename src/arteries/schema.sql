@@ -189,8 +189,19 @@ CREATE TABLE IF NOT EXISTS arteries.rewards (
     value          REAL NOT NULL,
     components     JSONB NOT NULL DEFAULT '{}',
     source         TEXT NOT NULL,
+    -- What the episode actually cost. actionlog.log_reward has written these
+    -- since 972bda2, which added them to the live database by hand and left
+    -- schema.sql for later -- so every fresh install had an INSERT naming
+    -- columns that did not exist.
+    tokens_in      INT,
+    tokens_out     INT,
+    cost_usd       NUMERIC(12, 6),
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE arteries.rewards ADD COLUMN IF NOT EXISTS tokens_in  INT;
+ALTER TABLE arteries.rewards ADD COLUMN IF NOT EXISTS tokens_out INT;
+ALTER TABLE arteries.rewards ADD COLUMN IF NOT EXISTS cost_usd   NUMERIC(12, 6);
 
 CREATE INDEX IF NOT EXISTS idx_episodes_project_created
     ON arteries.episodes (project_id, created_at DESC);
