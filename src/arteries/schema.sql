@@ -63,13 +63,14 @@ CREATE TABLE IF NOT EXISTS arteries.persistent (
     source_project_id TEXT,
     parent_ids      UUID[] DEFAULT '{}',   -- lineage: ephemeral records compiled from
     child_ids       UUID[] DEFAULT '{}',   -- lineage: evergreen records compiled into
-    scope           TEXT,             -- NULL = auto-compiled, 'user' = art remember
+    origin          TEXT,             -- NULL = compiled | 'user' = art remember | 'reviewed' = art docs
     source_meta     JSONB NOT NULL DEFAULT '{}',
     valid_from      TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_until     TIMESTAMPTZ
 );
 
-ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS scope TEXT;
+-- Renamed from `scope`, which collided with scope groups once those existed.
+ALTER TABLE arteries.persistent RENAME COLUMN scope TO origin;
 -- Document provenance: path, line span, and digest for facts imported
 -- through the `art docs` review flow. Was evergreen.source_meta.
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS source_meta JSONB NOT NULL DEFAULT '{}';

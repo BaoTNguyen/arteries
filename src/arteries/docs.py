@@ -235,7 +235,7 @@ def import_review(review_path: Path, write: bool = False) -> dict[str, Any]:
                 fact=block["fact"],
                 domains=block["domains"] or _infer_domains(block["fact"]),
                 confidence=block["confidence"],
-                scope="reviewed",
+                origin="reviewed",
                 source_meta=source_meta,
             ))
             existing.add(normalized)
