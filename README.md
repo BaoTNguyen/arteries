@@ -206,6 +206,35 @@ which would have failed every embedding write. Importing the values rather than
 restating them is what stops that recurring. `migrate_embed_dim.py` resizes an
 existing database when the model changes.
 
+## Getting things into memory
+
+| Command | For | Shape |
+| --- | --- | --- |
+| *(automatic)* | your turns in a coding CLI | the hook path |
+| `art observe` | one note from heart, plexus, or marrow | short text, stdin or argument |
+| `art ingest` | documents and plans | file, directory, or `-` for stdin |
+| `art docs` | mining a repo's Markdown for facts you approve | review file |
+| `art rewards` | episode rewards from marrow | JSONL on stdin |
+| `art remember` | a fact you are stating directly | argument |
+
+`art ingest` chunks, compiles, and graphs in one step, so a plan keeps its
+structure and every claim carries provenance back to the passage it came from:
+
+```bash
+art ingest design.md
+plexus plan --goal retrieval | art ingest - --kind plan --name plexus:goal/retrieval
+```
+
+`--kind plan` chunks finer than `--kind document`. A plan is read for its parts,
+not its gist: at document sizes a four-section plan came back as one claim, and
+at plan sizes the same text yields three, with each step keeping its own
+entities.
+
+Re-sending is free — an unchanged digest is a no-op.
+
+`art identity` sends nothing. It prints the environment an orchestrator should
+spawn a child with, so the child's memories attribute to the parent.
+
 ## The knowledge graph
 
 Compiling writes structure and facts together, so nothing reaches the graph that

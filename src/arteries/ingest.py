@@ -10,8 +10,9 @@ chunk goes through the same compile call the conversation path uses -- so it
 produces entities, relations, and decisions, and every claim carries a
 `derived_from` edge back to the chunk and document it came from.
 
-    art ingest-docs plan.md --kind plan
-    art ingest-docs docs/ --include '*.md'
+    art ingest plan.md --kind plan
+    art ingest docs/ --include '*.md'
+    plexus plan | art ingest - --kind plan --name plexus:goal/x
 
 Re-ingesting an unchanged file does nothing; the digest is the guard.
 """
@@ -37,6 +38,14 @@ from arteries.config import DB_CONFIG
 TARGET_CHARS = 1400
 MAX_CHARS = 2600
 
+# A plan is read for its parts, not its gist. Measured: a four-section plan fit
+# in one chunk under the document sizes and came back as a single claim -- the
+# dependency between steps and the rationale for the decision were summarised
+# away. Smaller chunks make each step its own unit, so each survives as its own
+# claim with its own entities.
+PLAN_TARGET_CHARS = 400
+PLAN_MAX_CHARS = 900
+
 
 @dataclass
 class Chunk:
@@ -46,8 +55,10 @@ class Chunk:
     line_end: int
 
 
-def split(text: str) -> list[Chunk]:
+def split(text: str, kind: str = "document") -> list[Chunk]:
     """Group paragraphs into chunks, breaking at headings and never mid-block."""
+    target = PLAN_TARGET_CHARS if kind == "plan" else TARGET_CHARS
+    cap = PLAN_MAX_CHARS if kind == "plan" else MAX_CHARS
     chunks: list[Chunk] = []
     buf: list[str] = []
     start = 1
@@ -65,13 +76,13 @@ def split(text: str) -> list[Chunk]:
     for i, raw in enumerate(lines, start=1):
         # A heading starts a new chunk: it is the document telling you where the
         # topic changes, which is better than any length heuristic.
-        if raw.startswith("#") and buf and len("\n".join(buf)) > TARGET_CHARS // 2:
+        if raw.startswith("#") and buf and len("\n".join(buf)) > target // 2:
             flush(i - 1)
             start = i
         if not buf:
             start = i
         buf.append(raw)
-        if len("\n".join(buf)) >= MAX_CHARS:
+        if len("\n".join(buf)) >= cap:
             flush(i)
     flush(len(lines))
     return chunks
@@ -101,7 +112,6 @@ async def ingest_text(text: str, *, name: str, project: str,
     from arteries import compile as compiler
     from arteries.embed import embed_texts_sync
 
-    path = Path(name)
     digest = _digest(text)
     scope_id = scope.scope_for(project) or project
     conn = psycopg2.connect(**DB_CONFIG)
@@ -142,7 +152,7 @@ async def ingest_text(text: str, *, name: str, project: str,
             )
             cur.execute("DELETE FROM arteries.chunks WHERE document_id = %s", (doc_id,))
 
-            chunks = split(text)
+            chunks = split(text, kind)
             vectors = embed_texts_sync([c.text for c in chunks])
             chunk_ids = []
             for c, vec in zip(chunks, vectors):
@@ -194,7 +204,7 @@ async def ingest_text(text: str, *, name: str, project: str,
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="art ingest-docs", description=__doc__)
+    parser = argparse.ArgumentParser(prog="art ingest", description=__doc__)
     parser.add_argument("target", help="a file, a directory, or - for stdin")
     parser.add_argument("--name",
                         help="identity to store stdin under; reuse it so re-sends dedupe")
