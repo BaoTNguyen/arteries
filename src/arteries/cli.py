@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, docs, inspect, ontology, packet, remember, runs, setup_cli, setup_db, trace
+from arteries import doctor, docs, inspect, ontology, packet, remember, runs, scope, setup_cli, setup_db, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "docs", "ontology", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "docs", "ontology", "scope", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -38,6 +38,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if ns.command == "ontology":
         return ontology.main(ns.args)
+
+    if ns.command == "scope":
+        return scope.main(ns.args)
     if ns.command == "setup-db":
         setup_db.setup()
         return 0
