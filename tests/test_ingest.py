@@ -91,3 +91,26 @@ class PlanChunkingTests(unittest.TestCase):
     def test_plan_chunks_still_break_on_headings(self):
         for c in ingest.split(self.PLAN, "plan"):
             self.assertLessEqual(len(c.text), ingest.PLAN_MAX_CHARS * 2)
+
+
+class ImageTests(unittest.TestCase):
+    """Arteries does not look at pictures. The description is an input."""
+
+    def test_image_suffixes_route_to_the_image_path(self):
+        for suffix in (".png", ".JPG", ".webp"):
+            self.assertIn(suffix.lower(), ingest.IMAGE_SUFFIXES)
+        self.assertNotIn(".md", ingest.IMAGE_SUFFIXES)
+
+    def test_no_description_and_no_vision_asks_rather_than_guesses(self):
+        import asyncio
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with patch.object(ingest, "describe_image", return_value=None):
+            result = asyncio.run(ingest.ingest_image(Path("/tmp/nope.png"), "proj"))
+        self.assertEqual(result["status"], "needs_description")
+
+    def test_vision_probe_is_false_when_the_endpoint_is_unreachable(self):
+        from unittest.mock import patch
+        with patch("httpx.get", side_effect=OSError("no server")):
+            self.assertFalse(ingest.vision_available())

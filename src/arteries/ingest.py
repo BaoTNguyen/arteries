@@ -35,6 +35,8 @@ from arteries.config import DB_CONFIG
 # Chunks are paragraph-grouped rather than fixed-width. A design document's unit
 # of meaning is the paragraph or the list under a heading, and splitting mid-
 # sentence to hit a token count is how you get claims with no subject.
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
 TARGET_CHARS = 1400
 MAX_CHARS = 2600
 
@@ -210,6 +212,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="identity to store stdin under; reuse it so re-sends dedupe")
     parser.add_argument("--include", action="append", default=None,
                         help="glob for directory mode (default *.md)")
+    parser.add_argument("--describe",
+                        help="description for an image; required unless a vision "
+                             "endpoint is configured")
     parser.add_argument("--kind", default="document",
                         help="document | plan | spec -- recorded on the document row")
     parser.add_argument("--project", default=None)
@@ -243,7 +248,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     for path in files:
-        result = asyncio.run(ingest_file(path.resolve(), project, args.kind))
+        if path.suffix.lower() in IMAGE_SUFFIXES:
+            result = asyncio.run(ingest_image(path.resolve(), project, args.describe))
+            if result["status"] == "needs_description":
+                print(f"  needs text {path}")
+                print("             no vision endpoint is answering, so pass "
+                      "--describe \"...\" with what it shows")
+                continue
+        else:
+            result = asyncio.run(ingest_file(path.resolve(), project, args.kind))
         if result["status"] == "unchanged":
             print(f"  unchanged  {path}")
         else:
@@ -253,3 +266,82 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# -- images --------------------------------------------------------------------
+#
+# Arteries does not look at pictures, and deliberately so. Whoever put the image
+# in front of you -- the coding agent in your terminal, or you -- has already
+# seen it, and their description will beat anything a small local model produces
+# from the same pixels. So the description is an input, and the image is stored
+# as a reference with a digest so provenance survives the file moving.
+#
+# If a vision endpoint is configured and actually answers, one is generated
+# instead. That is a convenience, not the design: `describe_image` returning
+# None is an ordinary outcome, not a failure.
+
+VISION_PROMPT = (
+    "Describe this image for a project memory. State what it shows, any text or "
+    "labels it contains, and any structure a reader would need to act on it "
+    "(boxes, arrows, columns, states). Be specific and factual. Do not speculate "
+    "about intent. Four sentences at most."
+)
+
+
+def vision_available() -> bool:
+    """Whether the configured endpoint accepts images at all."""
+    import httpx
+
+    from arteries.config import VISION_URL
+
+    try:
+        props = httpx.get(VISION_URL.replace("/v1/chat/completions", "/props"),
+                          timeout=3.0).json()
+        return bool((props.get("modalities") or {}).get("vision"))
+    except Exception:
+        return False
+
+
+def describe_image(path: Path) -> str | None:
+    """Ask the vision endpoint what an image shows. None when it cannot."""
+    import base64
+    import mimetypes
+
+    import httpx
+
+    from arteries.config import VISION_MODEL, VISION_URL
+
+    try:
+        data = base64.b64encode(path.read_bytes()).decode()
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        resp = httpx.post(VISION_URL, timeout=120.0, json={
+            "model": VISION_MODEL,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": VISION_PROMPT},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:{mime};base64,{data}"}},
+            ]}],
+        })
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None
+
+
+async def ingest_image(path: Path, project: str, description: str | None = None) -> dict:
+    """Store an image as a described document.
+
+    The description is what gets embedded, compiled, and graphed -- the bytes are
+    not searchable and never will be. The image itself is recorded by path and
+    digest so a claim can point back at the picture it came from.
+    """
+    description = (description or "").strip() or describe_image(path)
+    if not description:
+        return {"path": str(path), "status": "needs_description"}
+
+    digest = _digest(path.read_bytes().hex())
+    body = f"# Image: {path.name}\n\n{description}\n\nSource image: {path}"
+    result = await ingest_text(body, name=str(path), project=project, kind="image")
+    result["described_by"] = "supplied" if description else "vision"
+    result["digest"] = digest[:12]
+    return result
