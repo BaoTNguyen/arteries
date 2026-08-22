@@ -10,7 +10,7 @@ from arteries import doctor, docs, graph, inspect, ontology, packet, remember, r
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -66,10 +66,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _decisions(ns.args)
     if ns.command == "ingest":
         return _ingest(ns.args)
-    if ns.command == "backfill-embeddings":
-        return _backfill_embeddings(ns.args)
     if ns.command == "remember":
         return remember.main(ns.args)
+    if ns.command == "identity":
+        return _identity(ns.args)
+
     if ns.command == "spawn":
         return _spawn(list(ns.args))
     if ns.command == "search":
@@ -106,6 +107,40 @@ def _spawn(args: list[str]) -> int:
     env = {**os.environ, **subagent_env(AGENT_PROCESS_ID)}
     env.setdefault("ARTERIES_MEMORY", "subagent")
     os.execvpe(args[0], args, env)
+
+
+def _identity(args: Sequence[str]) -> int:
+    """Mint a subagent memory identity for an orchestrator to spawn with.
+
+    Arteries should not start processes -- heart orchestrates. What arteries
+    owns is memory attribution: a child needs its own agent id tagged with this
+    one as parent, so the parent's compile pass claims the child's ephemeral and
+    applies the [SUBAGENT] bar. This prints that environment and stops.
+    """
+    p = argparse.ArgumentParser(
+        prog="art identity",
+        description="Print the environment a subagent should be spawned with.",
+    )
+    p.add_argument("--parent", default=None, help="parent agent id (default: this one)")
+    p.add_argument("--role", default="subagent")
+    p.add_argument("--json", action="store_true", dest="as_json")
+    ns = p.parse_args(args)
+
+    import json as _json
+
+    from arteries.config import AGENT_PROCESS_ID
+    from arteries.subagent import subagent_env
+
+    env = subagent_env(ns.parent or AGENT_PROCESS_ID)
+    env.setdefault("ARTERIES_MEMORY", "subagent")
+    env.setdefault("ARTERIES_AGENT_ROLE", ns.role)
+
+    if ns.as_json:
+        print(_json.dumps(env, indent=2, sort_keys=True))
+    else:
+        for k, v in sorted(env.items()):
+            print(f"export {k}={v}")
+    return 0
 
 
 def _compile(args: list[str]) -> int:
@@ -190,56 +225,18 @@ def _decisions(args: Sequence[str]) -> int:
 def _ingest(args: Sequence[str]) -> int:
     p = argparse.ArgumentParser(
         prog="art ingest",
-        description="Backfill episode rewards from heart runs dir or episodes.jsonl.",
+        description="Ingest episode rewards. Reads JSONL from stdin by default.",
+        epilog="marrow emits these; `marrow export | art ingest` is the intended shape.",
     )
-    p.add_argument("path", help="heart runs directory or episodes.jsonl export")
+    p.add_argument("path", nargs="?",
+                   help="JSONL file or runs directory; omit to read stdin")
     ns = p.parse_args(args)
 
     from arteries import actionlog
 
-    n = actionlog.ingest_heart_episodes(ns.path)
+    n = actionlog.ingest_episodes(ns.path)
     print(f"ingested {n} episode rewards")
     return 0
-
-
-def _backfill_embeddings(args: Sequence[str]) -> int:
-    p = argparse.ArgumentParser(prog="art backfill-embeddings")
-    p.add_argument("--project", required=True)
-    p.add_argument("--batch", type=int, default=50)
-    ns = p.parse_args(args)
-
-    from arteries.embed import embed_text_sync
-
-    import psycopg2.extras
-    from arteries.config import DB_CONFIG
-
-    conn = psycopg2.connect(**DB_CONFIG)
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT id, fact FROM arteries.persistent
-            WHERE project_id = %s AND valid_until IS NULL AND embedding IS NULL
-            LIMIT %s
-            """,
-            (ns.project, ns.batch),
-        )
-        rows = cur.fetchall()
-
-    updated = 0
-    for r in rows:
-        vec = embed_text_sync(r["fact"])
-        if vec:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE arteries.persistent SET embedding = %s::vector WHERE id = %s",
-                    (vec, r["id"]),
-                )
-                conn.commit()
-            updated += 1
-    conn.close()
-    print(f"Backfilled {updated}/{len(rows)} persistent memories")
-    return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
