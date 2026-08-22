@@ -229,17 +229,18 @@ cat <<'EOF'
 ARTERIES MEMORY SYSTEM ACTIVE.
 
 This repo is connected to arteries project `{ctx.project_name}`.
-Arteries observes turns, builds ephemeral/persistent/evergreen memory, and may surface retrieved prompts as visible context.
+Arteries observes turns, builds ephemeral and persistent memory, and may surface retrieved prompts as visible context.
 EOF
 
 python3 - <<'PYEOF' 2>/dev/null || true
 from arteries import storage
+from arteries.config import PROJECT_ID
 
-rows = storage.get_evergreen(limit=8)
+rows = [r for r in storage.get_persistent(PROJECT_ID, limit=40) if r.get("scope")]
 if rows:
     print()
-    print("Evergreen preferences (authoritative source: arteries):")
-    for r in rows:
+    print("Stated preferences (authoritative source: arteries):")
+    for r in rows[:8]:
         print(f"- {{r['fact']}}")
 PYEOF
 '''
@@ -348,7 +349,7 @@ const isCodex = !isCopilot && Boolean(process.env.PLUGIN_DATA);
 const context = `ARTERIES MEMORY SYSTEM ACTIVE.
 
 This repo is connected to arteries project \\`{ctx.project_name}\\`.
-Arteries observes turns, builds ephemeral/persistent/evergreen memory, and may surface retrieved prompts as visible context.`;
+Arteries observes turns, builds ephemeral and persistent memory, and may surface retrieved prompts as visible context.`;
 
 function writeOutput(output) {{
   if (isCopilot) {{
@@ -671,13 +672,12 @@ statusMessage = "Recording arteries subagent metadata"
 def _codex_compact_prompt() -> str:
     return """When compacting this coding session, preserve continuity for Arteries.
 
-Prefer any Arteries continuity packet produced by `.arteries/hooks/hook-compact-packet.sh`. It already organizes continuity into current context, the most recent 10 Q/A pairs, ephemeral memory, persistent project memory, evergreen memory, and use rules.
+Prefer any Arteries continuity packet produced by `.arteries/hooks/hook-compact-packet.sh`. It already organizes continuity into current context, the most recent 10 Q/A pairs, ephemeral memory, persistent project memory, and use rules.
 
 Include:
 - current user intent and unresolved task state
 - the most recent 10 user/assistant exchanges when available
 - relevant ephemeral and persistent project memories
-- evergreen cross-project memories
 - recent decisions and constraints
 - files read, files modified, commands run, and validation status
 - blockers, open questions, and next steps
