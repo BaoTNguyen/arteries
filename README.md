@@ -232,6 +232,26 @@ entities.
 
 Re-sending is free — an unchanged digest is a no-op.
 
+### Images
+
+Arteries does not look at pictures, deliberately. Whoever put the image in front
+of you has already seen it, and their description beats what a small local model
+would produce from the same pixels. So the description is an input:
+
+```bash
+art ingest diagram.png --describe "Architecture: capillaries feeds arteries, which feeds heart. Arrows one way."
+```
+
+The description is what gets embedded, compiled, and graphed; the image is
+recorded by path and digest so a claim can point back at it. Ask for an image
+without one and arteries says so rather than storing a filename nobody can
+search.
+
+Set `ARTERIES_VISION_URL` to an endpoint that accepts images and `--describe`
+becomes optional — descriptions are generated at ingest instead. `llama-server`
+answers only when started with `--mmproj`; without it, `vision_available()` is
+false and the supplied-description path is the one that runs.
+
 `art identity` sends nothing. It prints the environment an orchestrator should
 spawn a child with, so the child's memories attribute to the parent.
 
