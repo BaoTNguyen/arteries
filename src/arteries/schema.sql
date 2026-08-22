@@ -29,7 +29,6 @@ CREATE TABLE IF NOT EXISTS arteries.ephemeral (
     fact            TEXT NOT NULL,
     embedding       VECTOR(EMBED_DIM),
     domains         JSONB NOT NULL DEFAULT '[]',
-    confidence      REAL NOT NULL DEFAULT 1.0,
     source_ts       TIMESTAMPTZ NOT NULL DEFAULT now(),
     access_count    INT NOT NULL DEFAULT 0,
     project_id      TEXT NOT NULL,
@@ -46,6 +45,9 @@ CREATE INDEX IF NOT EXISTS idx_eph_agent
     WHERE status = 'uncompiled';
 
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'user';
+-- Dropped: it only ever held 1.0 for user turns and 0.5 for assistant ones,
+-- which is exactly what `source` already says.
+ALTER TABLE arteries.ephemeral DROP COLUMN IF EXISTS confidence;
 
 CREATE INDEX IF NOT EXISTS idx_eph_domains
     ON arteries.ephemeral USING gin (domains);
