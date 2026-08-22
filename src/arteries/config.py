@@ -15,6 +15,12 @@ DB_CONFIG = {
 GENERATE_URL = os.getenv("GENERATE_URL", "http://127.0.0.1:8001/v1/chat/completions")
 COMPILE_MODEL = os.getenv("ARTERIES_COMPILE_MODEL", "qwen3.6-27b")
 
+# Optional vision endpoint for describing images at ingest time. Defaults to the
+# generation server, which only answers if it was started with --mmproj; without
+# one, image ingestion asks for a description instead of guessing at the picture.
+VISION_URL = os.getenv("ARTERIES_VISION_URL", GENERATE_URL)
+VISION_MODEL = os.getenv("ARTERIES_VISION_MODEL", COMPILE_MODEL)
+
 # The embedding config is a shared contract, not an arteries setting: both
 # projects write vectors into the same Postgres and read each other's columns.
 # Prefer capillaries' values so the two ends can't drift -- the same reason
