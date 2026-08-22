@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, docs, graph, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
+from arteries import doctor, docs, graph, ingest_docs, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe", "ingest-docs", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -47,6 +47,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if ns.command == "observe":
         return observe.main(ns.args)
+
+    if ns.command == "ingest-docs":
+        return ingest_docs.main(ns.args)
     if ns.command == "eval":
         if not ns.args:
             parser.error("eval requires a prompt")
