@@ -44,3 +44,18 @@ class SplitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StdinIdentityTests(unittest.TestCase):
+    """Plexus plans and heart notes are generated in memory, never written to
+    disk. They still need a stable identity so re-sending dedupes."""
+
+    def test_generated_name_is_stable_for_identical_content(self):
+        a = f"stdin:plan:{ingest_docs._digest('same text')[:12]}"
+        b = f"stdin:plan:{ingest_docs._digest('same text')[:12]}"
+        self.assertEqual(a, b)
+
+    def test_generated_name_differs_when_content_changes(self):
+        a = ingest_docs._digest("plan v1")[:12]
+        b = ingest_docs._digest("plan v2")[:12]
+        self.assertNotEqual(a, b)
