@@ -12,10 +12,10 @@ import logging
 from arteries.memory_types import (
     CachedRetrieval,
     EphemeralMemory,
-    EvergreenMemory,
     Insight,
     MemoryFrame,
     PersistentMemory,
+    ScopeMemory,
 )
 
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
@@ -38,13 +38,10 @@ def get_current_frame(message: str, embedding: list[float] | None = None) -> Mem
 def _build_frame(message: str, embedding: list[float] | None = None) -> MemoryFrame:
     ephemerals, persistents = memory_select.select_for_frame(message, embedding=embedding)
 
-    evergreens = storage.get_evergreen(limit=20, query_embedding=embedding)
     # reinforce what we surfaced — this is the only writer of access_count
-    storage.touch_evergreen([str(r["id"]) for r in evergreens if r.get("id")])
     retrievals = storage.get_recent_retrievals(PROJECT_ID, AGENT_PROCESS_ID, limit=10)
 
     active_domains = storage.get_active_domains(PROJECT_ID)
-    recurring_domains = storage.get_recurring_domains()
 
     recent_messages = [r["fact"] for r in ephemerals[:10]]
 
@@ -90,21 +87,11 @@ def _build_frame(message: str, embedding: list[float] | None = None) -> MemoryFr
             ],
             active_domains=active_domains,
         ),
-        evergreen=EvergreenMemory(
-            user_intent=[
-                r["fact"] for r in evergreens
-                if "intent" in (r.get("domains") or [])
-            ],
-            recurring_domains=recurring_domains,
-            ground_truth_insights=[
-                Insight(
-                    text=r["fact"],
-                    source="evergreen",
-                    domain=(r.get("domains") or [None])[0],
-                    confidence=r.get("confidence", 1.0),
-                )
-                for r in evergreens
-            ],
+        # Sibling-repo context. Empty until scopes land -- and empty is exactly
+        # what this slot returned before, because the evergreen table it used to
+        # read never held a row. Retrieval state rides along here for now; it is
+        # the wrong home and moves in its own change.
+        scope=ScopeMemory(
             last_retrieval_ts=(
                 last_retrieval["created_at"].timestamp()
                 if last_retrieval else None

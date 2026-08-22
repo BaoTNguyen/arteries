@@ -47,7 +47,7 @@ async def evaluate(message: str) -> str | None:
     _capture_last_response(turn_id)
 
     # One embedding per turn, computed here and used three times: to stamp the
-    # ephemeral records this message produces, to query persistent and evergreen
+    # ephemeral records this message produces, to query persistent
     # by relevance, and to measure how well the session already covers this
     # turn. Embedding per record instead would put N calls on the hook path.
     msg_vec = embed_text_sync(message, is_query=True)
@@ -86,7 +86,7 @@ async def evaluate(message: str) -> str | None:
         {
             "recent_messages": len(frame.ephemeral.recent_messages),
             "session_insights": len(frame.persistent.session_insights),
-            "ground_truth_insights": len(frame.evergreen.ground_truth_insights),
+            "sibling_insights": len(frame.scope.sibling_insights),
         },
         turn_id=turn_id,
     )
@@ -94,7 +94,7 @@ async def evaluate(message: str) -> str | None:
         "memory.read_policy",
         chosen_action="read_none" if PERSISTENT_READ == "none" else "read_persistent_relevant",
         available_actions=[
-            "read_none", "read_persistent_relevant", "read_recent_ephemeral", "read_evergreen",
+            "read_none", "read_persistent_relevant", "read_recent_ephemeral", "read_scope",
         ],
         observation={
             "session_insights": len(frame.persistent.session_insights),

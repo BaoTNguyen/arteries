@@ -12,12 +12,12 @@ class ArtCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         setup_main.assert_called_once_with(["--list"])
 
-    def test_evergreen_dispatches_to_evergreen_cli(self):
-        with patch.object(cli.evergreen, "main", return_value=0) as evergreen_main:
-            result = cli.main(["evergreen", "extract", "--project", "."])
+    def test_docs_dispatches_to_docs_cli(self):
+        with patch.object(cli.docs, "main", return_value=0) as docs_main:
+            result = cli.main(["docs", "extract", "--project", "."])
 
         self.assertEqual(result, 0)
-        evergreen_main.assert_called_once_with(["extract", "--project", "."])
+        docs_main.assert_called_once_with(["extract", "--project", "."])
 
     def test_eval_prints_retrieved_prompt(self):
         async def fake_evaluate(prompt: str):

@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, evergreen, inspect, ontology, packet, remember, runs, setup_cli, setup_db, trace
+from arteries import doctor, docs, inspect, ontology, packet, remember, runs, setup_cli, setup_db, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "ontology", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "docs", "ontology", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -22,7 +22,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "command",
         nargs="?",
         choices=COMMANDS,
-        help="command to run: setup, evergreen, setup-db, eval, inspect, runs, doctor, packet, trace",
+        help="command to run: setup, docs, setup-db, eval, inspect, runs, doctor, packet, trace",
     )
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args(argv)
@@ -33,8 +33,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if ns.command == "setup":
         return setup_cli.main(ns.args)
-    if ns.command == "evergreen":
-        return evergreen.main(ns.args)
+    if ns.command == "docs":
+        return docs.main(ns.args)
 
     if ns.command == "ontology":
         return ontology.main(ns.args)

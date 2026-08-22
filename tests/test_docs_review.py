@@ -3,10 +3,10 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from arteries import evergreen
+from arteries import docs
 
 
-class EvergreenReviewTests(unittest.TestCase):
+class DocsReviewTests(unittest.TestCase):
     def test_extract_writes_human_editable_review_and_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -19,31 +19,31 @@ Temporary debug notes are not stable enough.
 """,
                 encoding="utf-8",
             )
-            out = root / "evergreen_review.md"
+            out = root / "docs_review.md"
 
-            candidates = evergreen.extract_candidates(root, ["AGENTS.md"])
-            evergreen.write_review(root, out, candidates, import_id="test-import")
+            candidates = docs.extract_candidates(root, ["AGENTS.md"])
+            docs.write_review(root, out, candidates, import_id="test-import")
 
             review_text = out.read_text(encoding="utf-8")
             self.assertIn("## Accepted Memories", review_text)
             self.assertIn("### mem_001", review_text)
             self.assertIn("Source: AGENTS.md:3-3", review_text)
-            self.assertTrue(evergreen.sidecar_path(out).exists())
+            self.assertTrue(docs.sidecar_path(out).exists())
 
     def test_parse_review_tracks_accepted_rejected_and_edits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            review = root / "evergreen_review.md"
-            evergreen.write_review(
+            review = root / "docs_review.md"
+            docs.write_review(
                 root,
                 review,
                 [
-                    evergreen.CandidateMemory(
+                    docs.CandidateMemory(
                         memory_id="mem_001",
                         fact="Arteries uses capillaries MemoryFrame.",
                         domains=["technical", "AI"],
                         confidence=0.9,
-                        source=evergreen.SourceSpan(
+                        source=docs.SourceSpan(
                             path="AGENTS.md",
                             line_start=1,
                             line_end=1,
@@ -74,7 +74,7 @@ Confidence: 0.95
 
 ### mem_manual
 
-User prefers explicit Markdown review before evergreen imports.
+User prefers explicit Markdown review before document imports.
 
 Source: manual
 Domains: intent
@@ -94,8 +94,8 @@ Reason: implementation detail
                 encoding="utf-8",
             )
 
-            _header, blocks = evergreen.parse_review(review)
-            summary = evergreen.import_review(review, write=False)
+            _header, blocks = docs.parse_review(review)
+            summary = docs.import_review(review, write=False)
 
             self.assertEqual(len(blocks), 3)
             self.assertEqual(summary["accepted"], 2)
@@ -104,22 +104,22 @@ Reason: implementation detail
             self.assertEqual(summary["manual"], 1)
             self.assertEqual(summary["inserted"], 0)
 
-    @patch.object(evergreen.storage, "get_evergreen", return_value=[])
-    @patch.object(evergreen.storage, "insert_evergreen", return_value="evergreen-id")
-    def test_import_review_writes_accepted_memories_with_source_meta(self, insert_evergreen, _get_evergreen):
+    @patch.object(docs.storage, "get_persistent", return_value=[])
+    @patch.object(docs.storage, "insert_persistent", return_value="persistent-id")
+    def test_import_review_writes_accepted_memories_with_source_meta(self, insert_persistent, _get_persistent):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            review = root / "evergreen_review.md"
-            evergreen.write_review(
+            review = root / "docs_review.md"
+            docs.write_review(
                 root,
                 review,
                 [
-                    evergreen.CandidateMemory(
+                    docs.CandidateMemory(
                         memory_id="mem_001",
                         fact="Arteries uses capillaries MemoryFrame.",
                         domains=["technical"],
                         confidence=0.9,
-                        source=evergreen.SourceSpan(
+                        source=docs.SourceSpan(
                             path="AGENTS.md",
                             line_start=1,
                             line_end=1,
@@ -153,11 +153,11 @@ Confidence: 0.95
                 encoding="utf-8",
             )
 
-            summary = evergreen.import_review(review, write=True)
+            summary = docs.import_review(review, write=True)
 
             self.assertEqual(summary["inserted"], 1)
-            insert_evergreen.assert_called_once()
-            kwargs = insert_evergreen.call_args.kwargs
+            insert_persistent.assert_called_once()
+            kwargs = insert_persistent.call_args.kwargs
             self.assertEqual(kwargs["fact"], "Arteries uses capillaries MemoryFrame as the stable integration contract.")
             self.assertEqual(kwargs["domains"], ["technical", "AI"])
             self.assertTrue(kwargs["source_meta"]["edited"])
@@ -166,12 +166,12 @@ Confidence: 0.95
             self.assertEqual(kwargs["source_meta"]["source_file"], "AGENTS.md")
             self.assertEqual(kwargs["source_meta"]["source_hash"], "sha256:test")
 
-    @patch.object(evergreen.storage, "get_evergreen", return_value=[])
-    @patch.object(evergreen.storage, "insert_evergreen", return_value="evergreen-id")
-    def test_import_review_reports_duplicate_memory_ids_and_blocks_write(self, insert_evergreen, _get_evergreen):
+    @patch.object(docs.storage, "get_persistent", return_value=[])
+    @patch.object(docs.storage, "insert_persistent", return_value="persistent-id")
+    def test_import_review_reports_duplicate_memory_ids_and_blocks_write(self, insert_persistent, _get_persistent):
         with tempfile.TemporaryDirectory() as tmp:
-            review = Path(tmp) / "evergreen_review.md"
-            evergreen.sidecar_path(review).write_text('{"memories": []}', encoding="utf-8")
+            review = Path(tmp) / "docs_review.md"
+            docs.sidecar_path(review).write_text('{"memories": []}', encoding="utf-8")
             review.write_text(
                 """---
 import_id: test-import
@@ -205,13 +205,13 @@ Reason: user moved this but forgot to remove accepted copy
                 encoding="utf-8",
             )
 
-            preview = evergreen.import_review(review, write=False)
-            written = evergreen.import_review(review, write=True)
+            preview = docs.import_review(review, write=False)
+            written = docs.import_review(review, write=True)
 
             self.assertEqual(preview["duplicate_ids"], ["mem_001"])
             self.assertTrue(preview["errors"])
             self.assertEqual(written["inserted"], 0)
-            insert_evergreen.assert_not_called()
+            insert_persistent.assert_not_called()
 
 
 if __name__ == "__main__":

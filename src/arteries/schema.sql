@@ -45,11 +45,15 @@ CREATE TABLE IF NOT EXISTS arteries.persistent (
     parent_ids      UUID[] DEFAULT '{}',   -- lineage: ephemeral records compiled from
     child_ids       UUID[] DEFAULT '{}',   -- lineage: evergreen records compiled into
     scope           TEXT,             -- NULL = auto-compiled, 'user' = art remember
+    source_meta     JSONB NOT NULL DEFAULT '{}',
     valid_from      TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_until     TIMESTAMPTZ
 );
 
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS scope TEXT;
+-- Document provenance: path, line span, and digest for facts imported
+-- through the `art docs` review flow. Was evergreen.source_meta.
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS source_meta JSONB NOT NULL DEFAULT '{}';
 
 CREATE INDEX IF NOT EXISTS idx_per_project
     ON arteries.persistent (project_id)
@@ -61,33 +65,6 @@ CREATE INDEX IF NOT EXISTS idx_per_domains
 CREATE INDEX IF NOT EXISTS idx_per_embedding
     ON arteries.persistent USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
-
--- Evergreen: global, cross-project. Promoted from persistent.
-CREATE TABLE IF NOT EXISTS arteries.evergreen (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    fact            TEXT NOT NULL,
-    embedding       VECTOR(EMBED_DIM),
-    domains         JSONB NOT NULL DEFAULT '[]',
-    confidence      REAL NOT NULL DEFAULT 1.0,
-    source_ts       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    access_count    INT NOT NULL DEFAULT 0,
-    parent_ids      UUID[] DEFAULT '{}',   -- lineage: persistent records compiled from
-    superseded_by   UUID,                  -- overwrite-with-lineage for contradictions
-    source_meta     JSONB NOT NULL DEFAULT '{}'
-);
-
-ALTER TABLE arteries.evergreen
-    ADD COLUMN IF NOT EXISTS source_meta JSONB NOT NULL DEFAULT '{}';
-
-CREATE INDEX IF NOT EXISTS idx_evg_domains
-    ON arteries.evergreen USING gin (domains);
-
-CREATE INDEX IF NOT EXISTS idx_evg_embedding
-    ON arteries.evergreen USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-
-CREATE INDEX IF NOT EXISTS idx_evg_source_meta
-    ON arteries.evergreen USING gin (source_meta);
 
 -- Retrieval log: tracks what was surfaced and whether it was used.
 -- Feeds prior_retrievals in the MemoryFrame and RLVR reward signal.

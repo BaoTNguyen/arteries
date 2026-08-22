@@ -49,7 +49,6 @@ class LiveMemoryTierTests(unittest.TestCase):
             cur.execute("DELETE FROM arteries.retrievals WHERE project_id = %s", (self.project_id,))
             cur.execute("DELETE FROM arteries.persistent WHERE project_id = %s", (self.project_id,))
             cur.execute("DELETE FROM arteries.ephemeral WHERE project_id = %s", (self.project_id,))
-            cur.execute("DELETE FROM arteries.evergreen WHERE fact LIKE 'ARTERIES_LIVE_TEST %'")
             conn.commit()
 
     def test_1_ephemeral_extracts_stores_and_enters_frame(self):
@@ -98,26 +97,3 @@ class LiveMemoryTierTests(unittest.TestCase):
         self.assertEqual(current_frame.persistent.session_insights[0].text, rows[0]["fact"])
         self.assertIn("technical", current_frame.persistent.active_domains)
 
-    def test_3_evergreen_reads_global_memory_into_frame(self):
-        fact = "ARTERIES_LIVE_TEST evergreen memory exposes user intent across projects."
-        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO arteries.evergreen (fact, domains, confidence)
-                VALUES (%s, %s::jsonb, %s)
-                """,
-                (fact, psycopg2.extras.Json(["intent", "technical"]), 0.93),
-            )
-            conn.commit()
-
-        rows = storage.get_evergreen(limit=10)
-        current_frame = frame.get_current_frame("testing evergreen memory")
-
-        self.assertTrue(any(row["fact"] == fact for row in rows))
-        self.assertIn(fact, current_frame.evergreen.user_intent)
-        self.assertTrue(any(insight.text == fact for insight in current_frame.evergreen.ground_truth_insights))
-        self.assertIn("intent", current_frame.evergreen.recurring_domains)
-
-
-if __name__ == "__main__":
-    unittest.main()
