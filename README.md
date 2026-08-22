@@ -120,7 +120,7 @@ Initialize the arteries schema once:
 
 ```bash
 cd /home/bao-tn/Coding/Projects/arteries
-bash scripts/setup-db.sh
+art setup <provider>   # applies the schema too
 ```
 
 ## Development environment
@@ -205,6 +205,26 @@ Qwen3-Embedding-0.6B at 1024 dims while arteries stayed on arctic-embed at 768,
 which would have failed every embedding write. Importing the values rather than
 restating them is what stops that recurring. `migrate_embed_dim.py` resizes an
 existing database when the model changes.
+
+## The knowledge graph
+
+Compiling writes structure and facts together, so nothing reaches the graph that
+did not survive promotion.
+
+```bash
+art graph stats                  # edge and entity counts
+art graph entities --kind dependency
+art graph why <memory-id>        # what this fact contradicts, refines, came from
+```
+
+Edges: `derived_from` (provenance back to the turns), `mentions` (to entities),
+`supports` / `refines` / `contradicts` / `depends_on` (between claims),
+`supersedes` (carrying the reason the compiler gives), and `chose` / `over` /
+`because` for decisions.
+
+It is one Postgres table and recursive CTEs — no graph database. Measured at the
+three-year projection (80k claims, 320k edges): one hop 0.15 ms, two 0.32 ms,
+three 2.1 ms.
 
 ## Ontology grounding
 
@@ -386,17 +406,43 @@ On compaction, arteries builds a continuity packet with:
 
 Arteries never fabricates missing assistant answers. If a CLI only exposes user prompts, the packet marks assistant text as not captured.
 
+## Scope: which repos share a memory
+
+A **scope** is a set of repos that read each other's persistent memory. Five
+harness repos behave as one brain; a standalone project keeps its own.
+
+```bash
+art scope add harness ~/Coding/Projects/{arteries,capillaries,heart,plexus,marrow}
+art scope show          # which group covers this directory
+art scope move marrow standalone
+```
+
+Arteries is **opt-in**: a directory that resolves to no scope is not observed at
+all — no ephemeral, no telemetry, no run log. `art setup` registers the repo it
+runs in, so setting a repo up is what opts it in.
+
+Tracking resolves by longest matching repo path, so subdirectories inherit and
+an untracked project stays untracked everywhere beneath it.
+
 ## Memory tiers
 
-Arteries stores memory in the `arteries` schema inside the shared `capillaries` database.
+Two tiers and a graph.
 
-Ephemeral memory is per project and per agent process. It is high churn. It captures recent observations before compilation.
+| Tier | Scope | Lifecycle |
+| --- | --- | --- |
+| **ephemeral** | one agent process | one row per turn, whole; exits by being compiled |
+| **persistent** | the scope group | distilled by the compile pass; tombstoned, never deleted |
+| **graph** | entities scoped to the group | written by the same pass that writes persistent |
 
-Persistent memory is per project. It stores compiled project facts, preferences, and decisions. Each persistent memory is embedded at compile time (via the embedding server at port 8003) and retrieved by vector similarity against the current message, so only relevant memories surface in the MemoryFrame.
+Evergreen is gone. It held zero rows for its entire existence, and the frame's
+third slot is now `scope` — context from sibling repos rather than a permanence
+claim nothing enforced.
 
-Evergreen memory is global. It stores cross-project facts you have explicitly imported or promoted.
+Promotion is one detached LLM pass per turn. It compares each candidate against
+**every** live persistent row in scope through the vector index: at or above
+0.93 cosine a fact is refused mechanically, and the 0.75–0.93 band is what the
+model sees so it can judge refinement against contradiction.
 
-Recent retrievals are also stored, so the frame can tell capillaries which prompts have already surfaced.
 
 ## Relevance-filtered retrieval
 
@@ -415,7 +461,7 @@ If the embedding server is down or no persistent memories have embeddings yet, r
 Backfill existing persistent memories:
 
 ```bash
-art backfill-embeddings --project career-ops
+art doctor --fix --project career-ops
 ```
 
 ## Subagent memory isolation
@@ -602,11 +648,11 @@ bash scripts/art.sh evergreen import --review evergreen_review.md --write
 Manage evergreen memories directly:
 
 ```bash
-art evergreen list
-art evergreen list --json
-art evergreen add "User prefers pytest" --domains "technical,testing" --confidence 0.9
-art evergreen edit <id-prefix> --fact "Updated fact" --domains "technical"
-art evergreen rm <id-prefix>
+art docs list
+art docs list --json
+art docs add "User prefers pytest" --domains "technical,testing" --confidence 0.9
+art docs edit <id-prefix> --fact "Updated fact" --domains "technical"
+art docs rm <id-prefix>
 ```
 
 ID prefixes are matched uniquely — pass enough characters to be unambiguous.
@@ -677,7 +723,7 @@ If Postgres is down, arteries still writes fallback JSONL under `.arteries/runs/
 These scripts are safe entry points to approve in Codex instead of approving broad `bash` access:
 
 ```bash
-bash scripts/setup-db.sh
+art setup <provider>   # applies the schema too
 bash scripts/test.sh
 bash scripts/live-test.sh
 bash scripts/eval.sh "thanks"
