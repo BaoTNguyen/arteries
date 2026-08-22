@@ -164,13 +164,14 @@ def insert_persistent(
     confidence: float = 1.0,
     scope: str | None = None,
     embedding: list[float] | None = None,
+    source_meta: dict[str, Any] | None = None,
 ) -> str:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO arteries.persistent
-                (fact, embedding, domains, confidence, project_id, scope)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+                (fact, embedding, domains, confidence, project_id, scope, source_meta)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::jsonb)
             RETURNING id
             """,
             (
@@ -180,6 +181,7 @@ def insert_persistent(
                 confidence,
                 project_id,
                 scope,
+                psycopg2.extras.Json(source_meta or {}),
             ),
         )
         conn.commit()
@@ -242,40 +244,6 @@ def get_active_domains(project_id: str) -> list[str]:
         return [r[0] for r in cur.fetchall()]
 
 
-# -- Evergreen ----------------------------------------------------------------
-
-def get_evergreen(
-    limit: int = 50,
-    query_embedding: list[float] | None = None,
-) -> list[dict[str, Any]]:
-    """Evergreen memories, ranked by relevance when a query vector is given.
-
-    Without one this is recency, which is what it always was -- and was wrong:
-    the tier holding ground truth was the only one not relevance-ranked.
-
-    Rows imported through the review flow are never embedded, so a project can
-    hold evergreen facts with NULL vectors. NULLS LAST ranks them below anything
-    that actually matched; dropping them would lose hand-curated memory.
-    """
-    order = ("embedding <=> %(vec)s::vector NULLS LAST, source_ts DESC"
-             if query_embedding else "source_ts DESC")
-    similarity = ("CASE WHEN embedding IS NULL THEN NULL "
-                  "ELSE 1 - (embedding <=> %(vec)s::vector) END AS similarity"
-                  if query_embedding else "NULL::real AS similarity")
-    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            f"""
-            SELECT id, fact, domains, confidence, source_ts, source_meta,
-                   {similarity}
-            FROM arteries.evergreen
-            WHERE superseded_by IS NULL
-            ORDER BY {order}
-            LIMIT %(limit)s
-            """,
-            {"vec": query_embedding, "limit": limit},
-        )
-        return [dict(r) for r in cur.fetchall()]
-
 def max_ephemeral_similarity(
     project_id: str,
     agent_process_id: str,
@@ -301,117 +269,6 @@ def max_ephemeral_similarity(
         )
         return float(cur.fetchone()[0])
 
-
-def touch_evergreen(ids: list[str]) -> None:
-    """Bump access_count for evergreen rows surfaced into a frame.
-
-    get_evergreen orders by access_count DESC, but nothing incremented it, so the
-    reinforcement was dead and ordering collapsed to source_ts. This closes that:
-    a fact that keeps getting surfaced floats up. Best-effort — never breaks the
-    read path that calls it.
-    # ponytail: counts surfacings, not usefulness — a usefulness signal (e.g.
-    # from arteries.rewards) would be better but is deferred. Rich-get-richer is
-    # bounded by the limit on how many rows a frame ever surfaces.
-    """
-    if not ids:
-        return
-    try:
-        with _conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE arteries.evergreen SET access_count = access_count + 1 "
-                "WHERE id = ANY(%s::uuid[])",
-                (ids,),
-            )
-            conn.commit()
-    except Exception:
-        pass
-
-
-def insert_evergreen(
-    fact: str,
-    domains: list[str],
-    confidence: float = 1.0,
-    parent_ids: list[str] | None = None,
-    embedding: list[float] | None = None,
-    source_meta: dict[str, Any] | None = None,
-) -> str:
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO arteries.evergreen
-                (fact, embedding, domains, confidence, parent_ids, source_meta)
-            VALUES (%s, %s, %s::jsonb, %s, %s::uuid[], %s::jsonb)
-            RETURNING id
-            """,
-            (
-                fact,
-                embedding,
-                psycopg2.extras.Json(domains),
-                confidence,
-                parent_ids or [],
-                psycopg2.extras.Json(source_meta or {}),
-            ),
-        )
-        conn.commit()
-        return str(cur.fetchone()[0])
-
-
-def update_evergreen(
-    evergreen_id: str,
-    fact: str | None = None,
-    domains: list[str] | None = None,
-    confidence: float | None = None,
-) -> bool:
-    sets, params = [], []
-    if fact is not None:
-        sets.append("fact = %s")
-        params.append(fact)
-    if domains is not None:
-        sets.append("domains = %s::jsonb")
-        params.append(psycopg2.extras.Json(domains))
-    if confidence is not None:
-        sets.append("confidence = %s")
-        params.append(confidence)
-    if not sets:
-        return False
-    params.append(evergreen_id)
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE arteries.evergreen SET {', '.join(sets)} WHERE id = %s AND superseded_by IS NULL",
-            params,
-        )
-        conn.commit()
-        return cur.rowcount > 0
-
-
-def remove_evergreen(evergreen_id: str) -> bool:
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM arteries.evergreen WHERE id = %s",
-            (evergreen_id,),
-        )
-        conn.commit()
-        return cur.rowcount > 0
-
-
-def get_recurring_domains() -> list[str]:
-    """Domains that appear in evergreen — user's cross-project patterns."""
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT d.value, COUNT(*) AS cnt
-            FROM arteries.evergreen,
-                 jsonb_array_elements_text(domains) AS d(value)
-            WHERE superseded_by IS NULL
-            GROUP BY d.value
-            ORDER BY cnt DESC
-            LIMIT 10
-            """,
-        )
-        return [r[0] for r in cur.fetchall()]
-
-
-# -- Retrievals ---------------------------------------------------------------
 
 def get_recent_retrievals(
     project_id: str,

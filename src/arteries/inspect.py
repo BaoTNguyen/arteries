@@ -22,7 +22,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "agent_id": ns.agent,
         "ephemeral": _safe(lambda: storage.get_ephemeral(ns.project, ns.agent, limit=10)),
         "persistent": _safe(lambda: storage.get_persistent(ns.project, limit=10)),
-        "evergreen": _safe(lambda: storage.get_evergreen(limit=10)),
         "recent_events": runlog.recent_events(ns.project, limit=ns.events),
     }
     print(json.dumps(summary, indent=2, sort_keys=True, default=str))

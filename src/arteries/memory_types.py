@@ -47,10 +47,22 @@ class PersistentMemory:
 
 
 @dataclass
-class EvergreenMemory:
+class ScopeMemory:
+    """Context from the other repos in this project's scope.
+
+    Was EvergreenMemory. The three tiers never described permanence -- they
+    describe how far out context reaches: ephemeral is this process, persistent
+    is this project, and this is wider than this project. Scope groups give that
+    slot a live source; the evergreen table it used to read never held a row.
+
+    `last_retrieval_ts` and `retrieval_confidence` are retrieval state rather
+    than memory and are in the wrong dataclass. Left alone for now -- moving
+    them is a separate contract change.
+    """
+
     user_intent: list[str] = field(default_factory=list)
     recurring_domains: list[str] = field(default_factory=list)
-    ground_truth_insights: list[Insight] = field(default_factory=list)
+    sibling_insights: list[Insight] = field(default_factory=list)
     last_retrieval_ts: float | None = None
     retrieval_confidence: float | None = None
 
@@ -59,14 +71,14 @@ class EvergreenMemory:
 class MemoryFrame:
     ephemeral: EphemeralMemory = field(default_factory=EphemeralMemory)
     persistent: PersistentMemory = field(default_factory=PersistentMemory)
-    evergreen: EvergreenMemory = field(default_factory=EvergreenMemory)
+    scope: ScopeMemory = field(default_factory=ScopeMemory)
 
 
 __all__ = [
     "CachedRetrieval",
     "EphemeralMemory",
-    "EvergreenMemory",
     "Insight",
     "MemoryFrame",
     "PersistentMemory",
+    "ScopeMemory",
 ]

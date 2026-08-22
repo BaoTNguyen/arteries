@@ -10,7 +10,7 @@ class EvaluateTests(unittest.IsolatedAsyncioTestCase):
         frame = SimpleNamespace(
             ephemeral=SimpleNamespace(recent_messages=[]),
             persistent=SimpleNamespace(session_insights=[]),
-            evergreen=SimpleNamespace(ground_truth_insights=[]),
+            scope=SimpleNamespace(sibling_insights=[]),
         )
 
         with patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-1"), \
@@ -48,7 +48,7 @@ class TurnEmbeddingTests(unittest.IsolatedAsyncioTestCase):
         frame = SimpleNamespace(
             ephemeral=SimpleNamespace(recent_messages=[]),
             persistent=SimpleNamespace(session_insights=[]),
-            evergreen=SimpleNamespace(ground_truth_insights=[]),
+            scope=SimpleNamespace(sibling_insights=[]),
         )
         vec = [0.5] * 8
 

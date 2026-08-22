@@ -22,12 +22,12 @@ from arteries import storage
 # Capillaries owns the domain taxonomy; prefer it so the two ends of the memory
 # channel can't drift. But extraction is a pure-memory op — it must not hard-fail
 # just because capillaries isn't installed. Fall back to arteries' own taxonomy
-# (evergreen.DOMAIN_KEYWORDS) when capillaries is absent; drift only in that
+# (docs.DOMAIN_KEYWORDS) when capillaries is absent; drift only in that
 # degraded mode, never when capillaries is present.
 try:
     from capillaries.agent.inference import DOMAIN_KEYWORDS
 except Exception:  # capillaries not installed / not importable
-    from arteries.evergreen import DOMAIN_KEYWORDS
+    from arteries.docs import DOMAIN_KEYWORDS
 
 # Patterns that signal extractable facts
 PREFERENCE_PATTERNS = re.compile(
