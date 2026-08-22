@@ -55,11 +55,18 @@ def integrity(project: str) -> dict[str, Any]:
 
             # No foreign key is possible: src/dst span tables with different key
             # types. A periodic sweep is the substitute.
+            # Every referencing kind, not just persistent. Chunks are deleted
+            # and rewritten on re-ingest, which is where these actually come
+            # from. `literal` endpoints hold text, not ids, and are skipped.
             cur.execute("""
                 SELECT count(*) FROM arteries.memory_edges e
-                WHERE e.valid_until IS NULL AND e.dst_kind = 'persistent'
-                  AND NOT EXISTS (SELECT 1 FROM arteries.persistent p
-                                  WHERE p.id::text = e.dst_id)
+                WHERE e.valid_until IS NULL
+                  AND ((e.dst_kind = 'persistent' AND NOT EXISTS
+                          (SELECT 1 FROM arteries.persistent p WHERE p.id::text = e.dst_id))
+                    OR (e.dst_kind = 'chunk' AND NOT EXISTS
+                          (SELECT 1 FROM arteries.chunks c WHERE c.id::text = e.dst_id))
+                    OR (e.dst_kind = 'entity' AND NOT EXISTS
+                          (SELECT 1 FROM arteries.entities n WHERE n.id::text = e.dst_id)))
             """)
             out["dangling_edges"] = cur.fetchone()[0]
 
@@ -99,8 +106,9 @@ def fix(project: str) -> dict[str, Any]:
                 LIMIT 200
             """, (project,))
             rows = cur.fetchall()
+        retired = _retire_dangling(conn)
         if not rows:
-            return {"embedded": 0}
+            return {"embedded": 0, "dangling_edges_retired": retired}
         vectors = embed_texts_sync([r["fact"] for r in rows])
         done = 0
         with conn.cursor() as cur:
@@ -111,7 +119,7 @@ def fix(project: str) -> dict[str, Any]:
                             (vec, row["id"]))
                 done += 1
             conn.commit()
-        return {"embedded": done, "of": len(rows)}
+        return {"embedded": done, "of": len(rows), "dangling_edges_retired": retired}
     finally:
         conn.close()
 
@@ -182,3 +190,26 @@ def _check_db() -> tuple[bool, bool, str | None]:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _retire_dangling(conn) -> int:
+    """Tombstone edges whose endpoint no longer exists.
+
+    memory_edges can carry no foreign key -- src and dst span tables with
+    different key types -- so referential integrity is swept rather than
+    enforced. Retired, not deleted: the same convention every other tier uses,
+    and a dangling edge is still evidence of what once pointed where.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE arteries.memory_edges e SET valid_until = now()
+            WHERE e.valid_until IS NULL
+              AND ((e.dst_kind = 'persistent' AND NOT EXISTS
+                      (SELECT 1 FROM arteries.persistent p WHERE p.id::text = e.dst_id))
+                OR (e.dst_kind = 'chunk' AND NOT EXISTS
+                      (SELECT 1 FROM arteries.chunks c WHERE c.id::text = e.dst_id))
+                OR (e.dst_kind = 'entity' AND NOT EXISTS
+                      (SELECT 1 FROM arteries.entities n WHERE n.id::text = e.dst_id)))
+        """)
+        conn.commit()
+        return cur.rowcount
