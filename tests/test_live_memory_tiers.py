@@ -59,7 +59,8 @@ class LiveMemoryTierTests(unittest.TestCase):
         current_frame = frame.get_current_frame(message)
 
         self.assertEqual(inserted, 1)
-        self.assertEqual(rows[0]["fact"], "I prefer stdlib-first testing for ephemeral memory in arteries")
+        # verbatim, trailing period and all -- the sentence splitter is gone
+        self.assertEqual(rows[0]["fact"], message)
         self.assertEqual(rows[0]["domains"], ["technical"])
         self.assertIn(rows[0]["fact"], current_frame.ephemeral.recent_messages)
 
@@ -69,7 +70,6 @@ class LiveMemoryTierTests(unittest.TestCase):
             agent_process_id=self.agent_id,
             fact="User is testing persistent compilation for arteries memory tiers.",
             domains=["technical"],
-            confidence=0.8,
         )
 
         async def fake_llm_compile(ephemeral, persistent):

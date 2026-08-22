@@ -65,7 +65,15 @@ def main(argv: list[str] | None = None) -> int:
 
 def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = False) -> int:
     """Store an assistant response as ephemeral and log the capture events."""
-    stored = store_assistant_response(text)
+    # The user turn this replies to, so restatements of the question can be
+    # dropped. Best effort: no transcript means no reference and nothing is cut.
+    try:
+        from arteries.conversation import recent_turns
+        prior = recent_turns(limit=1)
+        user_turn = prior[-1] if prior else ""
+    except Exception:
+        user_turn = ""
+    stored = store_assistant_response(text, user_turn)
     preview = text[:2000]
     payload = {
         "assistant_preview": preview,
