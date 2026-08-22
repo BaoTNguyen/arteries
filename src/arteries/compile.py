@@ -27,7 +27,7 @@ import httpx
 import psycopg2
 import psycopg2.extras
 
-from arteries import runlog
+from arteries import graph, runlog, scope
 from arteries.config import AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL, PROJECT_ID
 from arteries.scope import SCOPE_CTE
 
@@ -49,7 +49,7 @@ COMPILE_SYSTEM = """You are a memory compiler. You receive raw conversation extr
 
 1. Distill the ephemeral records into concise, factual statements worth remembering long-term.
 2. Tag each with relevant domains from this list: technical, AI, business, strategy, product, finance, career, learning, personal, writing.
-3. If a new fact contradicts an existing persistent memory, mark the old one as superseded and note which new fact replaces it.
+3. If a new fact contradicts an existing persistent memory, mark the old one as superseded. Set "replaced_by" to the 0-based index of the entry in new_memories that replaces it, and give the reason.
 4. Deduplicate — if an ephemeral record says the same thing as an existing persistent memory, skip it.
 5. Assign confidence 0.0-1.0 based on how certain the fact is (corrections and explicit statements = high, inferred context = lower).
 
@@ -66,8 +66,18 @@ Records marked [ASSISTANT] are stripped LLM responses. Extract only:
 - Constraints or limitations discovered during work.
 Discard everything else: narration, restatements of the user's request, code descriptions, and status updates.
 
+For each memory also record:
+- "kind": one of fact | decision | preference | constraint.
+- "entities": the concrete things it is about, as {"name","kind"} where kind is
+  concept, module, or dependency. Name modules and dependencies as they appear
+  in the code. Do not invent entities for generic words.
+- "relations": how it interacts with the numbered existing memories above, as
+  {"persistent_id","rel"} where rel is supports, refines, contradicts, or
+  depends_on. Use the id exactly as given; omit the field if nothing relates.
+- "decision": only when kind is decision, as {"chose","over":[...],"because"}.
+
 Respond with compact JSON only -- no indentation, no whitespace between keys:
-{"new_memories":[{"fact":"...","domains":["..."],"confidence":0.9}],"superseded":[{"persistent_id":"uuid","reason":"replaced by: ..."}]}
+{"new_memories":[{"fact":"...","domains":["..."],"confidence":0.9,"kind":"fact","entities":[{"name":"pgvector","kind":"dependency"}],"relations":[{"persistent_id":"uuid","rel":"refines"}]}],"superseded":[{"persistent_id":"uuid","reason":"replaced by: ...","replaced_by":0}]}
 
 Do not explain what you discarded. Compilation is generation-bound on local
 hardware, and prose about rejected records costs more time than the memories
@@ -94,6 +104,17 @@ async def compile_once() -> dict[str, Any]:
 
         try:
             result = await _llm_compile(claimed, persistent_context)
+            problems = validate_response(result)
+            if problems:
+                runlog.log_event("memory.compile.invalid_response", "arteries",
+                                 {"problems": problems[:5], "attempt": 1},
+                                 project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
+                result = await _llm_compile(claimed, persistent_context, problems=problems)
+                problems = validate_response(result)
+                if problems:
+                    # Two bad responses is a prompt or model problem, not a blip.
+                    # Release the batch rather than writing malformed rows.
+                    raise ValueError(f"invalid compile response: {problems[:3]}")
         except asyncio.CancelledError:
             _release_claimed(conn, [r["id"] for r in claimed])
             raise
@@ -283,9 +304,44 @@ def _reject_duplicates(conn, memories: list[dict], vectors: list) -> tuple[list,
     return kept, kept_vecs, rejected
 
 
+_VALID_KINDS = {"fact", "decision", "preference", "constraint"}
+
+
+def validate_response(payload: Any) -> list[str]:
+    """Structural problems with a compile response. Empty means usable.
+
+    Grammar-constrained JSON is well-formed, not correct. This module already
+    validated UUIDs in Python because the model invents ids; entities and
+    relations give it more to invent, so the check moves up front and the call
+    is retried once when it fails.
+    """
+    problems: list[str] = []
+    if not isinstance(payload, dict):
+        return ["response is not an object"]
+    mems = payload.get("new_memories")
+    if not isinstance(mems, list):
+        return ["new_memories is not a list"]
+    for i, m in enumerate(mems):
+        if not isinstance(m, dict) or not str(m.get("fact", "")).strip():
+            problems.append(f"new_memories[{i}] has no fact")
+            continue
+        if m.get("kind") and m["kind"] not in _VALID_KINDS:
+            problems.append(f"new_memories[{i}] kind={m['kind']!r}")
+        for e in m.get("entities") or []:
+            if not isinstance(e, dict) or not str(e.get("name", "")).strip():
+                problems.append(f"new_memories[{i}] has a nameless entity")
+        for r in m.get("relations") or []:
+            if not isinstance(r, dict) or r.get("rel") not in graph.RELATIONS:
+                problems.append(f"new_memories[{i}] rel={(r or {}).get('rel')!r}")
+    if not isinstance(payload.get("superseded", []), list):
+        problems.append("superseded is not a list")
+    return problems
+
+
 async def _llm_compile(
     ephemeral: list[dict],
     persistent: list[dict],
+    problems: list[str] | None = None,
 ) -> dict:
     """Call the LLM to compile ephemeral records into persistent memories."""
     def _eph_line(i: int, r: dict) -> str:
@@ -308,6 +364,10 @@ async def _llm_compile(
 
 Existing persistent memories:
 {per_text}"""
+    if problems:
+        prompt += ("\n\nYour previous response was rejected for these reasons. "
+                   "Fix them and return the whole object again:\n- "
+                   + "\n- ".join(problems[:5]))
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -329,6 +389,14 @@ Existing persistent memories:
     return json.loads(content)
 
 
+def _is_uuid(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
     """Write compiled persistent records and mark ephemeral as cleared."""
     from arteries.embed import embed_texts_sync
@@ -348,13 +416,17 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
                          {"count": len(duplicates), "rejected": duplicates[:5]},
                          project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
 
+    scope_id = scope.scope_for(PROJECT_ID) or PROJECT_ID
+    new_ids: list[str] = []
+
     with conn.cursor() as cur:
         for mem, vec in zip(memories, vectors):
             cur.execute(
                 """
                 INSERT INTO arteries.persistent
-                    (fact, domains, confidence, project_id, parent_ids, embedding)
-                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector)
+                    (fact, domains, confidence, project_id, parent_ids, embedding, kind)
+                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s)
+                RETURNING id
                 """,
                 (
                     mem["fact"],
@@ -363,9 +435,43 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
                     PROJECT_ID,
                     claimed_ids,
                     vec,
+                    mem.get("kind", "fact"),
                 ),
             )
+            claim_id = str(cur.fetchone()[0])
+            new_ids.append(claim_id)
             new_count += 1
+
+            # Provenance: the ephemeral rows this was distilled from. They are
+            # endpoints only -- never entity-extracted, never nodes.
+            for eph_id in claimed_ids:
+                graph.add_edge(cur, PROJECT_ID, "persistent", claim_id,
+                               graph.DERIVED_FROM, "ephemeral", eph_id)
+
+            for ent in mem.get("entities") or []:
+                node = graph.upsert_entity(cur, scope_id, ent.get("name", ""),
+                                           ent.get("kind", "concept"))
+                if node:
+                    graph.add_edge(cur, PROJECT_ID, "persistent", claim_id,
+                                   graph.MENTIONS, "entity", node.id)
+
+            # How this fact interacts with ones already stored. The model only
+            # ever sees ids it was given, but it invents them anyway.
+            for rel in mem.get("relations") or []:
+                target = rel.get("persistent_id")
+                if rel.get("rel") not in graph.RELATIONS or not _is_uuid(target):
+                    continue
+                graph.add_edge(cur, PROJECT_ID, "persistent", claim_id,
+                               rel["rel"], "persistent", target)
+
+            decision = mem.get("decision") or {}
+            if mem.get("kind") == "decision" and decision.get("chose"):
+                graph.add_edge(cur, PROJECT_ID, "persistent", claim_id, "chose",
+                               "literal", str(decision["chose"])[:200],
+                               metadata={"because": str(decision.get("because", ""))[:500]})
+                for alt in (decision.get("over") or [])[:5]:
+                    graph.add_edge(cur, PROJECT_ID, "persistent", claim_id, "over",
+                                   "literal", str(alt)[:200])
 
         for sup in result.get("superseded", []):
             pid = sup.get("persistent_id")
@@ -392,6 +498,24 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
             )
             if cur.rowcount:
                 superseded_count += cur.rowcount
+                # The reason has been generated on every pass since this module
+                # was written and discarded every time. It lands on the edge.
+                #
+                # `replaced_by` indexes new_memories. Without it there is no
+                # honest source for the edge -- the batch as a whole retired the
+                # fact, not any one member -- so the tombstone stands alone.
+                idx = sup.get("replaced_by")
+                replacement = (new_ids[idx] if isinstance(idx, int) and 0 <= idx < len(new_ids)
+                               else None)
+                if replacement:
+                    graph.add_edge(cur, PROJECT_ID, "persistent", replacement,
+                                   graph.SUPERSEDES, "persistent", pid,
+                                   metadata={"reason": str(sup.get("reason", ""))[:500]})
+                else:
+                    runlog.log_event("memory.compile.supersede_unattributed", "arteries",
+                                     {"persistent_id": str(pid),
+                                      "reason": str(sup.get("reason", ""))[:200]},
+                                     project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
             else:
                 runlog.log_event("memory.compile.bad_supersede", "arteries",
                                  {"persistent_id": str(pid), "reason": "no live match"},
