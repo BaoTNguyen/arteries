@@ -54,12 +54,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="verify provider integration")
     parser.add_argument("--remove", action="store_true", help="remove provider integration")
     parser.add_argument("--list", action="store_true", help="list supported providers")
+    parser.add_argument("--purge", action="store_true",
+                        help="remove integration AND drop the arteries schema")
+    parser.add_argument("--dry-run", action="store_true", help="with --purge, print the plan only")
+    parser.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompts")
+    parser.add_argument("--scope", help="register this repo in a scope group (default: its own)")
+    parser.add_argument("--no-db", action="store_true",
+                        help="touch no database: skip schema setup and scope registration")
     args = parser.parse_args(argv)
 
     if args.list:
         for provider in PROVIDERS:
             print(f"{provider}\t{PROVIDER_LEVELS[provider]}")
         return 0
+
+    if args.purge:
+        return _purge(args)
 
     action_words = {"add": "install", "install": "install", "check": "check", "remove": "remove"}
     action = "check" if args.check else "remove" if args.remove else "install"
@@ -81,9 +91,105 @@ def main(argv: list[str] | None = None) -> int:
         capillaries_root=(args.capillaries_root or _default_capillaries_root(arteries_root)).resolve(),
     )
 
+    # --no-db keeps setup on the filesystem. Tests use it, and so does anyone
+    # laying down hooks before Postgres exists.
+    if action == "install" and not args.no_db:
+        _ensure_schema()
+        _register_scope(ctx, args.scope)
+
     result = RECIPES[provider][action](ctx)
     print(("OK: " if result.success else "ERROR: ") + result.message)
     return 0 if result.success else 1
+
+
+def _ensure_schema() -> None:
+    """Apply schema.sql. Absorbed from the old `art setup-db`, so a fresh repo
+    is one command rather than two that had to be run in the right order."""
+    try:
+        from arteries.setup_db import setup
+        setup()
+    except Exception as exc:
+        print(f"WARN: schema setup skipped ({exc.__class__.__name__}); "
+              f"memory writes will fail until Postgres is reachable")
+
+
+def _register_scope(ctx: Context, scope_id: str | None) -> None:
+    """Track this repo, so the opt-in gate in eval.py lets it write.
+
+    Its own singleton scope by default: setting up a repo is the act of opting
+    it in, and a group is something you ask for.
+    """
+    try:
+        from arteries import scope as scope_mod
+        existing = scope_mod.scope_for(ctx.project_name)
+        if existing and not scope_id:
+            print(f"OK: {ctx.project_name} already tracked in scope '{existing}'")
+            return
+        target = scope_id or ctx.project_name
+        scope_mod.add(target, [str(ctx.cwd)])
+        print(f"OK: tracking {ctx.project_name} in scope '{target}'")
+    except Exception as exc:
+        print(f"WARN: could not register scope ({exc.__class__.__name__}); "
+              f"run `art scope add <group> {ctx.cwd}` once Postgres is up")
+
+
+def _purge(args) -> int:
+    """Remove this repo's integration and drop arteries' tables.
+
+    Drops the *schema*, never the database. Arteries shares the capillaries
+    database (config.py), so DROP DATABASE here would take capillaries' prompts,
+    chunks, and skills with it. Dumps first; a failed dump aborts the drop.
+    """
+    import subprocess
+    from arteries.config import DB_CONFIG
+
+    cwd = args.cwd.resolve()
+    print(f"purge plan for {cwd}:")
+    for provider in PROVIDERS:
+        print(f"  - remove {provider} integration (if present)")
+    print(f"  - pg_dump arteries schema from database '{DB_CONFIG['database']}'")
+    print("  - DROP SCHEMA arteries CASCADE")
+    print("  - the database itself is NOT dropped; capillaries shares it")
+
+    if args.dry_run:
+        print("\ndry run -- nothing changed")
+        return 0
+    if not args.yes:
+        if input("\nproceed? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("aborted")
+            return 1
+
+    arteries_root = args.arteries_root.resolve()
+    for provider in PROVIDERS:
+        ctx = Context(cwd=cwd, arteries_root=arteries_root,
+                      project_name=args.project or cwd.name, cli_name=provider,
+                      capillaries_root=(args.capillaries_root
+                                        or _default_capillaries_root(arteries_root)).resolve())
+        try:
+            RECIPES[provider]["remove"](ctx)
+        except Exception:
+            pass
+
+    dump = cwd / f"arteries-purge-{int(__import__('time').time())}.sql"
+    cmd = ["pg_dump", "-n", "arteries", "-d", DB_CONFIG["database"], "-f", str(dump)]
+    if DB_CONFIG.get("host"):
+        cmd += ["-h", DB_CONFIG["host"]]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"ERROR: dump failed, refusing to drop: {proc.stderr.strip()[:200]}")
+        return 1
+    print(f"OK: dumped to {dump}")
+
+    import psycopg2
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DROP SCHEMA arteries CASCADE")
+            conn.commit()
+    finally:
+        conn.close()
+    print("OK: dropped schema arteries")
+    return 0
 
 def _default_arteries_root() -> Path:
     return Path(__file__).resolve().parents[2]

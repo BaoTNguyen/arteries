@@ -70,7 +70,16 @@ CREATE TABLE IF NOT EXISTS arteries.persistent (
 );
 
 -- Renamed from `scope`, which collided with scope groups once those existed.
-ALTER TABLE arteries.persistent RENAME COLUMN scope TO origin;
+-- Guarded: RENAME COLUMN is not idempotent and schema.sql is re-run on setup.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'arteries' AND table_name = 'persistent'
+                 AND column_name = 'scope') THEN
+        ALTER TABLE arteries.persistent RENAME COLUMN scope TO origin;
+    END IF;
+END $$;
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS origin TEXT;
 -- Document provenance: path, line span, and digest for facts imported
 -- through the `art docs` review flow. Was evergreen.source_meta.
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS source_meta JSONB NOT NULL DEFAULT '{}';
