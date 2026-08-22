@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, docs, inspect, ontology, packet, remember, runs, scope, setup_cli, setup_db, trace
+from arteries import doctor, docs, inspect, ontology, packet, remember, runs, scope, setup_cli, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "docs", "ontology", "scope", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "docs", "ontology", "scope", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -22,7 +22,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "command",
         nargs="?",
         choices=COMMANDS,
-        help="command to run: setup, docs, setup-db, eval, inspect, runs, doctor, packet, trace",
+        help="command to run: " + ", ".join(COMMANDS),
     )
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args(argv)
@@ -41,9 +41,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if ns.command == "scope":
         return scope.main(ns.args)
-    if ns.command == "setup-db":
-        setup_db.setup()
-        return 0
     if ns.command == "eval":
         if not ns.args:
             parser.error("eval requires a prompt")
