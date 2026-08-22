@@ -114,3 +114,56 @@ class ImageTests(unittest.TestCase):
         from unittest.mock import patch
         with patch("httpx.get", side_effect=OSError("no server")):
             self.assertFalse(ingest.vision_available())
+
+
+class EmbeddedImageTests(unittest.TestCase):
+    """A plan says "see the diagram" and the diagram carries half the meaning.
+
+    Left alone, ![arch](diagram.png) ingests as the literal string "![arch]".
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.dir = Path(tempfile.mkdtemp())
+        (self.dir / "arch.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.dir, ignore_errors=True))
+
+    def test_finds_markdown_and_html_references(self):
+        refs = ingest.find_image_refs(
+            'See ![arch](arch.png) and <img src="arch.png">', self.dir)
+        self.assertEqual(len(refs), 2)
+
+    def test_remote_urls_are_skipped(self):
+        """Ingestion does not fetch from the network."""
+        self.assertEqual(
+            ingest.find_image_refs("![x](https://example.com/a.png)", self.dir), [])
+
+    def test_missing_files_are_skipped(self):
+        self.assertEqual(ingest.find_image_refs("![x](nope.png)", self.dir), [])
+
+    def test_non_image_links_are_not_matched(self):
+        self.assertEqual(ingest.find_image_refs("[a link](arch.png)", self.dir), [])
+
+    def test_description_replaces_the_reference_inline(self):
+        from unittest.mock import patch
+        with patch.object(ingest, "describe_with_frontier", return_value="Three boxes."):
+            text, report = ingest.resolve_images("Before ![arch](arch.png) after", self.dir)
+        self.assertIn("Three boxes.", text)
+        self.assertNotIn("![arch]", text)
+        self.assertEqual(report[0]["described_by"], "frontier")
+
+    def test_undescribed_image_says_so_rather_than_vanishing(self):
+        """A reader should know a picture was here and went undescribed."""
+        from unittest.mock import patch
+        with patch.object(ingest, "describe_with_frontier", return_value=None), \
+             patch.object(ingest, "describe_image", return_value=None):
+            text, report = ingest.resolve_images("Before ![arch](arch.png) after", self.dir)
+        self.assertIn("[Image not described: arch.png]", text)
+        self.assertEqual(report[0]["described_by"], "skipped")
+
+    def test_no_credentials_is_an_outcome_not_a_crash(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        with patch("anthropic.Anthropic", side_effect=Exception("no credentials")):
+            self.assertIsNone(ingest.describe_with_frontier(Path(self.dir / "arch.png")))
