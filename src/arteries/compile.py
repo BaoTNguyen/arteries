@@ -171,7 +171,7 @@ def _claim_ephemeral(conn) -> list[dict]:
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, fact, domains, confidence, source_ts, parent_agent_id, source
+            RETURNING id, fact, domains, source_ts, parent_agent_id, source
             """,
             (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
         )
@@ -218,7 +218,7 @@ async def _llm_compile(
             tag = "[SUBAGENT] "
         elif r.get("source") == "assistant":
             tag = "[ASSISTANT] "
-        return f"[{i+1}] {tag}(conf={r['confidence']}, domains={r['domains']}) {r['fact']}"
+        return f"[{i+1}] {tag}(domains={r['domains']}) {r['fact']}"
 
     eph_text = "\n".join(_eph_line(i, r) for i, r in enumerate(ephemeral))
 

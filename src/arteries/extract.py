@@ -1,14 +1,19 @@
-"""
-Sync-track ephemeral extraction.
+"""Turn capture: what the hook hands to the compiler.
 
-Runs on every turn (~1-5ms heuristic, no model call). Extracts candidate
-memories from the user message: domain tags, factual signals, preferences,
-and context markers. Inserts them as ephemeral records.
+Every user turn becomes one ephemeral record, whole. There is no longer a
+pattern filter here, because measurement showed there was never really one: of
+202 stored rows, 12.9% matched the `preference` regex and 87.1% were the
+whole-message fallback truncated to 500 characters. `fact`, `context`, and
+`correction` had never fired once. The LLM compile pass was doing all the
+filtering, and the truncation was losing signal on most of the corpus.
 
-This is the bootstrap extractor — heuristic-based, meant to be replaced
-by a fine-tuned 1-3B model trained with RLVR once enough signal exists.
-The async LLM track (compile.py) handles deep extraction in the background;
-the sync track covers the current turn.
+`extract_from_message` survives as a function even though its body is now
+trivial. It is the seam a fine-tuned extractor drops into later, which is what
+this module's original docstring always said it was for -- the heuristics were
+labelled a bootstrap from the beginning.
+
+Assistant replies get compressed rather than truncated, because they are long
+and put their conclusions last. See `strip_assistant_response`.
 """
 
 from __future__ import annotations
@@ -29,24 +34,6 @@ try:
 except Exception:  # capillaries not installed / not importable
     from arteries.docs import DOMAIN_KEYWORDS
 
-# Patterns that signal extractable facts
-PREFERENCE_PATTERNS = re.compile(
-    r"\b(i (?:prefer|like|want|need|use|always|never|hate|avoid))\b",
-    re.IGNORECASE,
-)
-CONTEXT_PATTERNS = re.compile(
-    r"\b(i(?:'m| am) (?:working on|building|using|debugging|trying to|looking at))\b",
-    re.IGNORECASE,
-)
-FACT_PATTERNS = re.compile(
-    r"\b(we (?:use|have|run|deploy|switched to|migrated to|adopted))\b",
-    re.IGNORECASE,
-)
-CORRECTION_PATTERNS = re.compile(
-    r"\b(no[,.]? (?:not that|i meant|actually|it should be|that's wrong))\b",
-    re.IGNORECASE,
-)
-
 MIN_EXTRACTABLE_WORDS = 5
 
 
@@ -54,54 +41,18 @@ MIN_EXTRACTABLE_WORDS = 5
 class Extraction:
     fact: str
     domains: list[str]
-    confidence: float
-    signal_type: str  # preference | context | fact | correction | domain_signal
 
 
 def extract_from_message(message: str) -> list[Extraction]:
-    """
-    Extract candidate memories from a single user message.
+    """One record per turn, verbatim.
 
-    Returns a list of extractions. Each becomes one ephemeral record.
-    The heuristic is intentionally permissive — the async LLM track
-    will filter and refine during compilation, and RLVR will eventually
-    learn what's worth keeping.
+    The only gate is length: "ok thanks" is not a memory. Everything else is
+    the compiler's call, and it has the whole message plus its neighbours to
+    make it with.
     """
-    words = message.split()
-    if len(words) < MIN_EXTRACTABLE_WORDS:
+    if len(message.split()) < MIN_EXTRACTABLE_WORDS:
         return []
-
-    text_lower = message.lower()
-    extractions: list[Extraction] = []
-    domains = _infer_domains(text_lower)
-
-    # Extract sentences that match signal patterns
-    sentences = re.split(r'[.!?\n]+', message)
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if len(sentence.split()) < 3:
-            continue
-
-        signal = _classify_sentence(sentence)
-        if signal:
-            extractions.append(Extraction(
-                fact=sentence,
-                domains=domains,
-                confidence=signal[1],
-                signal_type=signal[0],
-            ))
-
-    # If no sentence-level signals but the message has clear domain content,
-    # extract the whole message as a domain signal (lower confidence)
-    if not extractions and domains:
-        extractions.append(Extraction(
-            fact=message[:500],
-            domains=domains,
-            confidence=0.5,
-            signal_type="domain_signal",
-        ))
-
-    return extractions
+    return [Extraction(fact=message, domains=_infer_domains(message.lower()))]
 
 
 _ephemeral_buffer: list[dict] = []
@@ -125,7 +76,6 @@ def extract_and_store(message: str, embedding: list[float] | None = None) -> int
             _ephemeral_buffer.append({
                 "fact": ext.fact,
                 "domains": ext.domains,
-                "confidence": ext.confidence,
                 "status": "ephemeral-only",
             })
         return len(extractions)
@@ -135,7 +85,6 @@ def extract_and_store(message: str, embedding: list[float] | None = None) -> int
             agent_process_id=AGENT_PROCESS_ID,
             fact=ext.fact,
             domains=ext.domains,
-            confidence=ext.confidence,
             parent_agent_id=PARENT_AGENT_ID,
             embedding=embedding,
         )
@@ -157,19 +106,6 @@ def _infer_domains(text: str) -> list[str]:
     return top
 
 
-def _classify_sentence(sentence: str) -> tuple[str, float] | None:
-    """Returns (signal_type, confidence) or None if no signal."""
-    if CORRECTION_PATTERNS.search(sentence):
-        return ("correction", 0.9)
-    if PREFERENCE_PATTERNS.search(sentence):
-        return ("preference", 0.8)
-    if FACT_PATTERNS.search(sentence):
-        return ("fact", 0.75)
-    if CONTEXT_PATTERNS.search(sentence):
-        return ("context", 0.7)
-    return None
-
-
 # -- Assistant response → single ephemeral record for LLM compilation ---------
 
 _NARRATION = re.compile(
@@ -179,8 +115,41 @@ _NARRATION = re.compile(
 _CODE_FENCE = re.compile(r"^```")
 
 
-def strip_assistant_response(text: str) -> str:
-    """Remove code blocks, tool output, and narration. Returns substantive prose."""
+# An assistant reply is long, and its conclusions are at the end. The old cap
+# kept the first 1500 characters and threw the rest away, which lost exactly the
+# part worth keeping. Compression is now by selection: score lines, keep the
+# best, and always keep both ends.
+HEAD_CHARS = 900
+TAIL_CHARS = 600
+_ELISION = "\n[...]\n"
+
+# A fact in this domain names something -- an identifier, a path, a number.
+# Prose that names nothing is nearly always narration.
+_NAMED = re.compile(r"`[^`]+`|\b\d+\b|\b[a-z_]+\.[a-z_]+\b|\b[a-z]+_[a-z_]+\b")
+
+
+def _informative(line: str) -> int:
+    """Rough count of named things in a line. Higher is likelier to be a fact."""
+    return len(_NAMED.findall(line))
+
+
+def _overlap(line: str, reference: str) -> float:
+    """Token overlap with the user's turn, for spotting restatements."""
+    if not reference:
+        return 0.0
+    a = set(re.findall(r"[a-z]{3,}", line.lower()))
+    b = set(re.findall(r"[a-z]{3,}", reference.lower()))
+    return len(a & b) / len(a) if a else 0.0
+
+
+def strip_assistant_response(text: str, user_turn: str = "") -> str:
+    """Reduce an assistant reply to the lines likely to carry facts.
+
+    Drops code fences, narration openers, and lines that mostly restate the
+    question. What survives is ranked by how many concrete things it names, and
+    the head and tail are always kept -- the opening states the finding and the
+    closing states the conclusion.
+    """
     lines = text.splitlines()
     out: list[str] = []
     in_fence = False
@@ -195,27 +164,38 @@ def strip_assistant_response(text: str) -> str:
             continue
         if _NARRATION.match(stripped):
             continue
+        # ponytail: 0.6 is a guess, tuned against nothing yet. It only drops a
+        # line that is mostly the user's own words back at them.
+        if _overlap(stripped, user_turn) > 0.6:
+            continue
         out.append(stripped)
-    return "\n".join(out)
+
+    body = "\n".join(out)
+    if len(body) <= HEAD_CHARS + TAIL_CHARS:
+        return body
+
+    # Too long: keep both ends verbatim, and fill nothing in between unless the
+    # middle actually names things.
+    head, tail = body[:HEAD_CHARS], body[-TAIL_CHARS:]
+    middle = [ln for ln in body[HEAD_CHARS:-TAIL_CHARS].splitlines() if _informative(ln) >= 2]
+    kept = "\n".join(middle)[:600]
+    return head + _ELISION + (kept + _ELISION if kept else "") + tail
 
 
-def store_assistant_response(text: str) -> int:
+def store_assistant_response(text: str, user_turn: str = "") -> int:
     """Strip and store an assistant response as a single ephemeral record.
 
     No pattern matching — the compilation LLM decides what's worth keeping.
     Returns 1 if stored, 0 if stripped to nothing.
     """
-    stripped = strip_assistant_response(text)
+    stripped = strip_assistant_response(text, user_turn)
     if len(stripped.split()) < MIN_EXTRACTABLE_WORDS:
         return 0
-    # ponytail: cap at 1500 chars — longer responses are mostly code/narration anyway
-    stripped = stripped[:1500]
     domains = _infer_domains(stripped.lower())
     if EPHEMERAL_MODE == "discard":
         _ephemeral_buffer.append({
             "fact": stripped,
             "domains": domains,
-            "confidence": 0.5,
             "status": "ephemeral-only",
             "source": "assistant",
         })
@@ -225,7 +205,6 @@ def store_assistant_response(text: str) -> int:
         agent_process_id=AGENT_PROCESS_ID,
         fact=stripped,
         domains=domains,
-        confidence=0.5,
         parent_agent_id=PARENT_AGENT_ID,
         source="assistant",
     )
