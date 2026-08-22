@@ -236,7 +236,7 @@ python3 - <<'PYEOF' 2>/dev/null || true
 from arteries import storage
 from arteries.config import PROJECT_ID
 
-rows = [r for r in storage.get_persistent(PROJECT_ID, limit=40) if r.get("scope")]
+rows = [r for r in storage.get_persistent(PROJECT_ID, limit=40) if r.get("origin")]
 if rows:
     print()
     print("Stated preferences (authoritative source: arteries):")
