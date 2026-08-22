@@ -36,7 +36,7 @@ def get_ephemeral(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, fact, domains, confidence, source_ts, status
+            SELECT id, fact, domains, source_ts, status
             FROM arteries.ephemeral
             WHERE project_id = %s
               AND agent_process_id = %s
@@ -55,7 +55,6 @@ def insert_ephemeral(
     agent_process_id: str,
     fact: str,
     domains: list[str],
-    confidence: float = 1.0,
     parent_agent_id: str | None = None,
     embedding: list[float] | None = None,
     source: str = "user",
@@ -64,16 +63,15 @@ def insert_ephemeral(
         cur.execute(
             """
             INSERT INTO arteries.ephemeral
-                (fact, embedding, domains, confidence, project_id,
+                (fact, embedding, domains, project_id,
                  agent_process_id, parent_agent_id, source)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
             RETURNING id
             """,
             (
                 fact,
                 embedding,
                 psycopg2.extras.Json(domains),
-                confidence,
                 project_id,
                 agent_process_id,
                 parent_agent_id,
