@@ -127,10 +127,18 @@ def log_event(
     except Exception:
         _write_jsonl(run, event)
         store = "jsonl"  # degradation signal: pulse health watches this
-    spool_emit(
-        source, event_type, turn_id=turn_id, store=store,
-        **{k: v for k, v in event["payload"].items() if k not in ("episode_id", "task_id")},
-    )
+    # spool_emit's own parameters are source/kind/turn_id, and the payload is
+    # spread into its **kwargs -- so a payload key with any of those names
+    # raises "got multiple values for argument". Callers should not have to know
+    # that, so the collision is resolved here by prefixing rather than dropping:
+    # losing a field silently would be worse than renaming it.
+    _RESERVED = {"source", "kind", "turn_id", "store", "ts"}
+    spooled = {}
+    for k, v in event["payload"].items():
+        if k in ("episode_id", "task_id"):
+            continue
+        spooled[f"payload_{k}" if k in _RESERVED else k] = v
+    spool_emit(source, event_type, turn_id=turn_id, store=store, **spooled)
     return event
 
 
