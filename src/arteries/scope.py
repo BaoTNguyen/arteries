@@ -109,6 +109,20 @@ def resolve(cwd: str | Path | None = None, *, db_config: dict | None = None) -> 
     return max(matches, key=lambda m: len(m.repo_path.parts))
 
 
+def current_project(*, db_config: dict | None = None) -> str:
+    """The project for the working directory, for commands run by hand.
+
+    Hooks set ARTERIES_PROJECT; a human typing `art graph entities` does not, and
+    config.PROJECT_ID would fall back to "default". Path resolution already knows
+    the answer, so use it and keep the env var as the override.
+    """
+    from arteries.config import PROJECT_ID
+    if os.environ.get("ARTERIES_PROJECT"):
+        return os.environ["ARTERIES_PROJECT"]
+    m = resolve(db_config=db_config)
+    return m.project_id if m else PROJECT_ID
+
+
 def is_tracked(cwd: str | Path | None = None, *, db_config: dict | None = None) -> bool:
     return resolve(cwd, db_config=db_config) is not None
 
