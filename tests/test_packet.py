@@ -12,16 +12,15 @@ class DedupeTests(unittest.TestCase):
         return packet.MemoryItem(tier=tier, text=text, confidence=1.0, domains=[])
 
     def test_same_fact_across_tiers_kept_once_first_tier_wins(self):
-        # remember --also-evergreen writes the same fact to persistent + evergreen
         items = [
             self._item("persistent", "Prefer scoped implementations."),
-            self._item("evergreen", "prefer scoped implementations."),  # case/space dup
+            self._item("persistent", "prefer scoped implementations."),  # case/space dup
         ]
         out = packet._dedupe_memories(items, previous_summary="")
         self.assertEqual([i.tier for i in out], ["persistent"])
 
     def test_fact_already_in_previous_summary_is_dropped(self):
-        items = [self._item("evergreen", "User prefers tabs over spaces.")]
+        items = [self._item("persistent", "User prefers tabs over spaces.")]
         out = packet._dedupe_memories(
             items, previous_summary=packet._norm("Earlier: user prefers tabs over spaces, noted."))
         self.assertEqual(out, [])
@@ -44,19 +43,13 @@ class PacketTests(unittest.TestCase):
             "fact": "Project integrates coding CLIs through hooks.",
             "domains": ["technical"],
             "confidence": 0.9,
-        }])), patch.object(packet.storage, "get_evergreen", return_value=[{
-            "id": "g1",
-            "fact": "Prefer scoped implementations.",
-            "domains": ["preference"],
-            "confidence": 1.0,
-        }]):
+        }])):
             text = packet.build_packet("manual compact", budget=4000)
 
         self.assertIn("## Current Context", text)
         self.assertIn("Capabilities:", text)
         self.assertIn("Recent user wants Pi first.", text)
         self.assertIn("Project integrates coding CLIs through hooks.", text)
-        self.assertIn("Prefer scoped implementations.", text)
         self.assertIn("Treat this packet as continuity context", text)
 
 
@@ -72,8 +65,7 @@ class PacketTests(unittest.TestCase):
             ]
         }
 
-        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
-             patch.object(packet.storage, "get_evergreen", return_value=[]):
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])):
             text = packet.build_packet("auto compact", event=event, budget=8000)
 
         self.assertIn("## Recent Conversation", text)
@@ -91,7 +83,6 @@ class PacketTests(unittest.TestCase):
         }]
 
         with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
-             patch.object(packet.storage, "get_evergreen", return_value=[]), \
              patch.object(packet.runlog, "recent_events", return_value=events):
             text = packet.build_packet("manual compact", budget=4000)
 
@@ -115,7 +106,6 @@ class PacketTests(unittest.TestCase):
         ]
 
         with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
-             patch.object(packet.storage, "get_evergreen", return_value=[]), \
              patch.object(packet.runlog, "recent_events", return_value=events):
             text = packet.build_packet("manual compact", budget=4000)
 

@@ -70,7 +70,6 @@ class TraceTests(unittest.TestCase):
                  patch.object(trace, "_retrieval_situations", return_value={"p1": {"situation_preview": "full invoke", "situation_chars": 11, "situation_truncated": False}}) as situations, \
                  patch.object(trace.storage, "get_ephemeral", return_value=[]) as ephemeral, \
                  patch.object(trace.storage, "get_persistent", return_value=[]) as persistent, \
-                 patch.object(trace.storage, "get_evergreen", return_value=[]) as evergreen, \
                  patch("builtins.print") as print_:
                 self.assertEqual(trace.main(["--repo", str(repo), "--events", "5", "--memories", "3"]), 0)
 
@@ -94,7 +93,6 @@ class TraceTests(unittest.TestCase):
             recent.assert_called_once_with("career-ops", limit=5, repo_path=repo.resolve())
             ephemeral.assert_called_once_with("career-ops", "career-ops-hook", limit=3)
             persistent.assert_called_once_with("career-ops", limit=3)
-            evergreen.assert_called_once_with(limit=3)
 
 
 if __name__ == "__main__":

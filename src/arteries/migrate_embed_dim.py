@@ -27,7 +27,6 @@ from arteries.config import DB_CONFIG, EMBED_DIM, EMBED_MODEL
 TARGETS = [
     ("arteries.ephemeral", "embedding", None),
     ("arteries.persistent", "embedding", "arteries.idx_per_embedding"),
-    ("arteries.evergreen", "embedding", "arteries.idx_evg_embedding"),
 ]
 
 CURRENT_DIM_SQL = """
@@ -41,10 +40,6 @@ WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s AND NOT a.attisdroppe
 REBUILD_SQL = {
     "arteries.idx_per_embedding": (
         "CREATE INDEX idx_per_embedding ON arteries.persistent "
-        "USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)"
-    ),
-    "arteries.idx_evg_embedding": (
-        "CREATE INDEX idx_evg_embedding ON arteries.evergreen "
         "USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)"
     ),
 }
