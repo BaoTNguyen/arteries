@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import memory_select, runlog, storage
+from arteries import memory_select, runlog
 from arteries.cli_caps import get_capabilities
 from arteries.embed import embed_text_sync
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID

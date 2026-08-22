@@ -90,6 +90,10 @@ def _spawn(args: list[str]) -> int:
     import os
     import sys
 
+    if args and args[0] in ("-h", "--help"):
+        print(_spawn.__doc__.strip())
+        print("\nusage: art spawn -- <command> [args...]")
+        return 0
     if args and args[0] == "--":
         args = args[1:]
     if not args:
@@ -205,7 +209,6 @@ def _backfill_embeddings(args: Sequence[str]) -> int:
     ns = p.parse_args(args)
 
     from arteries.embed import embed_text_sync
-    from arteries import storage
 
     import psycopg2.extras
     from arteries.config import DB_CONFIG
