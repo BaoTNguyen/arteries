@@ -4,6 +4,25 @@
 CREATE SCHEMA IF NOT EXISTS arteries;
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- Scope: which repos share a memory. `scope_members` is the source of truth;
+-- reads resolve it with a CTE rather than a denormalized column, so regrouping
+-- a repo is one UPDATE and no row can disagree with its group.
+CREATE TABLE IF NOT EXISTS arteries.scopes (
+    scope_id    TEXT PRIMARY KEY,
+    label       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS arteries.scope_members (
+    project_id  TEXT PRIMARY KEY,   -- the ARTERIES_PROJECT value
+    scope_id    TEXT NOT NULL REFERENCES arteries.scopes(scope_id) ON DELETE CASCADE,
+    repo_path   TEXT NOT NULL,      -- absolute; tracking resolves by path prefix
+    added_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_scope_members_scope
+    ON arteries.scope_members (scope_id);
+
 -- Ephemeral: per-agent-process, per-project. High churn.
 CREATE TABLE IF NOT EXISTS arteries.ephemeral (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

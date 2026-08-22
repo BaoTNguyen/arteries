@@ -25,6 +25,7 @@ import sys
 from arteries import actionlog, runlog
 from arteries.config import EPHEMERAL_MODE, PERSISTENT_READ, RETRIEVAL_MIN_CONFIDENCE
 from arteries.assistant import capture_response, read_last_assistant
+from arteries import scope
 from arteries.embed import embed_text_sync
 from arteries.extract import extract_and_store
 from arteries.frame import get_current_frame
@@ -36,6 +37,17 @@ from capillaries.find import find as cap_find
 
 
 async def evaluate(message: str) -> str | None:
+    # Opt-in: a repo nobody registered is not observed at all -- no ephemeral,
+    # no telemetry, no run log. Ahead of every write, and it logs once so the
+    # skip is visible in `art doctor` rather than looking like a dead hook.
+    if not scope.is_tracked():
+        runlog.log_event(
+            "turn.skipped_untracked", "arteries",
+            {"cwd": os.environ.get("ARTERIES_EVENT_CWD") or os.getcwd(),
+             "hint": "art scope add <group> <repo path>"},
+        )
+        return None
+
     turn_id = runlog.new_turn_id()
     runlog.log_event(
         "turn.observed",

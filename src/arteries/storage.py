@@ -14,6 +14,7 @@ import psycopg2
 import psycopg2.extras
 
 from arteries.config import DB_CONFIG
+from arteries.scope import SCOPE_CTE
 
 # Confidence is read back as stored. Age-based decay lived here and was removed —
 # age alone was the wrong signal (a stale-but-still-true fact decayed like a
@@ -90,32 +91,21 @@ def get_persistent(
     limit: int = 50,
     scope: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Live persistent memories for this project's whole scope, newest first."""
+    origin_filter = "AND (p.scope IS NULL OR p.scope = %(origin)s)" if scope else ""
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        if scope:
-            cur.execute(
-                """
-                SELECT id, fact, domains, confidence, source_ts, scope
-                FROM arteries.persistent
-                WHERE project_id = %s
-                  AND valid_until IS NULL
-                  AND (scope IS NULL OR scope = %s)
-                ORDER BY source_ts DESC
-                LIMIT %s
-                """,
-                (project_id, scope, limit),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT id, fact, domains, confidence, source_ts, scope
-                FROM arteries.persistent
-                WHERE project_id = %s
-                  AND valid_until IS NULL
-                ORDER BY source_ts DESC
-                LIMIT %s
-                """,
-                (project_id, limit),
-            )
+        cur.execute(
+            SCOPE_CTE + f"""
+            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.scope, p.project_id
+            FROM arteries.persistent p
+            WHERE p.project_id IN (SELECT project_id FROM scope)
+              AND p.valid_until IS NULL
+              {origin_filter}
+            ORDER BY p.source_ts DESC
+            LIMIT %(limit)s
+            """,
+            {"project": project_id, "origin": scope, "limit": limit},
+        )
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -125,20 +115,22 @@ def get_persistent_by_relevance(
     limit: int = 20,
     threshold: float = 0.3,
 ) -> list[dict[str, Any]]:
+    """Cosine-ranked persistent memories across this project's scope."""
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """
-            SELECT id, fact, domains, confidence, source_ts,
-                   1 - (embedding <=> %s::vector) AS similarity
-            FROM arteries.persistent
-            WHERE project_id = %s
-              AND valid_until IS NULL
-              AND embedding IS NOT NULL
-              AND 1 - (embedding <=> %s::vector) >= %s
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
+            SCOPE_CTE + """
+            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.project_id,
+                   1 - (p.embedding <=> %(q)s::vector) AS similarity
+            FROM arteries.persistent p
+            WHERE p.project_id IN (SELECT project_id FROM scope)
+              AND p.valid_until IS NULL
+              AND p.embedding IS NOT NULL
+              AND 1 - (p.embedding <=> %(q)s::vector) >= %(threshold)s
+            ORDER BY p.embedding <=> %(q)s::vector
+            LIMIT %(limit)s
             """,
-            (query_embedding, project_id, query_embedding, threshold, query_embedding, limit),
+            {"q": query_embedding, "project": project_id,
+             "threshold": threshold, "limit": limit},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -146,13 +138,14 @@ def get_persistent_by_relevance(
 def has_embeddings(project_id: str) -> bool:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            SCOPE_CTE + """
             SELECT EXISTS(
                 SELECT 1 FROM arteries.persistent
-                WHERE project_id = %s AND valid_until IS NULL AND embedding IS NOT NULL
+                WHERE project_id IN (SELECT project_id FROM scope)
+                  AND valid_until IS NULL AND embedding IS NOT NULL
             )
             """,
-            (project_id,),
+            {"project": project_id},
         )
         return cur.fetchone()[0]
 
@@ -231,15 +224,15 @@ def get_active_domains(project_id: str) -> list[str]:
     """Domains from recent persistent memories — proxy for what the user is working on."""
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            SCOPE_CTE + """
             SELECT DISTINCT d.value
-            FROM arteries.persistent,
-                 jsonb_array_elements_text(domains) AS d(value)
-            WHERE project_id = %s
-              AND valid_until IS NULL
-              AND source_ts > now() - INTERVAL '24 hours'
+            FROM arteries.persistent p,
+                 jsonb_array_elements_text(p.domains) AS d(value)
+            WHERE p.project_id IN (SELECT project_id FROM scope)
+              AND p.valid_until IS NULL
+              AND p.source_ts > now() - INTERVAL '24 hours'
             """,
-            (project_id,),
+            {"project": project_id},
         )
         return [r[0] for r in cur.fetchall()]
 

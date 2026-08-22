@@ -13,7 +13,8 @@ class EvaluateTests(unittest.IsolatedAsyncioTestCase):
             scope=SimpleNamespace(sibling_insights=[]),
         )
 
-        with patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-1"), \
+        with patch.object(arteries_eval.scope, "is_tracked", return_value=True), \
+             patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-1"), \
              patch.object(arteries_eval.runlog, "log_event") as log_event, \
              patch.object(arteries_eval, "embed_text_sync", return_value=[0.1] * 8), \
              patch.object(arteries_eval, "extract_and_store", return_value=1) as extract_and_store, \
@@ -52,7 +53,8 @@ class TurnEmbeddingTests(unittest.IsolatedAsyncioTestCase):
         )
         vec = [0.5] * 8
 
-        with patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-2"), \
+        with patch.object(arteries_eval.scope, "is_tracked", return_value=True), \
+             patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-2"), \
              patch.object(arteries_eval.runlog, "log_event"), \
              patch.object(arteries_eval, "embed_text_sync", return_value=vec) as embed, \
              patch.object(arteries_eval, "extract_and_store", return_value=2) as extract, \
@@ -65,3 +67,25 @@ class TurnEmbeddingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(embed.call_args.kwargs.get("is_query"))
         self.assertEqual(extract.call_args.kwargs["embedding"], vec)
         self.assertEqual(build.call_args.kwargs["embedding"], vec)
+
+
+class ScopeGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_untracked_repo_writes_nothing(self):
+        """Opt-in means opt-in: no extraction, no frame, no retrieval.
+
+        The one thing it does emit is a skip event, so an unregistered repo
+        looks unregistered in `art doctor` rather than looking like a hook that
+        silently stopped working.
+        """
+        with patch.object(arteries_eval.scope, "is_tracked", return_value=False), \
+             patch.object(arteries_eval.runlog, "log_event") as log_event, \
+             patch.object(arteries_eval, "extract_and_store") as extract, \
+             patch.object(arteries_eval, "get_current_frame") as build, \
+             patch.object(arteries_eval, "embed_text_sync") as embed:
+            result = await arteries_eval.evaluate("anything at all")
+
+        self.assertIsNone(result)
+        extract.assert_not_called()
+        build.assert_not_called()
+        embed.assert_not_called()
+        self.assertEqual(log_event.call_args[0][0], "turn.skipped_untracked")
