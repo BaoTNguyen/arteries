@@ -158,7 +158,6 @@ def stats(project_id: str, db_config: dict | None = None) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     import argparse
-    import json
 
     from arteries import scope
     from arteries.config import DB_CONFIG
