@@ -82,6 +82,8 @@ BEGIN
     END IF;
 END $$;
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS origin TEXT;
+-- fact | decision | preference | constraint
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'fact';
 -- Document provenance: path, line span, and digest for facts imported
 -- through the `art docs` review flow. Was evergreen.source_meta.
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS source_meta JSONB NOT NULL DEFAULT '{}';
@@ -263,7 +265,10 @@ CREATE INDEX IF NOT EXISTS idx_onto_aliases ON arteries.ontology_terms USING gin
 -- exactly as cognee flags it: unmatched entities are kept, not dropped.
 CREATE TABLE IF NOT EXISTS arteries.entities (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id      TEXT NOT NULL,
+    -- Scoped to the group, not the repo: "hook" means the CLI hook in a harness
+    -- and useEffect in a React app, and a shared node would have to pick one
+    -- ontology class and blend both meanings into one embedding.
+    scope_id        TEXT NOT NULL,
     name            TEXT NOT NULL,   -- canonical (ontology label when matched)
     raw_name        TEXT NOT NULL,   -- what the extractor actually said
     kind            TEXT NOT NULL DEFAULT 'concept',  -- concept | module | dependency
@@ -275,8 +280,18 @@ CREATE TABLE IF NOT EXISTS arteries.entities (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'arteries' AND table_name = 'entities'
+                 AND column_name = 'project_id') THEN
+        DROP INDEX IF EXISTS arteries.idx_entities_canonical;
+        ALTER TABLE arteries.entities RENAME COLUMN project_id TO scope_id;
+    END IF;
+END $$;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical
-    ON arteries.entities (project_id, kind, lower(name));
+    ON arteries.entities (scope_id, kind, lower(name));
 CREATE INDEX IF NOT EXISTS idx_entities_class ON arteries.entities (ontology_class);
 
 -- Documents and chunks. These are *project docs that become claims*, not the
