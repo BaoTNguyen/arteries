@@ -29,6 +29,7 @@ import psycopg2.extras
 
 from arteries import runlog
 from arteries.config import AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL, PROJECT_ID
+from arteries.scope import SCOPE_CTE
 
 MAX_EPHEMERAL_BATCH = 10
 MAX_PERSISTENT_CONTEXT = 15
@@ -89,7 +90,7 @@ async def compile_once() -> dict[str, Any]:
         if not claimed:
             return {"status": "nothing_to_compile", "claimed": 0}
 
-        persistent_context = _load_persistent_context(conn)
+        persistent_context = _load_persistent_context(conn, claimed)
 
         try:
             result = await _llm_compile(claimed, persistent_context)
@@ -122,6 +123,7 @@ async def compile_once() -> dict[str, Any]:
             "claimed": len(claimed),
             "new_persistent": written["new"],
             "superseded": written["superseded"],
+            "duplicates_rejected": written["duplicates_rejected"],
         }
         runlog.log_event("memory.compile.completed", "arteries", stats, project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
         return stats
@@ -191,20 +193,94 @@ def _release_claimed(conn, ids: list) -> None:
         conn.commit()
 
 
-def _load_persistent_context(conn) -> list[dict]:
-    """Load recent persistent memories for contradiction detection."""
+# Similarity bands for admitting a new fact. The comparison runs over *every*
+# live persistent row in scope via the vector index, not a recent slice -- the
+# old ORDER BY source_ts DESC LIMIT 15 meant dedupe was blind to anything older
+# than the last fifteen facts, which is how a 0.863-cosine duplicate pair got
+# into the store.
+#
+# ponytail: both numbers are guesses calibrated against exactly one observed
+# duplicate. Tune them once there is a week of real data.
+DUPLICATE_SIM = 0.93   # at or above: mechanical duplicate, never reaches the LLM
+RELATED_SIM = 0.75     # between: the LLM decides refine / contradict / distinct
+
+
+def _load_persistent_context(conn, batch: list[dict] | None = None) -> list[dict]:
+    """Existing facts the compiler should compare against.
+
+    Selected by similarity to the batch being compiled rather than by recency,
+    so a contradiction of something learned months ago is still visible. Falls
+    back to recency when the batch cannot be embedded.
+    """
+    vec = None
+    if batch:
+        from arteries.embed import embed_text_sync
+        vec = embed_text_sync(" ".join(r["fact"] for r in batch)[:4000])
+
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT id, fact, domains, confidence, source_ts
-            FROM arteries.persistent
-            WHERE project_id = %s AND valid_until IS NULL
-            ORDER BY source_ts DESC
-            LIMIT %s
-            """,
-            (PROJECT_ID, MAX_PERSISTENT_CONTEXT),
-        )
+        if vec:
+            cur.execute(
+                SCOPE_CTE + """
+                SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts,
+                       1 - (p.embedding <=> %(q)s::vector) AS similarity
+                FROM arteries.persistent p
+                WHERE p.project_id IN (SELECT project_id FROM scope)
+                  AND p.valid_until IS NULL AND p.embedding IS NOT NULL
+                ORDER BY p.embedding <=> %(q)s::vector
+                LIMIT %(limit)s
+                """,
+                {"q": vec, "project": PROJECT_ID, "limit": MAX_PERSISTENT_CONTEXT},
+            )
+        else:
+            cur.execute(
+                SCOPE_CTE + """
+                SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts,
+                       NULL::float AS similarity
+                FROM arteries.persistent p
+                WHERE p.project_id IN (SELECT project_id FROM scope)
+                  AND p.valid_until IS NULL
+                ORDER BY p.source_ts DESC
+                LIMIT %(limit)s
+                """,
+                {"project": PROJECT_ID, "limit": MAX_PERSISTENT_CONTEXT},
+            )
         return [dict(r) for r in cur.fetchall()]
+
+
+def _reject_duplicates(conn, memories: list[dict], vectors: list) -> tuple[list, list, list]:
+    """Drop facts the store already holds, before they are written.
+
+    Stage one of promotion, and the only deterministic one: a cosine at or above
+    DUPLICATE_SIM against anything live in scope is a restatement, and no model
+    opinion is needed to say so. This is what bounds growth -- the LLM pass is a
+    decomposer (53 ephemeral rows produced 76 facts) and will not shrink itself.
+    """
+    kept, kept_vecs, rejected = [], [], []
+    with conn.cursor() as cur:
+        for mem, vec in zip(memories, vectors):
+            if vec is None:
+                kept.append(mem)
+                kept_vecs.append(vec)
+                continue
+            cur.execute(
+                SCOPE_CTE + """
+                SELECT p.fact, 1 - (p.embedding <=> %(q)s::vector) AS sim
+                FROM arteries.persistent p
+                WHERE p.project_id IN (SELECT project_id FROM scope)
+                  AND p.valid_until IS NULL AND p.embedding IS NOT NULL
+                ORDER BY p.embedding <=> %(q)s::vector
+                LIMIT 1
+                """,
+                {"q": vec, "project": PROJECT_ID},
+            )
+            row = cur.fetchone()
+            if row and row[1] is not None and float(row[1]) >= DUPLICATE_SIM:
+                rejected.append({"fact": mem["fact"], "duplicate_of": row[0],
+                                 "similarity": round(float(row[1]), 3)})
+                continue
+            kept.append(mem)
+            kept_vecs.append(vec)
+    return kept, kept_vecs, rejected
 
 
 async def _llm_compile(
@@ -266,6 +342,11 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
     # batched call is 45ms and happens while holding nothing.
     memories = result.get("new_memories", [])
     vectors = embed_texts_sync([m["fact"] for m in memories])
+    memories, vectors, duplicates = _reject_duplicates(conn, memories, vectors)
+    if duplicates:
+        runlog.log_event("memory.compile.duplicates_rejected", "arteries",
+                         {"count": len(duplicates), "rejected": duplicates[:5]},
+                         project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
 
     with conn.cursor() as cur:
         for mem, vec in zip(memories, vectors):
@@ -322,7 +403,8 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
         )
         conn.commit()
 
-    return {"new": new_count, "superseded": superseded_count}
+    return {"new": new_count, "superseded": superseded_count,
+            "duplicates_rejected": len(duplicates)}
 
 
 if __name__ == "__main__":
