@@ -50,7 +50,7 @@ COMPILE_SYSTEM = """You are a memory compiler. You receive raw conversation extr
 1. Distill the ephemeral records into concise, factual statements worth remembering long-term.
 2. Tag each with relevant domains from this list: technical, AI, business, strategy, product, finance, career, learning, personal, writing.
 3. If a new fact contradicts an existing persistent memory, mark the old one as superseded. Set "replaced_by" to the 0-based index of the entry in new_memories that replaces it, and give the reason.
-4. Deduplicate — if an ephemeral record says the same thing as an existing persistent memory, skip it.
+4. The existing memories shown to you are the ones most *similar* to this batch — they are selected that way so you can spot contradictions and refinements. Do not skip a new fact merely because something similar exists. Exact restatements are filtered mechanically after you answer; your job is to say how the new fact relates, not to suppress it.
 5. Assign confidence 0.0-1.0 based on how certain the fact is (corrections and explicit statements = high, inferred context = lower).
 
 Records marked [SUBAGENT] came from an automated subagent, not directly from the user. Apply a higher bar:
@@ -83,7 +83,7 @@ Do not explain what you discarded. Compilation is generation-bound on local
 hardware, and prose about rejected records costs more time than the memories
 themselves.
 
-Be aggressive about filtering. Only keep facts that would be useful in a future conversation about this project. Skip greetings, transient debugging steps, and anything too vague to act on."""
+Keep facts that would be useful in a future conversation about this project. Skip greetings, acknowledgements, and anything too vague to act on — but a concrete change, measurement, defect, or decision is worth keeping even when it resembles something already stored. Returning an empty list for a batch that contains any of those is wrong."""
 
 
 async def compile_once() -> dict[str, Any]:
