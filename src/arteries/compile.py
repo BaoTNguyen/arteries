@@ -59,6 +59,11 @@ Records marked [SUBAGENT] came from an automated subagent, not directly from the
 - Discard subagent reasoning narration and intermediate conclusions.
 - If a subagent record restates something already in persistent memory, skip it even if the wording differs.
 
+Records marked [HEART], [PLEXUS], [MARROW], or [EXTERNAL] came from another
+service in the stack rather than a conversation. They are already terse and
+deliberate, so keep them nearly verbatim -- do not re-summarise a decision
+someone recorded on purpose. Discard only duplicates and status pings.
+
 Records marked [ASSISTANT] are stripped LLM responses. Extract only:
 - Discovered facts about the codebase, environment, or dependencies.
 - Decisions with rationale (chose X over Y because Z).
@@ -345,11 +350,14 @@ async def _llm_compile(
 ) -> dict:
     """Call the LLM to compile ephemeral records into persistent memories."""
     def _eph_line(i: int, r: dict) -> str:
+        source = r.get("source") or "user"
         tag = ""
         if r.get("parent_agent_id"):
             tag = "[SUBAGENT] "
-        elif r.get("source") == "assistant":
+        elif source == "assistant":
             tag = "[ASSISTANT] "
+        elif source != "user":
+            tag = f"[{source.upper()}] "
         return f"[{i+1}] {tag}(domains={r['domains']}) {r['fact']}"
 
     eph_text = "\n".join(_eph_line(i, r) for i, r in enumerate(ephemeral))
