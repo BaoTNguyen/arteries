@@ -223,6 +223,14 @@ def import_review(review_path: Path, write: bool = False) -> dict[str, Any]:
         errors.append("Duplicate memory IDs found: " + ", ".join(duplicate_ids))
 
     if write and not duplicate_ids:
+        # Embed up front, in one call. Without a vector an imported fact is
+        # invisible to get_persistent_by_relevance -- write-only memory, which
+        # is worse than no memory because it looks like it worked.
+        from arteries.embed import embed_texts_sync
+        vectors = dict(zip(
+            (b["memory_id"] for b in accepted),
+            embed_texts_sync([b["fact"] for b in accepted]),
+        ))
         existing = {_normalize_fact(row["fact"]) for row in storage.get_persistent(PROJECT_ID, limit=1000)}
         for block in accepted:
             normalized = _normalize_fact(block["fact"])
@@ -236,6 +244,7 @@ def import_review(review_path: Path, write: bool = False) -> dict[str, Any]:
                 domains=block["domains"] or _infer_domains(block["fact"]),
                 confidence=block["confidence"],
                 origin="reviewed",
+                embedding=vectors.get(block["memory_id"]),
                 source_meta=source_meta,
             ))
             existing.add(normalized)
