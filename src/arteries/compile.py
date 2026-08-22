@@ -231,7 +231,8 @@ DUPLICATE_SIM = 0.93   # at or above: mechanical duplicate, never reaches the LL
 RELATED_SIM = 0.75     # between: the LLM decides refine / contradict / distinct
 
 
-def _load_persistent_context(conn, batch: list[dict] | None = None) -> list[dict]:
+def _load_persistent_context(conn, batch: list[dict] | None = None,
+                             project_id: str | None = None) -> list[dict]:
     """Existing facts the compiler should compare against.
 
     Selected by similarity to the batch being compiled rather than by recency,
@@ -255,7 +256,7 @@ def _load_persistent_context(conn, batch: list[dict] | None = None) -> list[dict
                 ORDER BY p.embedding <=> %(q)s::vector
                 LIMIT %(limit)s
                 """,
-                {"q": vec, "project": PROJECT_ID, "limit": MAX_PERSISTENT_CONTEXT},
+                {"q": vec, "project": project_id or PROJECT_ID, "limit": MAX_PERSISTENT_CONTEXT},
             )
         else:
             cur.execute(
@@ -268,12 +269,13 @@ def _load_persistent_context(conn, batch: list[dict] | None = None) -> list[dict
                 ORDER BY p.source_ts DESC
                 LIMIT %(limit)s
                 """,
-                {"project": PROJECT_ID, "limit": MAX_PERSISTENT_CONTEXT},
+                {"project": project_id or PROJECT_ID, "limit": MAX_PERSISTENT_CONTEXT},
             )
         return [dict(r) for r in cur.fetchall()]
 
 
-def _reject_duplicates(conn, memories: list[dict], vectors: list) -> tuple[list, list, list]:
+def _reject_duplicates(conn, memories: list[dict], vectors: list,
+                       project_id: str | None = None) -> tuple[list, list, list]:
     """Drop facts the store already holds, before they are written.
 
     Stage one of promotion, and the only deterministic one: a cosine at or above
@@ -297,7 +299,7 @@ def _reject_duplicates(conn, memories: list[dict], vectors: list) -> tuple[list,
                 ORDER BY p.embedding <=> %(q)s::vector
                 LIMIT 1
                 """,
-                {"q": vec, "project": PROJECT_ID},
+                {"q": vec, "project": project_id or PROJECT_ID},
             )
             row = cur.fetchone()
             if row and row[1] is not None and float(row[1]) >= DUPLICATE_SIM:
@@ -405,8 +407,16 @@ def _is_uuid(value: Any) -> bool:
         return False
 
 
-def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
-    """Write compiled persistent records and mark ephemeral as cleared."""
+def _write_results(conn, result: dict, claimed_ids: list,
+                   project_id: str | None = None) -> dict[str, int]:
+    """Write compiled persistent records and mark ephemeral as cleared.
+
+    `project_id` defaults to the module-level project_id, which is right for the
+    hook path where the env names the project. A caller compiling on behalf of
+    somewhere else -- document ingestion, for one -- has to pass it, or every
+    claim silently lands in whatever ARTERIES_PROJECT happened to be set to.
+    """
+    project_id = project_id or PROJECT_ID
     from arteries.embed import embed_texts_sync
 
     new_count = 0
@@ -418,13 +428,13 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
     # batched call is 45ms and happens while holding nothing.
     memories = result.get("new_memories", [])
     vectors = embed_texts_sync([m["fact"] for m in memories])
-    memories, vectors, duplicates = _reject_duplicates(conn, memories, vectors)
+    memories, vectors, duplicates = _reject_duplicates(conn, memories, vectors, project_id)
     if duplicates:
         runlog.log_event("memory.compile.duplicates_rejected", "arteries",
                          {"count": len(duplicates), "rejected": duplicates[:5]},
-                         project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
+                         project_id=project_id, agent_id=AGENT_PROCESS_ID)
 
-    scope_id = scope.scope_for(PROJECT_ID) or PROJECT_ID
+    scope_id = scope.scope_for(project_id) or project_id
     new_ids: list[str] = []
 
     with conn.cursor() as cur:
@@ -440,7 +450,7 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
                     mem["fact"],
                     json.dumps(mem.get("domains", [])),
                     mem.get("confidence", 0.8),
-                    PROJECT_ID,
+                    project_id,
                     claimed_ids,
                     vec,
                     mem.get("kind", "fact"),
@@ -453,14 +463,14 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
             # Provenance: the ephemeral rows this was distilled from. They are
             # endpoints only -- never entity-extracted, never nodes.
             for eph_id in claimed_ids:
-                graph.add_edge(cur, PROJECT_ID, "persistent", claim_id,
+                graph.add_edge(cur, project_id, "persistent", claim_id,
                                graph.DERIVED_FROM, "ephemeral", eph_id)
 
             for ent in mem.get("entities") or []:
                 node = graph.upsert_entity(cur, scope_id, ent.get("name", ""),
                                            ent.get("kind", "concept"))
                 if node:
-                    graph.add_edge(cur, PROJECT_ID, "persistent", claim_id,
+                    graph.add_edge(cur, project_id, "persistent", claim_id,
                                    graph.MENTIONS, "entity", node.id)
 
             # How this fact interacts with ones already stored. The model only
@@ -469,16 +479,16 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
                 target = rel.get("persistent_id")
                 if rel.get("rel") not in graph.RELATIONS or not _is_uuid(target):
                     continue
-                graph.add_edge(cur, PROJECT_ID, "persistent", claim_id,
+                graph.add_edge(cur, project_id, "persistent", claim_id,
                                rel["rel"], "persistent", target)
 
             decision = mem.get("decision") or {}
             if mem.get("kind") == "decision" and decision.get("chose"):
-                graph.add_edge(cur, PROJECT_ID, "persistent", claim_id, "chose",
+                graph.add_edge(cur, project_id, "persistent", claim_id, "chose",
                                "literal", str(decision["chose"])[:200],
                                metadata={"because": str(decision.get("because", ""))[:500]})
                 for alt in (decision.get("over") or [])[:5]:
-                    graph.add_edge(cur, PROJECT_ID, "persistent", claim_id, "over",
+                    graph.add_edge(cur, project_id, "persistent", claim_id, "over",
                                    "literal", str(alt)[:200])
 
         for sup in result.get("superseded", []):
@@ -494,7 +504,7 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
             except (ValueError, AttributeError, TypeError):
                 runlog.log_event("memory.compile.bad_supersede", "arteries",
                                  {"persistent_id": str(pid), "reason": "not a uuid"},
-                                 project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
+                                 project_id=project_id, agent_id=AGENT_PROCESS_ID)
                 continue
             cur.execute(
                 """
@@ -502,7 +512,7 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
                 SET valid_until = now()
                 WHERE id = %s AND project_id = %s AND valid_until IS NULL
                 """,
-                (pid, PROJECT_ID),
+                (pid, project_id),
             )
             if cur.rowcount:
                 superseded_count += cur.rowcount
@@ -516,18 +526,18 @@ def _write_results(conn, result: dict, claimed_ids: list) -> dict[str, int]:
                 replacement = (new_ids[idx] if isinstance(idx, int) and 0 <= idx < len(new_ids)
                                else None)
                 if replacement:
-                    graph.add_edge(cur, PROJECT_ID, "persistent", replacement,
+                    graph.add_edge(cur, project_id, "persistent", replacement,
                                    graph.SUPERSEDES, "persistent", pid,
                                    metadata={"reason": str(sup.get("reason", ""))[:500]})
                 else:
                     runlog.log_event("memory.compile.supersede_unattributed", "arteries",
                                      {"persistent_id": str(pid),
                                       "reason": str(sup.get("reason", ""))[:200]},
-                                     project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
+                                     project_id=project_id, agent_id=AGENT_PROCESS_ID)
             else:
                 runlog.log_event("memory.compile.bad_supersede", "arteries",
                                  {"persistent_id": str(pid), "reason": "no live match"},
-                                 project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
+                                 project_id=project_id, agent_id=AGENT_PROCESS_ID)
 
         cur.execute(
             "UPDATE arteries.ephemeral SET status = 'cleared' WHERE id = ANY(%s::uuid[])",
