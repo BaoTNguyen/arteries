@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, docs, graph, ingest_docs, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
+from arteries import doctor, docs, graph, ingest, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe", "ingest-docs", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe", "ingest", "rewards", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -48,8 +48,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if ns.command == "observe":
         return observe.main(ns.args)
 
-    if ns.command == "ingest-docs":
-        return ingest_docs.main(ns.args)
+    if ns.command == "ingest":
+        return ingest.main(ns.args)
     if ns.command == "eval":
         if not ns.args:
             parser.error("eval requires a prompt")
@@ -70,8 +70,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return trace.main(ns.args)
     if ns.command == "decisions":
         return _decisions(ns.args)
-    if ns.command == "ingest":
-        return _ingest(ns.args)
+    if ns.command == "rewards":
+        return _rewards(ns.args)
     if ns.command == "remember":
         return remember.main(ns.args)
     if ns.command == "identity":
@@ -228,11 +228,11 @@ def _decisions(args: Sequence[str]) -> int:
     return 0
 
 
-def _ingest(args: Sequence[str]) -> int:
+def _rewards(args: Sequence[str]) -> int:
     p = argparse.ArgumentParser(
-        prog="art ingest",
+        prog="art rewards",
         description="Ingest episode rewards. Reads JSONL from stdin by default.",
-        epilog="marrow emits these; `marrow export | art ingest` is the intended shape.",
+        epilog="marrow emits these; `marrow export | art rewards` is the intended shape.",
     )
     p.add_argument("path", nargs="?",
                    help="JSONL file or runs directory; omit to read stdin")
