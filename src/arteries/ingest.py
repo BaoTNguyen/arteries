@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import re
 from dataclasses import dataclass
 import sys
 from pathlib import Path
@@ -98,12 +99,12 @@ async def ingest_file(path: Path, project: str, kind: str = "document") -> dict:
     """Store one document from disk and compile its chunks into claims."""
     return await ingest_text(
         path.read_text(encoding="utf-8", errors="replace"),
-        name=str(path), project=project, kind=kind,
+        name=str(path), project=project, kind=kind, base_dir=path.parent,
     )
 
 
 async def ingest_text(text: str, *, name: str, project: str,
-                      kind: str = "document") -> dict:
+                      kind: str = "document", base_dir: Path | None = None) -> dict:
     """Same pipeline, for content that was never a file.
 
     Plexus plans and heart's episode notes are generated in memory, not written
@@ -113,6 +114,12 @@ async def ingest_text(text: str, *, name: str, project: str,
     """
     from arteries import compile as compiler
     from arteries.embed import embed_texts_sync
+
+    # Embedded images become descriptions before anything is chunked, so a
+    # diagram's content lands in the same chunk as the prose around it.
+    images: list[dict] = []
+    if base_dir is not None:
+        text, images = resolve_images(text, base_dir)
 
     digest = _digest(text)
     scope_id = scope.scope_for(project) or project
@@ -199,7 +206,7 @@ async def ingest_text(text: str, *, name: str, project: str,
                                    graph.DERIVED_FROM, "chunk", cid)
                 conn.commit()
 
-        return {"path": name, "status": "ingested",
+        return {"path": name, "status": "ingested", "images": images,
                 "chunks": len(chunks), "claims": claims, "scope": scope_id}
     finally:
         conn.close()
@@ -212,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="identity to store stdin under; reuse it so re-sends dedupe")
     parser.add_argument("--include", action="append", default=None,
                         help="glob for directory mode (default *.md)")
+    parser.add_argument("--base-dir", default=".",
+                        help="resolve relative image paths in stdin against this")
     parser.add_argument("--describe",
                         help="description for an image; required unless a vision "
                              "endpoint is configured")
@@ -231,7 +240,8 @@ def main(argv: list[str] | None = None) -> int:
             print("nothing on stdin")
             return 1
         name = args.name or f"stdin:{args.kind}:{_digest(text)[:12]}"
-        result = asyncio.run(ingest_text(text, name=name, project=project, kind=args.kind))
+        result = asyncio.run(ingest_text(text, name=name, project=project,
+                                         kind=args.kind, base_dir=Path(args.base_dir)))
         print(f"  {result['status']:<10} {name}"
               + (f"  ({result['chunks']} chunks, {result['claims']} claims)"
                  if result["status"] == "ingested" else ""))
@@ -260,7 +270,10 @@ def main(argv: list[str] | None = None) -> int:
         if result["status"] == "unchanged":
             print(f"  unchanged  {path}")
         else:
-            print(f"  ingested   {path}  ({result['chunks']} chunks, {result['claims']} claims)")
+            described = [i for i in result.get("images", []) if i["described_by"] != "skipped"]
+            extra = f", {len(described)} images described" if described else ""
+            print(f"  ingested   {path}  ({result['chunks']} chunks, "
+                  f"{result['claims']} claims{extra})")
     return 0
 
 
@@ -345,3 +358,113 @@ async def ingest_image(path: Path, project: str, description: str | None = None)
     result["described_by"] = "supplied" if description else "vision"
     result["digest"] = digest[:12]
     return result
+
+
+# -- images referenced inside a document ---------------------------------------
+#
+# A plan says "see the diagram" and the diagram carries half the meaning. Left
+# alone, `![arch](diagram.png)` ingests as the literal string "![arch]" and the
+# picture is lost.
+#
+# These get described by a frontier model rather than the local one. They are
+# rare -- a handful per plan -- and unlike a chat turn the description becomes
+# permanent memory, so the one-off cost of getting it right is worth more than
+# keeping every call on-box.
+
+_MD_IMAGE = re.compile(r'!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?[^)]*\)')
+_HTML_IMAGE = re.compile(r"""<img\s[^>]*src=["']([^"']+)["'][^>]*>""", re.IGNORECASE)
+
+FRONTIER_PROMPT = (
+    "This image appears in a project planning document. Describe it for a "
+    "durable engineering memory: what it shows, any text or labels it contains, "
+    "and the structure a reader would need to act on -- boxes, arrows, columns, "
+    "states, ordering. Be specific and factual. Do not speculate about intent or "
+    "restate the caption. Four sentences at most."
+)
+
+
+def find_image_refs(text: str, base_dir: Path) -> list[tuple[str, str, Path]]:
+    """Local image references in a document: (match, alt text, resolved path).
+
+    Remote URLs are skipped -- arteries does not fetch from the network during
+    ingestion, and a document referencing a URL is not the same as one shipping
+    a diagram alongside it.
+    """
+    found: list[tuple[str, str, Path]] = []
+    for m in _MD_IMAGE.finditer(text):
+        alt, src = m.group(1), m.group(2)
+        if src.startswith(("http://", "https://", "data:")):
+            continue
+        found.append((m.group(0), alt, (base_dir / src).resolve()))
+    for m in _HTML_IMAGE.finditer(text):
+        src = m.group(1)
+        if src.startswith(("http://", "https://", "data:")):
+            continue
+        found.append((m.group(0), "", (base_dir / src).resolve()))
+    return [(raw, alt, path) for raw, alt, path in found
+            if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file()]
+
+
+def describe_with_frontier(path: Path, alt: str = "") -> str | None:
+    """Describe one image with a frontier model. None if unavailable."""
+    import base64
+    import mimetypes
+
+    from arteries.config import FRONTIER_VISION_MODEL
+
+    if not FRONTIER_VISION_MODEL:
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    try:
+        media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+        data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+        prompt = FRONTIER_PROMPT + (f"\n\nIts caption reads: {alt}" if alt else "")
+
+        # Zero-arg client: resolves ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or an
+        # `ant auth login` profile, in that order. No key in the environment does
+        # not mean no credentials.
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model=FRONTIER_VISION_MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": media_type, "data": data}},
+                {"type": "text", "text": prompt},
+            ]}],
+        )
+        if response.stop_reason == "refusal":
+            return None
+        return "".join(b.text for b in response.content if b.type == "text").strip() or None
+    except Exception:
+        # No credentials, no network, a refusal -- all the same outcome here. The
+        # document still ingests; the image just stays undescribed.
+        return None
+
+
+def resolve_images(text: str, base_dir: Path) -> tuple[str, list[dict]]:
+    """Replace image references with descriptions. Returns (text, report)."""
+    report: list[dict] = []
+    for raw, alt, path in find_image_refs(text, base_dir):
+        description = describe_with_frontier(path, alt) or describe_image(path)
+        if description:
+            label = alt or path.name
+            replacement = f"[Image: {label}] {description} (source: {path.name})"
+            how = "frontier" if FRONTIER_ENABLED() else "local"
+        else:
+            # Say so in the text rather than dropping the reference silently --
+            # a reader should know a picture was here and went undescribed.
+            replacement = f"[Image not described: {path.name}]"
+            how = "skipped"
+        text = text.replace(raw, replacement)
+        report.append({"image": str(path), "described_by": how})
+    return text, report
+
+
+def FRONTIER_ENABLED() -> bool:
+    from arteries.config import FRONTIER_VISION_MODEL
+    return bool(FRONTIER_VISION_MODEL)

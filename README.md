@@ -247,6 +247,29 @@ recorded by path and digest so a claim can point back at it. Ask for an image
 without one and arteries says so rather than storing a filename nobody can
 search.
 
+**Images inside a document are handled for you.** A plan that says
+`![architecture](arch.png)` would otherwise ingest the literal string `![arch]`
+and lose the picture. Instead the reference is replaced inline with a
+description before chunking, so the diagram's content lands in the same chunk as
+the prose around it:
+
+```
+Before:  The current shape is shown below.  ![architecture](arch.png)
+After:   The current shape is shown below.  [Image: architecture] Three boxes
+         left to right: capillaries, arteries, heart. Arrows point one way…
+```
+
+These go to a **frontier model** (`claude-opus-5` by default), not the local one.
+Embedded images are rare — a handful per plan — and unlike a chat turn the
+description becomes permanent memory, so accuracy is worth more here than
+keeping the call on-box. Credentials resolve the usual way: `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, or an `ant auth login` profile. Set
+`ARTERIES_FRONTIER_VISION_MODEL=""` to opt out.
+
+With no credentials and no local endpoint the document still ingests and the
+text reads `[Image not described: arch.png]` — a reader should know a picture
+was there. Remote URLs are skipped; ingestion never fetches from the network.
+
 Set `ARTERIES_VISION_URL` to an endpoint that accepts images and `--describe`
 becomes optional — descriptions are generated at ingest instead. `llama-server`
 answers only when started with `--mmproj`; without it, `vision_available()` is

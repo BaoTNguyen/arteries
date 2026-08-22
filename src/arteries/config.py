@@ -21,6 +21,12 @@ COMPILE_MODEL = os.getenv("ARTERIES_COMPILE_MODEL", "qwen3.6-27b")
 VISION_URL = os.getenv("ARTERIES_VISION_URL", GENERATE_URL)
 VISION_MODEL = os.getenv("ARTERIES_VISION_MODEL", COMPILE_MODEL)
 
+# Images embedded in a document are described by a frontier model. They are rare
+# -- a handful per plan -- and the description becomes permanent memory, so this
+# is the one place where paying for accuracy beats keeping everything local.
+# Set to "" to disable and fall back to the local endpoint or a manual caption.
+FRONTIER_VISION_MODEL = os.getenv("ARTERIES_FRONTIER_VISION_MODEL", "claude-opus-5")
+
 # The embedding config is a shared contract, not an arteries setting: both
 # projects write vectors into the same Postgres and read each other's columns.
 # Prefer capillaries' values so the two ends can't drift -- the same reason
