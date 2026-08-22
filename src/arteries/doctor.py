@@ -12,20 +12,108 @@ from typing import Any
 import psycopg2
 
 from arteries import runlog
-from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
+from arteries.config import AGENT_PROCESS_ID, DB_CONFIG
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check arteries project/run logging setup.")
-    parser.add_argument("--project", default=os.getenv("ARTERIES_PROJECT") or PROJECT_ID)
+    parser.add_argument("--project", default=None,
+                        help="defaults to the scope-resolved project for this directory")
     parser.add_argument("--agent", default=os.getenv("ARTERIES_AGENT_ID") or AGENT_PROCESS_ID)
     parser.add_argument("--cli", default=os.getenv("ARTERIES_CLI") or os.getenv("AGENT_CLI") or "unknown")
     parser.add_argument("--repo", type=Path, default=Path(os.getenv("ARTERIES_REPO") or Path.cwd()))
+    parser.add_argument("--fix", action="store_true",
+                        help="repair what can be repaired: embed rows missing a vector")
     ns = parser.parse_args(argv)
+    # Hooks set ARTERIES_PROJECT; a human running `art doctor` does not, and
+    # PROJECT_ID would fall back to "default" and report on the wrong project.
+    from arteries import scope
+    ns.project = ns.project or scope.current_project()
 
     report = check(ns.project, ns.agent, ns.cli, ns.repo)
+    report["integrity"] = integrity(ns.project)
+    if ns.fix:
+        report["fixed"] = fix(ns.project)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["ok"] else 1
+
+
+def integrity(project: str) -> dict[str, Any]:
+    """Cheap consistency checks that need no repair to be worth reporting."""
+    import psycopg2
+
+    from arteries.config import DB_CONFIG
+
+    out: dict[str, Any] = {}
+    try:
+        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT count(*) FROM arteries.persistent
+                WHERE project_id = %s AND valid_until IS NULL AND embedding IS NULL
+            """, (project,))
+            out["persistent_missing_embedding"] = cur.fetchone()[0]
+
+            # No foreign key is possible: src/dst span tables with different key
+            # types. A periodic sweep is the substitute.
+            cur.execute("""
+                SELECT count(*) FROM arteries.memory_edges e
+                WHERE e.valid_until IS NULL AND e.dst_kind = 'persistent'
+                  AND NOT EXISTS (SELECT 1 FROM arteries.persistent p
+                                  WHERE p.id::text = e.dst_id)
+            """)
+            out["dangling_edges"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT count(*) FROM arteries.ephemeral
+                WHERE status = 'compiling'
+                  AND source_ts < now() - INTERVAL '10 minutes'
+            """)
+            out["stranded_claims"] = cur.fetchone()[0]
+
+            cur.execute("SELECT count(*) FROM arteries.scope_members WHERE project_id = %s",
+                        (project,))
+            out["scope_registered"] = bool(cur.fetchone()[0])
+    except Exception as exc:
+        out["error"] = exc.__class__.__name__
+    return out
+
+
+def fix(project: str) -> dict[str, Any]:
+    """Embed live persistent rows that have no vector.
+
+    Was `art backfill-embeddings`. A repair belongs next to the check that
+    reports it needs doing, not as its own top-level verb.
+    """
+    import psycopg2
+    import psycopg2.extras
+
+    from arteries.config import DB_CONFIG
+    from arteries.embed import embed_texts_sync
+
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, fact FROM arteries.persistent
+                WHERE project_id = %s AND valid_until IS NULL AND embedding IS NULL
+                LIMIT 200
+            """, (project,))
+            rows = cur.fetchall()
+        if not rows:
+            return {"embedded": 0}
+        vectors = embed_texts_sync([r["fact"] for r in rows])
+        done = 0
+        with conn.cursor() as cur:
+            for row, vec in zip(rows, vectors):
+                if vec is None:
+                    continue
+                cur.execute("UPDATE arteries.persistent SET embedding = %s::vector WHERE id = %s",
+                            (vec, row["id"]))
+                done += 1
+            conn.commit()
+        return {"embedded": done, "of": len(rows)}
+    finally:
+        conn.close()
 
 
 def check(project: str, agent: str, cli: str, repo: Path) -> dict[str, Any]:
