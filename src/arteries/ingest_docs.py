@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import hashlib
 from dataclasses import dataclass
+import sys
 from pathlib import Path
 
 import psycopg2
@@ -81,21 +82,36 @@ def _digest(text: str) -> str:
 
 
 async def ingest_file(path: Path, project: str, kind: str = "document") -> dict:
-    """Store one document and compile its chunks into claims."""
+    """Store one document from disk and compile its chunks into claims."""
+    return await ingest_text(
+        path.read_text(encoding="utf-8", errors="replace"),
+        name=str(path), project=project, kind=kind,
+    )
+
+
+async def ingest_text(text: str, *, name: str, project: str,
+                      kind: str = "document") -> dict:
+    """Same pipeline, for content that was never a file.
+
+    Plexus plans and heart's episode notes are generated in memory, not written
+    to disk, and requiring a tempfile just to get provenance would be silly.
+    `name` is the identity the document is stored under -- reuse it and the
+    digest guard works exactly as it does for a path.
+    """
     from arteries import compile as compiler
     from arteries.embed import embed_texts_sync
 
-    text = path.read_text(encoding="utf-8", errors="replace")
+    path = Path(name)
     digest = _digest(text)
     scope_id = scope.scope_for(project) or project
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT id, digest FROM arteries.documents "
-                        "WHERE project_id = %s AND path = %s", (project, str(path)))
+                        "WHERE project_id = %s AND path = %s", (project, name))
             row = cur.fetchone()
             if row and row[1] == digest:
-                return {"path": str(path), "status": "unchanged"}
+                return {"path": name, "status": "unchanged"}
 
             cur.execute(
                 """
@@ -105,7 +121,7 @@ async def ingest_file(path: Path, project: str, kind: str = "document") -> dict:
                     SET digest = EXCLUDED.digest, ingested_at = now()
                 RETURNING id
                 """,
-                (project, str(path), digest, kind),
+                (project, name, digest, kind),
             )
             doc_id = str(cur.fetchone()[0])
             # A changed document replaces its chunks; stale passages would keep
@@ -156,7 +172,7 @@ async def ingest_file(path: Path, project: str, kind: str = "document") -> dict:
             result = await compiler._llm_compile(record, ctx)
             if compiler.validate_response(result):
                 runlog.log_event("docs.chunk.invalid", "arteries",
-                                 {"path": str(path), "ord": c.ord}, project_id=project)
+                                 {"path": name, "ord": c.ord}, project_id=project)
                 continue
             written = compiler._write_results(conn, result, [], project)
             claims += written["new"]
@@ -171,7 +187,7 @@ async def ingest_file(path: Path, project: str, kind: str = "document") -> dict:
                                    graph.DERIVED_FROM, "chunk", cid)
                 conn.commit()
 
-        return {"path": str(path), "status": "ingested",
+        return {"path": name, "status": "ingested",
                 "chunks": len(chunks), "claims": claims, "scope": scope_id}
     finally:
         conn.close()
@@ -179,7 +195,9 @@ async def ingest_file(path: Path, project: str, kind: str = "document") -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="art ingest-docs", description=__doc__)
-    parser.add_argument("target", type=Path, help="a file or a directory")
+    parser.add_argument("target", help="a file, a directory, or - for stdin")
+    parser.add_argument("--name",
+                        help="identity to store stdin under; reuse it so re-sends dedupe")
     parser.add_argument("--include", action="append", default=None,
                         help="glob for directory mode (default *.md)")
     parser.add_argument("--kind", default="document",
@@ -192,11 +210,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{project} is not in a scope; run `art scope add <group> <path>` first")
         return 1
 
-    if args.target.is_dir():
+    if args.target == "-":
+        text = sys.stdin.read()
+        if not text.strip():
+            print("nothing on stdin")
+            return 1
+        name = args.name or f"stdin:{args.kind}:{_digest(text)[:12]}"
+        result = asyncio.run(ingest_text(text, name=name, project=project, kind=args.kind))
+        print(f"  {result['status']:<10} {name}"
+              + (f"  ({result['chunks']} chunks, {result['claims']} claims)"
+                 if result["status"] == "ingested" else ""))
+        return 0
+
+    target = Path(args.target)
+    if target.is_dir():
         patterns = args.include or ["*.md"]
-        files = sorted({p for pat in patterns for p in args.target.rglob(pat) if p.is_file()})
+        files = sorted({p for pat in patterns for p in target.rglob(pat) if p.is_file()})
     else:
-        files = [args.target]
+        files = [target]
     if not files:
         print("no matching files")
         return 1
