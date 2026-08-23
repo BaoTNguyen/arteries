@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from arteries import storage
+from arteries import actionlog, route, storage
 from arteries.cli_caps import CliCapabilities, get_capabilities
 from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PERSISTENT_READ, PROJECT_ID, RELEVANCE_THRESHOLD
 from arteries.embed import embed_text_sync
@@ -88,6 +88,35 @@ EXPAND_WHEN_STRONG_FEWER_THAN = 5
 EXPAND_HOPS = 1
 
 
+def _by_entity(names: list[str], context: AgentContext) -> list[dict]:
+    """Claims naming something the query named. Falls back to nothing quietly."""
+    if not names:
+        return []
+    try:
+        import psycopg2
+
+        from arteries import graph, scope
+        from arteries.config import DB_CONFIG
+
+        conn = psycopg2.connect(**DB_CONFIG)
+        try:
+            rows = graph.claims_naming(
+                conn, context.project_id,
+                scope.scope_for(context.project_id) or context.project_id, names,
+            )
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("entity lookup unavailable", exc_info=True)
+        return []
+    for row in rows:
+        # Ranked just under a strong cosine hit: naming a thing is good evidence,
+        # but not as good as the claim itself matching the question.
+        row["similarity"] = 0.6
+        row["via_graph"] = True
+    return rows
+
+
 def _expand(seeds: list[dict], context: AgentContext, limit: int) -> list[dict]:
     """Add claims reachable from the seeds along the graph, ranked below them.
 
@@ -146,17 +175,21 @@ def _select_persistent(
                 limit=20,
                 threshold=RELEVANCE_THRESHOLD,
             )
-            strong = [s for s in seeds
-                      if float(s.get("similarity") or 0.0) >= STRONG_SIMILARITY]
-            if len(strong) < EXPAND_WHEN_STRONG_FEWER_THAN:
-                # Seed from the best hits only. Expanding from a weak seed walks
-                # outward from something already off-topic.
-                expanded = _expand(seeds[:5], context, limit=8)
-                if expanded:
-                    logger.info("graph expansion added %d claims to %d seeds",
-                                len(expanded), len(seeds))
-                return seeds + expanded
-            return seeds
+            plan = route.choose(message, seeds)
+            actionlog.log_decision(
+                "retrieval.route",
+                chosen_action=plan.strategy,
+                available_actions=["cosine", "cosine+entity", "cosine+expansion"],
+                observation=plan.as_payload(),
+            )
+            if plan.strategy == "cosine":
+                return seeds
+            added = (_by_entity(plan.entities, context) if plan.strategy == "cosine+entity"
+                     else _expand(seeds[:5], context, limit=8))
+            if added:
+                logger.info("%s added %d claims to %d seeds",
+                            plan.strategy, len(added), len(seeds))
+            return seeds + added
         # Relevance was requested but we couldn't do it — no query embedding
         # (embedder down) or no stored embeddings. We fall back to recency, which
         # is a different, weaker read; say so rather than degrade silently.
