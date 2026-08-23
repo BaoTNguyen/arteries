@@ -261,6 +261,34 @@ def max_ephemeral_similarity(
         return float(cur.fetchone()[0])
 
 
+def touch_persistent(ids: list[str]) -> None:
+    """Bump access_count for claims surfaced into a frame.
+
+    The only usage signal in the store. Without it every claim looks equally
+    unused and nothing can be pruned by usefulness -- which is the state this
+    branch was accidentally in after the column's writer was removed with the
+    evergreen tier, leaving a comment in frame.py claiming otherwise.
+
+    Best effort: reinforcement must never break a read.
+
+    ponytail: counts surfacings, not usefulness. Outcome-weighted value needs
+    the reward ledger, which is still empty.
+    """
+    if not ids:
+        return
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE arteries.persistent SET access_count = access_count + 1 "
+                "WHERE id = ANY(%s::uuid[])",
+                (ids,),
+            )
+            conn.commit()
+    except Exception as exc:
+        from arteries import degrade
+        degrade.note(exc, "access_count reinforcement")
+
+
 def get_recent_retrievals(
     project_id: str,
     agent_process_id: str,
