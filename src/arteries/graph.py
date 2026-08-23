@@ -63,19 +63,25 @@ def upsert_entity(cur, scope_id: str, raw_name: str, kind: str = "concept") -> E
 
     match = ontology.resolve(name, kind="class")
     canonical = match.name if match.valid else name
+    # cognee's subgraph expansion: if the vocabulary says ElectricCar is a Car,
+    # a claim about one is reachable from the other. Stored on the node rather
+    # than walked at query time -- the chain does not change between reloads.
+    lineage = ontology.ancestors(match.uri) if match.valid else []
 
     cur.execute(
         """
         INSERT INTO arteries.entities
-            (scope_id, name, raw_name, kind, ontology_class, ontology_valid, match_score)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (scope_id, name, raw_name, kind, ontology_class, ontology_valid,
+             match_score, metadata)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
         ON CONFLICT (scope_id, kind, lower(name)) DO UPDATE
             SET raw_name = COALESCE(arteries.entities.raw_name, EXCLUDED.raw_name)
         RETURNING id, name, kind, ontology_class, ontology_valid
         """,
         (scope_id, canonical, name, kind,
          match.uri if match.valid else None, match.valid,
-         match.score if match.valid else None),
+         match.score if match.valid else None,
+         psycopg2.extras.Json({"ontology_ancestors": lineage} if lineage else {})),
     )
     row = cur.fetchone()
     return Entity(str(row[0]), row[1], row[2], row[3], row[4])
