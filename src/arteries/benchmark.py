@@ -126,14 +126,9 @@ def run(cases: list[dict], project: str, window: int) -> dict:
         forced = memory_select._expand(seeds[:5], ctx, limit=8)
         added_counts.append(len(forced))
 
-        plan = router.choose(case["query"], seeds)
+        plan = router.choose(seeds)
         strategies[plan.strategy] = strategies.get(plan.strategy, 0) + 1
-        if plan.strategy == "cosine":
-            routed = seeds
-        elif plan.strategy == "cosine+entity":
-            routed = seeds + memory_select._by_entity(plan.entities, ctx)
-        else:
-            routed = seeds + forced
+        routed = seeds if plan.strategy == "cosine" else seeds + forced
 
         r = {"cosine": _rank(case["id"], seeds),
              "expansion": _rank(case["id"], seeds + forced),
