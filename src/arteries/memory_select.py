@@ -88,35 +88,6 @@ EXPAND_WHEN_STRONG_FEWER_THAN = 5
 EXPAND_HOPS = 1
 
 
-def _by_entity(names: list[str], context: AgentContext) -> list[dict]:
-    """Claims naming something the query named. Falls back to nothing quietly."""
-    if not names:
-        return []
-    try:
-        import psycopg2
-
-        from arteries import graph, scope
-        from arteries.config import DB_CONFIG
-
-        conn = psycopg2.connect(**DB_CONFIG)
-        try:
-            rows = graph.claims_naming(
-                conn, context.project_id,
-                scope.scope_for(context.project_id) or context.project_id, names,
-            )
-        finally:
-            conn.close()
-    except Exception:
-        logger.debug("entity lookup unavailable", exc_info=True)
-        return []
-    for row in rows:
-        # Ranked just under a strong cosine hit: naming a thing is good evidence,
-        # but not as good as the claim itself matching the question.
-        row["similarity"] = 0.6
-        row["via_graph"] = True
-    return rows
-
-
 def _expand(seeds: list[dict], context: AgentContext, limit: int) -> list[dict]:
     """Add claims reachable from the seeds along the graph, ranked below them.
 
@@ -175,17 +146,16 @@ def _select_persistent(
                 limit=20,
                 threshold=RELEVANCE_THRESHOLD,
             )
-            plan = route.choose(message, seeds)
+            plan = route.choose(seeds)
             actionlog.log_decision(
                 "retrieval.route",
                 chosen_action=plan.strategy,
-                available_actions=["cosine", "cosine+entity", "cosine+expansion"],
+                available_actions=["cosine", "cosine+expansion"],
                 observation=plan.as_payload(),
             )
             if plan.strategy == "cosine":
                 return seeds
-            added = (_by_entity(plan.entities, context) if plan.strategy == "cosine+entity"
-                     else _expand(seeds[:5], context, limit=8))
+            added = _expand(seeds[:5], context, limit=8)
             if added:
                 logger.info("%s added %d claims to %d seeds",
                             plan.strategy, len(added), len(seeds))
