@@ -1,8 +1,12 @@
-"""Human-reviewed evergreen memory import.
+"""Human-reviewed document ingestion.
+
+Walks a repo's Markdown, proposes candidate facts with source spans, and
+imports the ones a human accepts into persistent memory. Was the evergreen
+bootstrap; the tier is gone, the mechanism is worth keeping.
 
 Two-step flow:
-    art evergreen extract --project . --out evergreen_review.md
-    art evergreen import --review evergreen_review.md --write
+    art docs extract --project . --out docs_review.md
+    art docs import --review docs_review.md --write
 
 The review file is meant for humans to edit. The sidecar JSON preserves
 source spans and original extracted text so edits can still be connected
@@ -22,6 +26,7 @@ from typing import Any
 from uuid import uuid4
 
 from arteries import storage
+from arteries.config import PROJECT_ID
 
 DEFAULT_INCLUDE = ["AGENTS.md", "README.md", "*.md", "*.txt", "*.rst"]
 IGNORE_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build", "target"}
@@ -109,7 +114,7 @@ def extract_candidates(project: Path, includes: list[str] | None = None) -> list
 
 
 def write_review(project: Path, out_path: Path, candidates: list[CandidateMemory], import_id: str | None = None) -> None:
-    import_id = import_id or f"evergreen-{uuid4()}"
+    import_id = import_id or f"docs-{uuid4()}"
     lines = [
         "---",
         f"import_id: {import_id}",
@@ -117,7 +122,7 @@ def write_review(project: Path, out_path: Path, candidates: list[CandidateMemory
         "status: pending_review",
         "---",
         "",
-        "# Evergreen Memory Review",
+        "# Document Review",
         "",
         "Delete memories you do not want imported. Edit wording freely.",
         "Move memories under `Rejected Memories` to keep feedback without importing them.",
@@ -218,17 +223,28 @@ def import_review(review_path: Path, write: bool = False) -> dict[str, Any]:
         errors.append("Duplicate memory IDs found: " + ", ".join(duplicate_ids))
 
     if write and not duplicate_ids:
-        existing = {_normalize_fact(row["fact"]) for row in storage.get_evergreen(limit=1000)}
+        # Embed up front, in one call. Without a vector an imported fact is
+        # invisible to get_persistent_by_relevance -- write-only memory, which
+        # is worse than no memory because it looks like it worked.
+        from arteries.embed import embed_texts_sync
+        vectors = dict(zip(
+            (b["memory_id"] for b in accepted),
+            embed_texts_sync([b["fact"] for b in accepted]),
+        ))
+        existing = {_normalize_fact(row["fact"]) for row in storage.get_persistent(PROJECT_ID, limit=1000)}
         for block in accepted:
             normalized = _normalize_fact(block["fact"])
             if normalized in existing:
                 duplicate_count += 1
                 continue
             source_meta = _source_meta(block, originals.get(block["memory_id"]), meta.get("import_id"))
-            inserted.append(storage.insert_evergreen(
+            inserted.append(storage.insert_persistent(
+                project_id=PROJECT_ID,
                 fact=block["fact"],
                 domains=block["domains"] or _infer_domains(block["fact"]),
                 confidence=block["confidence"],
+                scope="reviewed",
+                embedding=vectors.get(block["memory_id"]),
                 source_meta=source_meta,
             ))
             existing.add(normalized)
@@ -398,7 +414,7 @@ def _source_meta(block: dict[str, Any], original: dict[str, Any] | None, import_
 
 
 def _print_summary(summary: dict[str, Any]) -> None:
-    print("Evergreen import preview")
+    print("Document import preview")
     print(f"Accepted: {summary['accepted']}")
     print(f"Rejected: {summary['rejected']}")
     print(f"Edited: {summary['edited']}")
@@ -413,7 +429,7 @@ def _print_summary(summary: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Extract and import reviewed evergreen memories.")
+    parser = argparse.ArgumentParser(prog="art docs", description="Extract and import reviewed facts from a repo's documentation.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     extract_parser = subparsers.add_parser("extract", help="write editable Markdown review file")
@@ -424,24 +440,6 @@ def main(argv: list[str] | None = None) -> int:
     import_parser = subparsers.add_parser("import", help="preview or write accepted memories from review file")
     import_parser.add_argument("--review", required=True, type=Path)
     import_parser.add_argument("--write", action="store_true")
-
-    list_parser = subparsers.add_parser("list", help="list active evergreen memories")
-    list_parser.add_argument("--limit", type=int, default=50)
-    list_parser.add_argument("--json", action="store_true", dest="as_json")
-
-    add_parser = subparsers.add_parser("add", help="add an evergreen memory directly")
-    add_parser.add_argument("fact", nargs="+", help="the memory text")
-    add_parser.add_argument("--domains", default="", help="comma-separated domains")
-    add_parser.add_argument("--confidence", type=float, default=1.0)
-
-    edit_parser = subparsers.add_parser("edit", help="edit an existing evergreen memory")
-    edit_parser.add_argument("id", help="evergreen memory UUID (prefix match supported)")
-    edit_parser.add_argument("--fact", help="new fact text")
-    edit_parser.add_argument("--domains", help="new comma-separated domains")
-    edit_parser.add_argument("--confidence", type=float, help="new confidence")
-
-    rm_parser = subparsers.add_parser("rm", help="remove an evergreen memory")
-    rm_parser.add_argument("id", help="evergreen memory UUID (prefix match supported)")
 
     args = parser.parse_args(argv)
     if args.command == "extract":
@@ -463,66 +461,4 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("Run again with --write to insert accepted memories.")
         return 0
-    if args.command == "list":
-        rows = storage.get_evergreen(limit=args.limit)
-        if args.as_json:
-            print(json.dumps(rows, indent=2, default=str))
-        elif not rows:
-            print("No active evergreen memories.")
-        else:
-            for row in rows:
-                domains = ", ".join(row.get("domains") or [])
-                eid = str(row["id"])[:8]
-                print(f"  {eid}  [{domains}]  {row['fact']}")
-        return 0
-    if args.command == "add":
-        fact = " ".join(args.fact)
-        domains = [d.strip() for d in args.domains.split(",") if d.strip()] if args.domains else _infer_domains(fact)
-        eid = storage.insert_evergreen(
-            fact=fact,
-            domains=domains,
-            confidence=args.confidence,
-            source_meta={"source_type": "user_direct"},
-        )
-        print(f"Added: {eid[:8]}  {fact}")
-        return 0
-    if args.command == "edit":
-        resolved = _resolve_id(args.id)
-        if not resolved:
-            return 1
-        domains = [d.strip() for d in args.domains.split(",") if d.strip()] if args.domains else None
-        ok = storage.update_evergreen(resolved, fact=args.fact, domains=domains, confidence=args.confidence)
-        if ok:
-            print(f"Updated: {resolved[:8]}")
-        else:
-            print(f"Not found or already superseded: {args.id}")
-            return 1
-        return 0
-    if args.command == "rm":
-        resolved = _resolve_id(args.id)
-        if not resolved:
-            return 1
-        ok = storage.remove_evergreen(resolved)
-        if ok:
-            print(f"Removed: {resolved[:8]}")
-        else:
-            print(f"Not found: {args.id}")
-            return 1
-        return 0
     return 2
-
-
-def _resolve_id(prefix: str) -> str | None:
-    rows = storage.get_evergreen(limit=1000)
-    matches = [str(r["id"]) for r in rows if str(r["id"]).startswith(prefix)]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) == 0:
-        print(f"No evergreen memory matching: {prefix}")
-        return None
-    print(f"Ambiguous prefix '{prefix}', matches: {', '.join(m[:12] for m in matches)}")
-    return None
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
