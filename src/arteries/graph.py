@@ -107,7 +107,7 @@ def add_edge(cur, project_id: str, src_kind: str, src_id: str, rel: str,
     )
 
 
-def expand(conn, project_id: str, seed_ids: list[str], *, hops: int = 1,
+def expand(conn, project_id: str, seeds: list[dict[str, Any]], *, hops: int = 1,
            decay: float = 0.6, limit: int = 40) -> list[dict[str, Any]]:
     """Claims reachable from the seeds, weight-decayed, two ways.
 
@@ -125,14 +125,21 @@ def expand(conn, project_id: str, seed_ids: list[str], *, hops: int = 1,
     The scope filter sits on the claim side, so a shared entity cannot leak one
     group's claims into another's traversal.
     """
-    if not seed_ids:
+    if not seeds:
         return []
-    seeds = [str(s) for s in seed_ids]
+    # Score relative to the seed each neighbour was reached from, not a flat
+    # constant. A constant let a neighbour outscore the seed that produced it:
+    # for a query whose best cosine hit was 0.50, a direct edge handed its
+    # neighbour 0.60, which then cleared a relevance floor the seed itself had
+    # only just met. Relevance cannot grow as you walk away from the query.
+    strength = {str(s["id"]): float(s.get("similarity") or 0.0) for s in seeds}
+    seed_ids = list(strength)
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             SCOPE_CTE + """
             , direct AS (
-                SELECT e.dst_id AS nid, e.weight * %(decay)s AS score, e.rel
+                SELECT e.dst_id AS nid, e.weight * %(decay)s AS score, e.rel,
+                       e.src_id AS from_id
                 FROM arteries.memory_edges e
                 WHERE e.src_kind = 'persistent' AND e.src_id = ANY(%(seeds)s)
                   AND e.dst_kind = 'persistent' AND e.valid_until IS NULL
@@ -140,7 +147,8 @@ def expand(conn, project_id: str, seed_ids: list[str], *, hops: int = 1,
             shared_entity AS (
                 SELECT b.src_id AS nid,
                        %(decay)s * %(decay)s AS score,
-                       'shares:' || en.name AS rel
+                       'shares:' || en.name AS rel,
+                       a.src_id AS from_id
                 FROM arteries.memory_edges a
                 JOIN arteries.memory_edges b
                   ON b.dst_id = a.dst_id AND b.src_id <> a.src_id
@@ -152,7 +160,7 @@ def expand(conn, project_id: str, seed_ids: list[str], *, hops: int = 1,
             reached AS (SELECT * FROM direct UNION ALL SELECT * FROM shared_entity)
             SELECT DISTINCT ON (p.id)
                    p.id, p.fact, p.domains, p.confidence, p.kind,
-                   r.score, r.rel AS via
+                   r.score, r.rel AS via, r.from_id
             FROM reached r
             JOIN arteries.persistent p ON p.id = r.nid::uuid
             WHERE p.project_id IN (SELECT project_id FROM scope)
@@ -161,10 +169,12 @@ def expand(conn, project_id: str, seed_ids: list[str], *, hops: int = 1,
             ORDER BY p.id, r.score DESC
             LIMIT %(limit)s
             """,
-            {"project": project_id, "seeds": seeds, "decay": decay, "limit": limit},
+            {"project": project_id, "seeds": seed_ids, "decay": decay, "limit": limit},
         )
         rows = [dict(r) for r in cur.fetchall()]
-    return sorted(rows, key=lambda r: float(r["score"]), reverse=True)
+    for row in rows:
+        row["score"] = float(row["score"]) * strength.get(str(row.pop("from_id")), 0.0)
+    return sorted(rows, key=lambda r: r["score"], reverse=True)
 
 
 def stats(project_id: str, db_config: dict | None = None) -> dict[str, Any]:

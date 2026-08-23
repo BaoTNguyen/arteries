@@ -91,7 +91,21 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
 # relevance query. Ephemeral is selected by a different policy (this session,
 # this agent, recency) and has no similarity to be judged on; scoring it against
 # a scale it never competed on would silently empty the tier.
-MEMORY_SIMILARITY_FLOOR = float(os.getenv("ARTERIES_PACKET_FLOOR", "0.45"))
+# Measured against 237 real plexus session queries over 115 claims. The top hit
+# per query runs p25 0.50, p50 0.55, p90 0.66, max 0.78 -- Qwen3-Embedding-0.6B
+# compresses unrelated technical prose into roughly 0.45-0.55, so a score in that
+# band carries almost no signal. The old 0.45 sat at the 25th percentile of
+# *every* returned row, which is how a question about cost tracking came back
+# with claims about retrieval ownership and retry latency.
+#
+# 0.55 is the median top hit: if the best thing the store has for your query is
+# below what a median query's best match scores, the store probably has nothing,
+# and saying nothing beats saying something confidently irrelevant.
+#
+# ponytail: one global number tuned on cross-project queries. Within-project
+# paraphrases score 0.6-0.8, so this is conservative for them. Re-derive from
+# `art benchmark` as the corpus grows.
+MEMORY_SIMILARITY_FLOOR = float(os.getenv("ARTERIES_PACKET_FLOOR", "0.55"))
 MAX_PACKET_MEMORIES = 15
 NEUTRAL_SIMILARITY = 0.5
 TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95}

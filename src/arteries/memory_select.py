@@ -106,10 +106,10 @@ def _expand(seeds: list[dict], context: AgentContext, limit: int) -> list[dict]:
 
         conn = psycopg2.connect(**DB_CONFIG)
         try:
-            reached = graph.expand(
-                conn, context.project_id, [str(s["id"]) for s in seeds],
-                hops=EXPAND_HOPS, limit=limit,
-            )
+            # Whole seed rows, not just ids: expand scores each neighbour
+            # relative to the seed it came from.
+            reached = graph.expand(conn, context.project_id, seeds,
+                                   hops=EXPAND_HOPS, limit=limit)
         finally:
             conn.close()
     except Exception as exc:
