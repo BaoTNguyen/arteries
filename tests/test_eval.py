@@ -64,9 +64,11 @@ class EvaluateTests(unittest.IsolatedAsyncioTestCase):
         frame = SimpleNamespace(
             ephemeral=SimpleNamespace(recent_messages=[]),
             persistent=SimpleNamespace(session_insights=[]),
-            evergreen=SimpleNamespace(ground_truth_insights=[]),
+            scope=SimpleNamespace(sibling_insights=[]),
         )
-        with patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-1"), \
+        with patch.object(arteries_eval.scope, "is_tracked", return_value=True), \
+             patch.object(arteries_eval, "embed_text_sync", return_value=[0.1] * 8), \
+             patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-1"), \
              patch.object(arteries_eval.runlog, "log_event"), \
              patch.object(arteries_eval, "extract_and_store", return_value=1), \
              patch.object(arteries_eval, "get_current_frame", return_value=frame), \
