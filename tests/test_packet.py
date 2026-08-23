@@ -126,3 +126,28 @@ class PacketTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FloorCalibrationTests(unittest.TestCase):
+    """The floor has to sit above the model's noise band.
+
+    Measured over 237 real plexus queries against 115 claims: top-hit
+    similarity runs p25 0.50, p50 0.55, p90 0.66. Qwen3-Embedding-0.6B puts
+    unrelated technical prose at roughly 0.45-0.55, so the old 0.45 admitted the
+    25th percentile of everything -- which is how a question about cost tracking
+    returned claims about retrieval ownership.
+    """
+
+    def test_floor_sits_above_the_noise_band(self):
+        self.assertGreaterEqual(packet.MEMORY_SIMILARITY_FLOOR, 0.55)
+
+    def test_a_row_below_the_floor_is_refused(self):
+        self.assertIsNone(packet._score("persistent", {"similarity": 0.50, "confidence": 1.0}))
+
+    def test_a_row_above_the_floor_is_admitted(self):
+        self.assertIsNotNone(packet._score("persistent", {"similarity": 0.70, "confidence": 1.0}))
+
+    def test_rows_without_a_similarity_are_judged_by_another_policy(self):
+        """Ephemeral is selected by session and recency, not by distance, so it
+        has no similarity to be measured against this floor."""
+        self.assertIsNotNone(packet._score("ephemeral", {"confidence": 1.0}))
