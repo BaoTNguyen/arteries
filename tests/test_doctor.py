@@ -75,3 +75,36 @@ class UnreachedTests(unittest.TestCase):
             root = Path(d)
             (root / "d.py").write_text("def _private():\n    pass\n")
             self.assertEqual(doctor.unreached(root), [])
+
+
+class StoreCleanupTests(unittest.TestCase):
+    """Pruning the memory store, not the code.
+
+    Every rule keeps anything still cited. A tombstoned claim that something
+    `supersedes` is the answer to "what did we used to think"; deleting it to
+    save a row destroys the audit trail the tombstone existed for.
+    """
+
+    def test_claim_collection_spares_cited_rows(self):
+        sql = doctor._COLLECTABLE_CLAIMS
+        self.assertIn("valid_until IS NOT NULL", sql)   # tombstoned only
+        self.assertIn("NOT EXISTS", sql)                 # and uncited
+        self.assertIn("memory_edges", sql)
+
+    def test_claims_outlive_ephemeral(self):
+        """A retired claim answers a question a working set never had."""
+        self.assertGreater(doctor.CLAIM_RETENTION_DAYS, doctor.EPHEMERAL_RETENTION_DAYS)
+
+    def test_orphan_entities_are_those_no_live_claim_mentions(self):
+        sql = doctor._ORPHAN_ENTITIES
+        self.assertIn("dst_kind = 'entity'", sql)
+        self.assertIn("p.valid_until IS NULL", sql)
+
+    def test_dangling_sweep_runs_after_deletions(self):
+        """Deleting an entity orphans the mentions edges that pointed at it.
+        Sweeping first left eight fresh dangling edges behind."""
+        import inspect
+        src = inspect.getsource(doctor.fix)
+        collect_at = src.index("_collect_entities(conn)")
+        sweep_at = src.rindex("_retire_dangling(conn)")
+        self.assertGreater(sweep_at, collect_at)
