@@ -76,10 +76,15 @@ def _should_include_parent_ephemeral(context: AgentContext) -> bool:
 
 # Graph expansion runs only when cosine came back thin. A strong seed set is
 # already the answer; walking outward from it would add weaker neighbours to a
-# frame that is budget-limited anyway. Thin means: few results, or the best one
-# was not very close.
-EXPAND_WHEN_FEWER_THAN = 5
-EXPAND_WHEN_TOP_BELOW = 0.55
+# frame that is budget-limited anyway.
+#
+# "Thin" has to mean *quality*, not row count. RELEVANCE_THRESHOLD is 0.0 while
+# it awaits calibration, so the query always returns its full limit and a
+# count-based gate never fires -- which is exactly what happened when this was
+# first wired: expansion was reachable in tests and dead in practice. Count how
+# many seeds clear a real bar instead.
+STRONG_SIMILARITY = 0.65
+EXPAND_WHEN_STRONG_FEWER_THAN = 5
 EXPAND_HOPS = 1
 
 
@@ -141,9 +146,12 @@ def _select_persistent(
                 limit=20,
                 threshold=RELEVANCE_THRESHOLD,
             )
-            top = max((float(s.get("similarity") or 0.0) for s in seeds), default=0.0)
-            if len(seeds) < EXPAND_WHEN_FEWER_THAN or top < EXPAND_WHEN_TOP_BELOW:
-                expanded = _expand(seeds, context, limit=20 - len(seeds))
+            strong = [s for s in seeds
+                      if float(s.get("similarity") or 0.0) >= STRONG_SIMILARITY]
+            if len(strong) < EXPAND_WHEN_STRONG_FEWER_THAN:
+                # Seed from the best hits only. Expanding from a weak seed walks
+                # outward from something already off-topic.
+                expanded = _expand(seeds[:5], context, limit=8)
                 if expanded:
                     logger.info("graph expansion added %d claims to %d seeds",
                                 len(expanded), len(seeds))
