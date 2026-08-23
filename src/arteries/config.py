@@ -36,14 +36,16 @@ if _preset in _PRESETS:
     for _k, _v in _PRESETS[_preset].items():
         os.environ.setdefault(_k, _v)
 
-EPHEMERAL_MODE = os.getenv("ARTERIES_EPHEMERAL", "compile")
+# compile  write ephemeral, promote to persistent in the background (default)
+# keep     write ephemeral, never promote — `art remember` and `art compile` are
+#          the deliberate paths up. For interactive sessions, where compiling
+#          every assistant reply turned six days of work into 178 permanent
+#          "memories" that were mostly narration of what had just been said.
+# discard  never write ephemeral at all; an in-process buffer serves this turn only
+_EPHEMERAL_MODES = ("compile", "keep", "discard")
+EPHEMERAL_MODE = os.getenv("ARTERIES_EPHEMERAL", "compile").strip().lower()
+if EPHEMERAL_MODE not in _EPHEMERAL_MODES:
+    # an unrecognised value must not silently mean "stop remembering"
+    EPHEMERAL_MODE = "compile"
 PERSISTENT_READ = os.getenv("ARTERIES_PERSISTENT_READ", "relevance")
 RELEVANCE_THRESHOLD = float(os.getenv("ARTERIES_RELEVANCE_THRESHOLD", "0.3"))
-
-# Minimum rerank confidence before a retrieved prompt is injected into the
-# agent's context. Measured against the reembedded corpus: planner-style turns
-# score ~0.98, while implementation turns land in 0.01-0.56 with no correlation
-# to usefulness -- at 0.3 an episode writing a 20-line string function was
-# served "Delegate Like a Parallel Coworker" at 0.53. 0.6 keeps the former and
-# drops the latter. Lower it once the corpus covers implementation work.
-RETRIEVAL_MIN_CONFIDENCE = float(os.getenv("ARTERIES_RETRIEVAL_MIN_CONFIDENCE", "0.6"))

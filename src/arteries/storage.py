@@ -35,7 +35,7 @@ def get_ephemeral(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, fact, domains, confidence, source_ts, status
+            SELECT id, fact, domains, confidence, source_ts, status, source
             FROM arteries.ephemeral
             WHERE project_id = %s
               AND agent_process_id = %s
@@ -276,6 +276,30 @@ def touch_evergreen(ids: list[str]) -> None:
         with _conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE arteries.evergreen SET access_count = access_count + 1 "
+                "WHERE id = ANY(%s::uuid[])",
+                (ids,),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def touch_persistent(ids: list[str]) -> None:
+    """Bump access_count for persistent rows surfaced into a frame.
+
+    The column existed and nothing wrote it, so every persistent memory looked
+    equally used and there was no signal to prune on — which is how one project
+    accumulated 233 of them with no way to tell the load-bearing ones from
+    narration. Retrieval is relevance-ordered and does not read this; it exists
+    purely so `access_count = 0` after a few weeks means "never once relevant".
+    Best-effort: never breaks the read path that calls it.
+    """
+    if not ids:
+        return
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE arteries.persistent SET access_count = access_count + 1 "
                 "WHERE id = ANY(%s::uuid[])",
                 (ids,),
             )
