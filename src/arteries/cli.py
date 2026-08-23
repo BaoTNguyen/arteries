@@ -6,11 +6,14 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, evergreen, inspect, packet, remember, runs, setup_cli, setup_db, trace
+from arteries import benchmark, doctor, docs, graph, ingest, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe",
+            "activate", "ingest", "rewards", "benchmark", "eval", "inspect", "runs",
+            "doctor", "packet", "trace", "decisions", "remember", "spawn", "search",
+            "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -22,7 +25,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "command",
         nargs="?",
         choices=COMMANDS,
-        help="command to run: setup, evergreen, setup-db, eval, inspect, runs, doctor, packet, trace",
+        help="command to run: " + ", ".join(COMMANDS),
     )
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args(argv)
@@ -33,11 +36,26 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if ns.command == "setup":
         return setup_cli.main(ns.args)
-    if ns.command == "evergreen":
-        return evergreen.main(ns.args)
-    if ns.command == "setup-db":
-        setup_db.setup()
-        return 0
+    if ns.command == "docs":
+        return docs.main(ns.args)
+
+    if ns.command == "ontology":
+        return ontology.main(ns.args)
+
+    if ns.command == "scope":
+        return scope.main(ns.args)
+
+    if ns.command == "graph":
+        return graph.main(ns.args)
+
+    if ns.command == "benchmark":
+        return benchmark.main(ns.args)
+
+    if ns.command == "observe":
+        return observe.main(ns.args)
+
+    if ns.command == "ingest":
+        return ingest.main(ns.args)
     if ns.command == "eval":
         if not ns.args:
             parser.error("eval requires a prompt")
@@ -46,6 +64,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if result:
             print(result)
         return 0
+    if ns.command == "observe":
+        return _observe(ns.args)
+    if ns.command == "activate":
+        return _activate(ns.args)
     if ns.command == "inspect":
         return inspect.main(ns.args)
     if ns.command == "runs":
@@ -58,12 +80,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return trace.main(ns.args)
     if ns.command == "decisions":
         return _decisions(ns.args)
-    if ns.command == "ingest":
-        return _ingest(ns.args)
-    if ns.command == "backfill-embeddings":
-        return _backfill_embeddings(ns.args)
+    if ns.command == "rewards":
+        return _rewards(ns.args)
     if ns.command == "remember":
         return remember.main(ns.args)
+    if ns.command == "identity":
+        return _identity(ns.args)
+
     if ns.command == "spawn":
         return _spawn(list(ns.args))
     if ns.command == "search":
@@ -75,6 +98,102 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 2
 
 
+def _cli_env(ns: argparse.Namespace) -> None:
+    """Apply the identity flags shared by the host-agnostic commands.
+
+    These are plain env vars because that is the contract every other module
+    already reads (config.PROJECT_ID and friends resolve at import), so a flag
+    has to be set before anything downstream is touched.
+    """
+    import os
+
+    for flag, var in (("cli", "ARTERIES_CLI"), ("project", "ARTERIES_PROJECT"),
+                      ("agent", "ARTERIES_AGENT_ID"), ("repo", "ARTERIES_REPO"),
+                      ("transcript", "ARTERIES_TRANSCRIPT")):
+        value = getattr(ns, flag, None)
+        if value:
+            os.environ[var] = str(value)
+    for key in ("tokens_in", "tokens_out", "cache_read", "cache_write_5m", "cache_write_1h"):
+        value = getattr(ns, key, None)
+        if value:
+            os.environ[f"ARTERIES_USAGE_{key.upper()}"] = str(value)
+
+
+def _identity_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--cli", default=None, help="host label for attribution; anything goes")
+    p.add_argument("--project", default=None)
+    p.add_argument("--agent", default=None)
+    p.add_argument("--repo", default=None)
+
+
+def _observe(args: Sequence[str]) -> int:
+    """Observe one turn from any host. Prompt on argv or stdin, retrieval on stdout.
+
+    The host-agnostic sibling of the per-CLI hook wrappers: those exist only to
+    normalise each vendor's event JSON, and a CLI that can shell out does not
+    need that layer. Prints nothing when the gate abstains, so it is safe to
+    splice into a prompt unconditionally.
+    """
+    import sys
+
+    p = argparse.ArgumentParser(prog="art observe", description="Observe one turn from any CLI.")
+    p.add_argument("prompt", nargs="*", help="prompt text; read from stdin when omitted")
+    _identity_args(p)
+    p.add_argument("--transcript", default=None, help="session transcript path, if the host has one")
+    for key in ("tokens-in", "tokens-out", "cache-read", "cache-write-5m", "cache-write-1h"):
+        p.add_argument(f"--{key}", type=int, default=None, help="usage the host already measured")
+    ns = p.parse_args(args)
+    _cli_env(ns)
+
+    prompt = " ".join(ns.prompt).strip() if ns.prompt else ("" if sys.stdin.isatty() else sys.stdin.read().strip())
+    if not prompt:
+        return 0
+    result = asyncio.run(evaluate(prompt))
+    if result:
+        print(result)
+    return 0
+
+
+def _activate(args: Sequence[str]) -> int:
+    """Session-start context for any host: opens a run, prints evergreen memory."""
+    p = argparse.ArgumentParser(prog="art activate", description="Session-start context for any CLI.")
+    _identity_args(p)
+    ns = p.parse_args(args)
+    _cli_env(ns)
+
+    import os
+
+    from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
+
+    project = os.environ.get("ARTERIES_PROJECT", PROJECT_ID)
+    agent = os.environ.get("ARTERIES_AGENT_ID", AGENT_PROCESS_ID)
+    # the run id goes to stdout, and stdout here is context the host will show
+    import contextlib
+    import io
+
+    with contextlib.suppress(Exception), contextlib.redirect_stdout(io.StringIO()):
+        runs.main(["start", "--project", project, "--agent", agent,
+                   "--cli", os.environ.get("ARTERIES_CLI", "generic"),
+                   "--repo", os.environ.get("ARTERIES_REPO", os.getcwd())])
+
+    print("ARTERIES MEMORY SYSTEM ACTIVE.\n")
+    print(f"This repo is connected to arteries project `{project}`.")
+    print("Arteries observes turns, builds ephemeral/persistent/evergreen memory, "
+          "and may surface retrieved prompts as visible context.")
+
+    # never let a memory read stop a session from starting
+    try:
+        from arteries import storage
+        rows = storage.get_evergreen(limit=8)
+    except Exception:
+        rows = []
+    if rows:
+        print("\nEvergreen preferences (authoritative source: arteries):")
+        for r in rows:
+            print(f"- {r['fact']}")
+    return 0
+
+
 def _spawn(args: list[str]) -> int:
     """Run a child agent command with subagent memory attribution.
 
@@ -84,6 +203,10 @@ def _spawn(args: list[str]) -> int:
     import os
     import sys
 
+    if args and args[0] in ("-h", "--help"):
+        print(_spawn.__doc__.strip())
+        print("\nusage: art spawn -- <command> [args...]")
+        return 0
     if args and args[0] == "--":
         args = args[1:]
     if not args:
@@ -96,6 +219,40 @@ def _spawn(args: list[str]) -> int:
     env = {**os.environ, **subagent_env(AGENT_PROCESS_ID)}
     env.setdefault("ARTERIES_MEMORY", "subagent")
     os.execvpe(args[0], args, env)
+
+
+def _identity(args: Sequence[str]) -> int:
+    """Mint a subagent memory identity for an orchestrator to spawn with.
+
+    Arteries should not start processes -- heart orchestrates. What arteries
+    owns is memory attribution: a child needs its own agent id tagged with this
+    one as parent, so the parent's compile pass claims the child's ephemeral and
+    applies the [SUBAGENT] bar. This prints that environment and stops.
+    """
+    p = argparse.ArgumentParser(
+        prog="art identity",
+        description="Print the environment a subagent should be spawned with.",
+    )
+    p.add_argument("--parent", default=None, help="parent agent id (default: this one)")
+    p.add_argument("--role", default="subagent")
+    p.add_argument("--json", action="store_true", dest="as_json")
+    ns = p.parse_args(args)
+
+    import json as _json
+
+    from arteries.config import AGENT_PROCESS_ID
+    from arteries.subagent import subagent_env
+
+    env = subagent_env(ns.parent or AGENT_PROCESS_ID)
+    env.setdefault("ARTERIES_MEMORY", "subagent")
+    env.setdefault("ARTERIES_AGENT_ROLE", ns.role)
+
+    if ns.as_json:
+        print(_json.dumps(env, indent=2, sort_keys=True))
+    else:
+        for k, v in sorted(env.items()):
+            print(f"export {k}={v}")
+    return 0
 
 
 def _compile(args: list[str]) -> int:
@@ -177,60 +334,21 @@ def _decisions(args: Sequence[str]) -> int:
     return 0
 
 
-def _ingest(args: Sequence[str]) -> int:
+def _rewards(args: Sequence[str]) -> int:
     p = argparse.ArgumentParser(
-        prog="art ingest",
-        description="Backfill episode rewards from heart runs dir or episodes.jsonl.",
+        prog="art rewards",
+        description="Ingest episode rewards. Reads JSONL from stdin by default.",
+        epilog="marrow emits these; `marrow export | art rewards` is the intended shape.",
     )
-    p.add_argument("path", help="heart runs directory or episodes.jsonl export")
+    p.add_argument("path", nargs="?",
+                   help="JSONL file or runs directory; omit to read stdin")
     ns = p.parse_args(args)
 
     from arteries import actionlog
 
-    n = actionlog.ingest_heart_episodes(ns.path)
+    n = actionlog.ingest_episodes(ns.path)
     print(f"ingested {n} episode rewards")
     return 0
-
-
-def _backfill_embeddings(args: Sequence[str]) -> int:
-    p = argparse.ArgumentParser(prog="art backfill-embeddings")
-    p.add_argument("--project", required=True)
-    p.add_argument("--batch", type=int, default=50)
-    ns = p.parse_args(args)
-
-    from arteries.embed import embed_text_sync
-    from arteries import storage
-
-    import psycopg2.extras
-    from arteries.config import DB_CONFIG
-
-    conn = psycopg2.connect(**DB_CONFIG)
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT id, fact FROM arteries.persistent
-            WHERE project_id = %s AND valid_until IS NULL AND embedding IS NULL
-            LIMIT %s
-            """,
-            (ns.project, ns.batch),
-        )
-        rows = cur.fetchall()
-
-    updated = 0
-    for r in rows:
-        vec = embed_text_sync(r["fact"])
-        if vec:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE arteries.persistent SET embedding = %s::vector WHERE id = %s",
-                    (vec, r["id"]),
-                )
-                conn.commit()
-            updated += 1
-    conn.close()
-    print(f"Backfilled {updated}/{len(rows)} persistent memories")
-    return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

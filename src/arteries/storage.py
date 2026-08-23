@@ -14,6 +14,7 @@ import psycopg2
 import psycopg2.extras
 
 from arteries.config import DB_CONFIG
+from arteries.scope import SCOPE_CTE
 
 # Confidence is read back as stored. Age-based decay lived here and was removed —
 # age alone was the wrong signal (a stale-but-still-true fact decayed like a
@@ -35,7 +36,7 @@ def get_ephemeral(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, fact, domains, confidence, source_ts, status
+            SELECT id, fact, domains, source_ts, status, source
             FROM arteries.ephemeral
             WHERE project_id = %s
               AND agent_process_id = %s
@@ -54,7 +55,6 @@ def insert_ephemeral(
     agent_process_id: str,
     fact: str,
     domains: list[str],
-    confidence: float = 1.0,
     parent_agent_id: str | None = None,
     embedding: list[float] | None = None,
     source: str = "user",
@@ -63,16 +63,15 @@ def insert_ephemeral(
         cur.execute(
             """
             INSERT INTO arteries.ephemeral
-                (fact, embedding, domains, confidence, project_id,
+                (fact, embedding, domains, project_id,
                  agent_process_id, parent_agent_id, source)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
             RETURNING id
             """,
             (
                 fact,
                 embedding,
                 psycopg2.extras.Json(domains),
-                confidence,
                 project_id,
                 agent_process_id,
                 parent_agent_id,
@@ -90,32 +89,21 @@ def get_persistent(
     limit: int = 50,
     scope: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Live persistent memories for this project's whole scope, newest first."""
+    origin_filter = "AND p.scope = %(origin)s" if scope else ""
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        if scope:
-            cur.execute(
-                """
-                SELECT id, fact, domains, confidence, source_ts, scope
-                FROM arteries.persistent
-                WHERE project_id = %s
-                  AND valid_until IS NULL
-                  AND (scope IS NULL OR scope = %s)
-                ORDER BY source_ts DESC
-                LIMIT %s
-                """,
-                (project_id, scope, limit),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT id, fact, domains, confidence, source_ts, scope
-                FROM arteries.persistent
-                WHERE project_id = %s
-                  AND valid_until IS NULL
-                ORDER BY source_ts DESC
-                LIMIT %s
-                """,
-                (project_id, limit),
-            )
+        cur.execute(
+            SCOPE_CTE + f"""
+            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.scope, p.project_id
+            FROM arteries.persistent p
+            WHERE p.project_id IN (SELECT project_id FROM scope)
+              AND p.valid_until IS NULL
+              {origin_filter}
+            ORDER BY p.source_ts DESC
+            LIMIT %(limit)s
+            """,
+            {"project": project_id, "origin": scope, "limit": limit},
+        )
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -125,20 +113,22 @@ def get_persistent_by_relevance(
     limit: int = 20,
     threshold: float = 0.3,
 ) -> list[dict[str, Any]]:
+    """Cosine-ranked persistent memories across this project's scope."""
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """
-            SELECT id, fact, domains, confidence, source_ts,
-                   1 - (embedding <=> %s::vector) AS similarity
-            FROM arteries.persistent
-            WHERE project_id = %s
-              AND valid_until IS NULL
-              AND embedding IS NOT NULL
-              AND 1 - (embedding <=> %s::vector) >= %s
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
+            SCOPE_CTE + """
+            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.project_id,
+                   1 - (p.embedding <=> %(q)s::vector) AS similarity
+            FROM arteries.persistent p
+            WHERE p.project_id IN (SELECT project_id FROM scope)
+              AND p.valid_until IS NULL
+              AND p.embedding IS NOT NULL
+              AND 1 - (p.embedding <=> %(q)s::vector) >= %(threshold)s
+            ORDER BY p.embedding <=> %(q)s::vector
+            LIMIT %(limit)s
             """,
-            (query_embedding, project_id, query_embedding, threshold, query_embedding, limit),
+            {"q": query_embedding, "project": project_id,
+             "threshold": threshold, "limit": limit},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -146,13 +136,14 @@ def get_persistent_by_relevance(
 def has_embeddings(project_id: str) -> bool:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            SCOPE_CTE + """
             SELECT EXISTS(
                 SELECT 1 FROM arteries.persistent
-                WHERE project_id = %s AND valid_until IS NULL AND embedding IS NOT NULL
+                WHERE project_id IN (SELECT project_id FROM scope)
+                  AND valid_until IS NULL AND embedding IS NOT NULL
             )
             """,
-            (project_id,),
+            {"project": project_id},
         )
         return cur.fetchone()[0]
 
@@ -164,13 +155,14 @@ def insert_persistent(
     confidence: float = 1.0,
     scope: str | None = None,
     embedding: list[float] | None = None,
+    source_meta: dict[str, Any] | None = None,
 ) -> str:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO arteries.persistent
-                (fact, embedding, domains, confidence, project_id, scope)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+                (fact, embedding, domains, confidence, project_id, scope, source_meta)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::jsonb)
             RETURNING id
             """,
             (
@@ -180,6 +172,7 @@ def insert_persistent(
                 confidence,
                 project_id,
                 scope,
+                psycopg2.extras.Json(source_meta or {}),
             ),
         )
         conn.commit()
@@ -229,146 +222,72 @@ def get_active_domains(project_id: str) -> list[str]:
     """Domains from recent persistent memories — proxy for what the user is working on."""
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            SCOPE_CTE + """
             SELECT DISTINCT d.value
-            FROM arteries.persistent,
-                 jsonb_array_elements_text(domains) AS d(value)
-            WHERE project_id = %s
-              AND valid_until IS NULL
-              AND source_ts > now() - INTERVAL '24 hours'
+            FROM arteries.persistent p,
+                 jsonb_array_elements_text(p.domains) AS d(value)
+            WHERE p.project_id IN (SELECT project_id FROM scope)
+              AND p.valid_until IS NULL
+              AND p.source_ts > now() - INTERVAL '24 hours'
             """,
-            (project_id,),
+            {"project": project_id},
         )
         return [r[0] for r in cur.fetchall()]
 
 
-# -- Evergreen ----------------------------------------------------------------
+def max_ephemeral_similarity(
+    project_id: str,
+    agent_process_id: str,
+    query_embedding: list[float],
+) -> float:
+    """How well this turn is already covered by the current session's memory.
 
-def get_evergreen(limit: int = 50) -> list[dict[str, Any]]:
-    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+    Feeds the retrieval gate: if the situation is one we already have context
+    for, calling capillaries again is wasted work. Returns 0.0 when nothing is
+    embedded yet, which reads as "no coverage" and keeps retrieval on.
+    """
+    with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, fact, domains, confidence, source_ts, source_meta
-            FROM arteries.evergreen
-            WHERE superseded_by IS NULL
-            ORDER BY access_count DESC, source_ts DESC
-            LIMIT %s
+            SELECT coalesce(max(1 - (embedding <=> %s::vector)), 0.0)
+            FROM arteries.ephemeral
+            WHERE project_id = %s
+              AND agent_process_id = %s
+              AND embedding IS NOT NULL
+              AND status <> 'cleared'
             """,
-            (limit,),
+            (query_embedding, project_id, agent_process_id),
         )
-        return [dict(r) for r in cur.fetchall()]
+        return float(cur.fetchone()[0])
 
 
-def touch_evergreen(ids: list[str]) -> None:
-    """Bump access_count for evergreen rows surfaced into a frame.
+def touch_persistent(ids: list[str]) -> None:
+    """Bump access_count for claims surfaced into a frame.
 
-    get_evergreen orders by access_count DESC, but nothing incremented it, so the
-    reinforcement was dead and ordering collapsed to source_ts. This closes that:
-    a fact that keeps getting surfaced floats up. Best-effort — never breaks the
-    read path that calls it.
-    # ponytail: counts surfacings, not usefulness — a usefulness signal (e.g.
-    # from arteries.rewards) would be better but is deferred. Rich-get-richer is
-    # bounded by the limit on how many rows a frame ever surfaces.
+    The only usage signal in the store. Without it every claim looks equally
+    unused and nothing can be pruned by usefulness -- which is the state this
+    branch was accidentally in after the column's writer was removed with the
+    evergreen tier, leaving a comment in frame.py claiming otherwise.
+
+    Best effort: reinforcement must never break a read.
+
+    ponytail: counts surfacings, not usefulness. Outcome-weighted value needs
+    the reward ledger, which is still empty.
     """
     if not ids:
         return
     try:
         with _conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE arteries.evergreen SET access_count = access_count + 1 "
+                "UPDATE arteries.persistent SET access_count = access_count + 1 "
                 "WHERE id = ANY(%s::uuid[])",
                 (ids,),
             )
             conn.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        from arteries import degrade
+        degrade.note(exc, "access_count reinforcement")
 
-
-def insert_evergreen(
-    fact: str,
-    domains: list[str],
-    confidence: float = 1.0,
-    parent_ids: list[str] | None = None,
-    embedding: list[float] | None = None,
-    source_meta: dict[str, Any] | None = None,
-) -> str:
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO arteries.evergreen
-                (fact, embedding, domains, confidence, parent_ids, source_meta)
-            VALUES (%s, %s, %s::jsonb, %s, %s::uuid[], %s::jsonb)
-            RETURNING id
-            """,
-            (
-                fact,
-                embedding,
-                psycopg2.extras.Json(domains),
-                confidence,
-                parent_ids or [],
-                psycopg2.extras.Json(source_meta or {}),
-            ),
-        )
-        conn.commit()
-        return str(cur.fetchone()[0])
-
-
-def update_evergreen(
-    evergreen_id: str,
-    fact: str | None = None,
-    domains: list[str] | None = None,
-    confidence: float | None = None,
-) -> bool:
-    sets, params = [], []
-    if fact is not None:
-        sets.append("fact = %s")
-        params.append(fact)
-    if domains is not None:
-        sets.append("domains = %s::jsonb")
-        params.append(psycopg2.extras.Json(domains))
-    if confidence is not None:
-        sets.append("confidence = %s")
-        params.append(confidence)
-    if not sets:
-        return False
-    params.append(evergreen_id)
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE arteries.evergreen SET {', '.join(sets)} WHERE id = %s AND superseded_by IS NULL",
-            params,
-        )
-        conn.commit()
-        return cur.rowcount > 0
-
-
-def remove_evergreen(evergreen_id: str) -> bool:
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM arteries.evergreen WHERE id = %s",
-            (evergreen_id,),
-        )
-        conn.commit()
-        return cur.rowcount > 0
-
-
-def get_recurring_domains() -> list[str]:
-    """Domains that appear in evergreen — user's cross-project patterns."""
-    with _conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT d.value, COUNT(*) AS cnt
-            FROM arteries.evergreen,
-                 jsonb_array_elements_text(domains) AS d(value)
-            WHERE superseded_by IS NULL
-            GROUP BY d.value
-            ORDER BY cnt DESC
-            LIMIT 10
-            """,
-        )
-        return [r[0] for r in cur.fetchall()]
-
-
-# -- Retrievals ---------------------------------------------------------------
 
 def get_recent_retrievals(
     project_id: str,

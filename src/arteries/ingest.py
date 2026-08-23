@@ -1,0 +1,474 @@
+"""Documents into chunks, chunks into claims, claims into the graph.
+
+`art docs` mines a repo's Markdown for sentences a human then approves. That is
+a good bootstrap and a poor way to read a design document: it flattens structure
+into disconnected statements, so a plan that says step 3 touches compile.py and
+depends on step 2 arrives as three unrelated facts.
+
+This path keeps the structure. A document is stored, split into chunks, and each
+chunk goes through the same compile call the conversation path uses -- so it
+produces entities, relations, and decisions, and every claim carries a
+`derived_from` edge back to the chunk and document it came from.
+
+    art ingest plan.md --kind plan
+    art ingest docs/ --include '*.md'
+    plexus plan | art ingest - --kind plan --name plexus:goal/x
+
+Re-ingesting an unchanged file does nothing; the digest is the guard.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import re
+from dataclasses import dataclass
+import sys
+from pathlib import Path
+
+import psycopg2
+import psycopg2.extras
+
+from arteries import graph, runlog, scope
+from arteries.config import DB_CONFIG
+
+# Chunks are paragraph-grouped rather than fixed-width. A design document's unit
+# of meaning is the paragraph or the list under a heading, and splitting mid-
+# sentence to hit a token count is how you get claims with no subject.
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+TARGET_CHARS = 1400
+MAX_CHARS = 2600
+
+# A plan is read for its parts, not its gist. Measured: a four-section plan fit
+# in one chunk under the document sizes and came back as a single claim -- the
+# dependency between steps and the rationale for the decision were summarised
+# away. Smaller chunks make each step its own unit, so each survives as its own
+# claim with its own entities.
+PLAN_TARGET_CHARS = 400
+PLAN_MAX_CHARS = 900
+
+
+@dataclass
+class Chunk:
+    ord: int
+    text: str
+    line_start: int
+    line_end: int
+
+
+def split(text: str, kind: str = "document") -> list[Chunk]:
+    """Group paragraphs into chunks, breaking at headings and never mid-block."""
+    target = PLAN_TARGET_CHARS if kind == "plan" else TARGET_CHARS
+    cap = PLAN_MAX_CHARS if kind == "plan" else MAX_CHARS
+    chunks: list[Chunk] = []
+    buf: list[str] = []
+    start = 1
+    n = 0
+
+    def flush(end: int) -> None:
+        nonlocal buf, start, n
+        body = "\n".join(buf).strip()
+        if body:
+            chunks.append(Chunk(n, body, start, end))
+            n += 1
+        buf = []
+
+    lines = text.splitlines()
+    for i, raw in enumerate(lines, start=1):
+        # A heading starts a new chunk: it is the document telling you where the
+        # topic changes, which is better than any length heuristic.
+        if raw.startswith("#") and buf and len("\n".join(buf)) > target // 2:
+            flush(i - 1)
+            start = i
+        if not buf:
+            start = i
+        buf.append(raw)
+        if len("\n".join(buf)) >= cap:
+            flush(i)
+    flush(len(lines))
+    return chunks
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def ingest_file(path: Path, project: str, kind: str = "document") -> dict:
+    """Store one document from disk and compile its chunks into claims."""
+    return await ingest_text(
+        path.read_text(encoding="utf-8", errors="replace"),
+        name=str(path), project=project, kind=kind, base_dir=path.parent,
+    )
+
+
+async def ingest_text(text: str, *, name: str, project: str,
+                      kind: str = "document", base_dir: Path | None = None) -> dict:
+    """Same pipeline, for content that was never a file.
+
+    Plexus plans and heart's episode notes are generated in memory, not written
+    to disk, and requiring a tempfile just to get provenance would be silly.
+    `name` is the identity the document is stored under -- reuse it and the
+    digest guard works exactly as it does for a path.
+    """
+    from arteries import compile as compiler
+    from arteries.embed import embed_texts_sync
+
+    # Embedded images become descriptions before anything is chunked, so a
+    # diagram's content lands in the same chunk as the prose around it.
+    images: list[dict] = []
+    if base_dir is not None:
+        text, images = resolve_images(text, base_dir)
+
+    digest = _digest(text)
+    scope_id = scope.scope_for(project) or project
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, digest FROM arteries.documents "
+                        "WHERE project_id = %s AND path = %s", (project, name))
+            row = cur.fetchone()
+            if row and row[1] == digest:
+                return {"path": name, "status": "unchanged"}
+
+            cur.execute(
+                """
+                INSERT INTO arteries.documents (project_id, path, digest, kind)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (project_id, path) DO UPDATE
+                    SET digest = EXCLUDED.digest, ingested_at = now()
+                RETURNING id
+                """,
+                (project, name, digest, kind),
+            )
+            doc_id = str(cur.fetchone()[0])
+            # A changed document replaces its chunks; stale passages would keep
+            # answering queries about text that no longer exists. Retire the
+            # edges with them -- memory_edges can carry no foreign key, so
+            # nothing else will, and a claim citing a deleted chunk is a
+            # provenance trail that goes nowhere.
+            cur.execute(
+                """
+                UPDATE arteries.memory_edges SET valid_until = now()
+                WHERE valid_until IS NULL
+                  AND ((src_kind = 'chunk' AND src_id IN
+                        (SELECT id::text FROM arteries.chunks WHERE document_id = %s))
+                    OR (dst_kind = 'chunk' AND dst_id IN
+                        (SELECT id::text FROM arteries.chunks WHERE document_id = %s)))
+                """,
+                (doc_id, doc_id),
+            )
+            cur.execute("DELETE FROM arteries.chunks WHERE document_id = %s", (doc_id,))
+
+            chunks = split(text, kind)
+            vectors = embed_texts_sync([c.text for c in chunks])
+            chunk_ids = []
+            for c, vec in zip(chunks, vectors):
+                cur.execute(
+                    """
+                    INSERT INTO arteries.chunks
+                        (document_id, project_id, ord, text, line_start, line_end, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
+                    RETURNING id
+                    """,
+                    (doc_id, project, c.ord, c.text, c.line_start, c.line_end, vec),
+                )
+                cid = str(cur.fetchone()[0])
+                chunk_ids.append(cid)
+                graph.add_edge(cur, project, "chunk", cid, "is_part_of", "document", doc_id)
+            conn.commit()
+
+        claims = 0
+        for c, cid in zip(chunks, chunk_ids):
+            # One compile call per chunk. Unlike conversation turns, a document
+            # chunk is self-contained -- which is exactly why cognee can chunk
+            # per passage and why batching turns was the right call there and
+            # the wrong one here.
+            record = [{"id": cid, "fact": c.text, "domains": [], "source": kind,
+                       "parent_agent_id": None}]
+            ctx = compiler._load_persistent_context(conn, record, project)
+            result = await compiler._llm_compile(record, ctx)
+            if compiler.validate_response(result):
+                runlog.log_event("docs.chunk.invalid", "arteries",
+                                 {"path": name, "ord": c.ord}, project_id=project)
+                continue
+            written = compiler._write_results(conn, result, [], project)
+            claims += written["new"]
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id FROM arteries.persistent
+                    WHERE project_id = %s ORDER BY source_ts DESC LIMIT %s
+                    """, (project, written["new"]))
+                for (pid,) in cur.fetchall():
+                    graph.add_edge(cur, project, "persistent", str(pid),
+                                   graph.DERIVED_FROM, "chunk", cid)
+                conn.commit()
+
+        return {"path": name, "status": "ingested", "images": images,
+                "chunks": len(chunks), "claims": claims, "scope": scope_id}
+    finally:
+        conn.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="art ingest", description=__doc__)
+    parser.add_argument("target", help="a file, a directory, or - for stdin")
+    parser.add_argument("--name",
+                        help="identity to store stdin under; reuse it so re-sends dedupe")
+    parser.add_argument("--include", action="append", default=None,
+                        help="glob for directory mode (default *.md)")
+    parser.add_argument("--base-dir", default=".",
+                        help="resolve relative image paths in stdin against this")
+    parser.add_argument("--describe",
+                        help="description for an image; required unless a vision "
+                             "endpoint is configured")
+    parser.add_argument("--kind", default="document",
+                        help="document | plan | spec -- recorded on the document row")
+    parser.add_argument("--project", default=None)
+    args = parser.parse_args(argv)
+
+    project = args.project or scope.current_project()
+    if not scope.scope_for(project) and not scope.is_tracked():
+        print(f"{project} is not in a scope; run `art scope add <group> <path>` first")
+        return 1
+
+    if args.target == "-":
+        text = sys.stdin.read()
+        if not text.strip():
+            print("nothing on stdin")
+            return 1
+        name = args.name or f"stdin:{args.kind}:{_digest(text)[:12]}"
+        result = asyncio.run(ingest_text(text, name=name, project=project,
+                                         kind=args.kind, base_dir=Path(args.base_dir)))
+        print(f"  {result['status']:<10} {name}"
+              + (f"  ({result['chunks']} chunks, {result['claims']} claims)"
+                 if result["status"] == "ingested" else ""))
+        return 0
+
+    target = Path(args.target)
+    if target.is_dir():
+        patterns = args.include or ["*.md"]
+        files = sorted({p for pat in patterns for p in target.rglob(pat) if p.is_file()})
+    else:
+        files = [target]
+    if not files:
+        print("no matching files")
+        return 1
+
+    for path in files:
+        if path.suffix.lower() in IMAGE_SUFFIXES:
+            result = asyncio.run(ingest_image(path.resolve(), project, args.describe))
+            if result["status"] == "needs_description":
+                print(f"  needs text {path}")
+                print("             no vision endpoint is answering, so pass "
+                      "--describe \"...\" with what it shows")
+                continue
+        else:
+            result = asyncio.run(ingest_file(path.resolve(), project, args.kind))
+        if result["status"] == "unchanged":
+            print(f"  unchanged  {path}")
+        else:
+            described = [i for i in result.get("images", []) if i["described_by"] != "skipped"]
+            extra = f", {len(described)} images described" if described else ""
+            print(f"  ingested   {path}  ({result['chunks']} chunks, "
+                  f"{result['claims']} claims{extra})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+# -- images --------------------------------------------------------------------
+#
+# Arteries does not look at pictures, and deliberately so. Whoever put the image
+# in front of you -- the coding agent in your terminal, or you -- has already
+# seen it, and their description will beat anything a small local model produces
+# from the same pixels. So the description is an input, and the image is stored
+# as a reference with a digest so provenance survives the file moving.
+#
+# If a vision endpoint is configured and actually answers, one is generated
+# instead. That is a convenience, not the design: `describe_image` returning
+# None is an ordinary outcome, not a failure.
+
+VISION_PROMPT = (
+    "Describe this image for a project memory. State what it shows, any text or "
+    "labels it contains, and any structure a reader would need to act on it "
+    "(boxes, arrows, columns, states). Be specific and factual. Do not speculate "
+    "about intent. Four sentences at most."
+)
+
+
+def vision_available() -> bool:
+    """Whether the configured endpoint accepts images at all."""
+    import httpx
+
+    from arteries.config import VISION_URL
+
+    try:
+        props = httpx.get(VISION_URL.replace("/v1/chat/completions", "/props"),
+                          timeout=3.0).json()
+        return bool((props.get("modalities") or {}).get("vision"))
+    except Exception:
+        return False
+
+
+def describe_image(path: Path) -> str | None:
+    """Ask the vision endpoint what an image shows. None when it cannot."""
+    import base64
+    import mimetypes
+
+    import httpx
+
+    from arteries.config import VISION_MODEL, VISION_URL
+
+    try:
+        data = base64.b64encode(path.read_bytes()).decode()
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        resp = httpx.post(VISION_URL, timeout=120.0, json={
+            "model": VISION_MODEL,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": VISION_PROMPT},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:{mime};base64,{data}"}},
+            ]}],
+        })
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None
+
+
+async def ingest_image(path: Path, project: str, description: str | None = None) -> dict:
+    """Store an image as a described document.
+
+    The description is what gets embedded, compiled, and graphed -- the bytes are
+    not searchable and never will be. The image itself is recorded by path and
+    digest so a claim can point back at the picture it came from.
+    """
+    description = (description or "").strip()
+    if not description and vision_available():
+        description = describe_image(path)
+    if not description:
+        return {"path": str(path), "status": "needs_description"}
+
+    digest = _digest(path.read_bytes().hex())
+    body = f"# Image: {path.name}\n\n{description}\n\nSource image: {path}"
+    result = await ingest_text(body, name=str(path), project=project, kind="image")
+    result["described_by"] = "supplied" if description else "vision"
+    result["digest"] = digest[:12]
+    return result
+
+
+# -- images referenced inside a document ---------------------------------------
+#
+# A plan says "see the diagram" and the diagram carries half the meaning. Left
+# alone, `![arch](diagram.png)` ingests as the literal string "![arch]" and the
+# picture is lost.
+#
+# These get described by a frontier model rather than the local one. They are
+# rare -- a handful per plan -- and unlike a chat turn the description becomes
+# permanent memory, so the one-off cost of getting it right is worth more than
+# keeping every call on-box.
+
+_MD_IMAGE = re.compile(r'!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?[^)]*\)')
+_HTML_IMAGE = re.compile(r"""<img\s[^>]*src=["']([^"']+)["'][^>]*>""", re.IGNORECASE)
+
+FRONTIER_PROMPT = (
+    "This image appears in a project planning document. Describe it for a "
+    "durable engineering memory: what it shows, any text or labels it contains, "
+    "and the structure a reader would need to act on -- boxes, arrows, columns, "
+    "states, ordering. Be specific and factual. Do not speculate about intent or "
+    "restate the caption. Four sentences at most."
+)
+
+
+def find_image_refs(text: str, base_dir: Path) -> list[tuple[str, str, Path]]:
+    """Local image references in a document: (match, alt text, resolved path).
+
+    Remote URLs are skipped -- arteries does not fetch from the network during
+    ingestion, and a document referencing a URL is not the same as one shipping
+    a diagram alongside it.
+    """
+    found: list[tuple[str, str, Path]] = []
+    for m in _MD_IMAGE.finditer(text):
+        alt, src = m.group(1), m.group(2)
+        if src.startswith(("http://", "https://", "data:")):
+            continue
+        found.append((m.group(0), alt, (base_dir / src).resolve()))
+    for m in _HTML_IMAGE.finditer(text):
+        src = m.group(1)
+        if src.startswith(("http://", "https://", "data:")):
+            continue
+        found.append((m.group(0), "", (base_dir / src).resolve()))
+    return [(raw, alt, path) for raw, alt, path in found
+            if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file()]
+
+
+def describe_with_frontier(path: Path, alt: str = "") -> str | None:
+    """Describe one image with a frontier model. None if unavailable."""
+    import base64
+    import mimetypes
+
+    from arteries.config import FRONTIER_VISION_MODEL
+
+    if not FRONTIER_VISION_MODEL:
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    try:
+        media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+        data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+        prompt = FRONTIER_PROMPT + (f"\n\nIts caption reads: {alt}" if alt else "")
+
+        # Zero-arg client: resolves ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or an
+        # `ant auth login` profile, in that order. No key in the environment does
+        # not mean no credentials.
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model=FRONTIER_VISION_MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": media_type, "data": data}},
+                {"type": "text", "text": prompt},
+            ]}],
+        )
+        if response.stop_reason == "refusal":
+            return None
+        return "".join(b.text for b in response.content if b.type == "text").strip() or None
+    except Exception:
+        # No credentials, no network, a refusal -- all the same outcome here. The
+        # document still ingests; the image just stays undescribed.
+        return None
+
+
+def resolve_images(text: str, base_dir: Path) -> tuple[str, list[dict]]:
+    """Replace image references with descriptions. Returns (text, report)."""
+    report: list[dict] = []
+    for raw, alt, path in find_image_refs(text, base_dir):
+        description = describe_with_frontier(path, alt)
+        if not description and vision_available():
+            description = describe_image(path)
+        if description:
+            label = alt or path.name
+            replacement = f"[Image: {label}] {description} (source: {path.name})"
+            how = "frontier" if FRONTIER_ENABLED() else "local"
+        else:
+            # Say so in the text rather than dropping the reference silently --
+            # a reader should know a picture was here and went undescribed.
+            replacement = f"[Image not described: {path.name}]"
+            how = "skipped"
+        text = text.replace(raw, replacement)
+        report.append({"image": str(path), "described_by": how})
+    return text, report
+
+
+def FRONTIER_ENABLED() -> bool:
+    from arteries.config import FRONTIER_VISION_MODEL
+    return bool(FRONTIER_VISION_MODEL)

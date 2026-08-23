@@ -12,11 +12,40 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD", ""),
 }
 
-EMBED_URL = os.getenv("EMBED_URL", "http://127.0.0.1:8003/v1/embeddings")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "snowflake-arctic-embed-m-v2.0")
 GENERATE_URL = os.getenv("GENERATE_URL", "http://127.0.0.1:8001/v1/chat/completions")
 COMPILE_MODEL = os.getenv("ARTERIES_COMPILE_MODEL", "qwen3.6-27b")
-EMBED_DIM = 768
+
+# Optional vision endpoint for describing images at ingest time. Defaults to the
+# generation server, which only answers if it was started with --mmproj; without
+# one, image ingestion asks for a description instead of guessing at the picture.
+VISION_URL = os.getenv("ARTERIES_VISION_URL", GENERATE_URL)
+VISION_MODEL = os.getenv("ARTERIES_VISION_MODEL", COMPILE_MODEL)
+
+# Images embedded in a document are described by a frontier model. They are rare
+# -- a handful per plan -- and the description becomes permanent memory, so this
+# is the one place where paying for accuracy beats keeping everything local.
+# Set to "" to disable and fall back to the local endpoint or a manual caption.
+FRONTIER_VISION_MODEL = os.getenv("ARTERIES_FRONTIER_VISION_MODEL", "claude-opus-5")
+
+# The embedding config is a shared contract, not an arteries setting: both
+# projects write vectors into the same Postgres and read each other's columns.
+# Prefer capillaries' values so the two ends can't drift -- the same reason
+# extract.py prefers its DOMAIN_KEYWORDS. They already drifted once, silently:
+# capillaries moved to Qwen3-Embedding-0.6B at 1024 dims while arteries stayed
+# on arctic-embed at 768, so every embedding write would have failed on a
+# dimension mismatch the moment compilation started working.
+try:
+    from capillaries.config.paths import (  # noqa: F401
+        EMBED_DIM,
+        EMBED_MODEL,
+        EMBED_URL,
+        QUERY_PREFIX,
+    )
+except Exception:  # capillaries not installed / not importable
+    EMBED_URL = os.getenv("EMBED_URL", "http://127.0.0.1:8003/v1/embeddings")
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+    EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
+    QUERY_PREFIX = os.getenv("EMBED_QUERY_PREFIX", "")
 
 PROJECT_ID = os.getenv("ARTERIES_PROJECT", "default")
 AGENT_PROCESS_ID = os.getenv("ARTERIES_AGENT_ID", str(os.getpid()))
@@ -36,9 +65,25 @@ if _preset in _PRESETS:
     for _k, _v in _PRESETS[_preset].items():
         os.environ.setdefault(_k, _v)
 
-EPHEMERAL_MODE = os.getenv("ARTERIES_EPHEMERAL", "compile")
+# compile  write ephemeral, promote to persistent in the background (default)
+# keep     write ephemeral, never promote — `art remember` and `art compile` are
+#          the deliberate paths up. For interactive sessions, where compiling
+#          every assistant reply turned six days of work into 178 permanent
+#          "memories" that were mostly narration of what had just been said.
+# discard  never write ephemeral at all; an in-process buffer serves this turn only
+_EPHEMERAL_MODES = ("compile", "keep", "discard")
+EPHEMERAL_MODE = os.getenv("ARTERIES_EPHEMERAL", "compile").strip().lower()
+if EPHEMERAL_MODE not in _EPHEMERAL_MODES:
+    # an unrecognised value must not silently mean "stop remembering"
+    EPHEMERAL_MODE = "compile"
 PERSISTENT_READ = os.getenv("ARTERIES_PERSISTENT_READ", "relevance")
-RELEVANCE_THRESHOLD = float(os.getenv("ARTERIES_RELEVANCE_THRESHOLD", "0.3"))
+# Cosine floor for a persistent memory to be eligible at all. The old 0.3 was
+# inherited from capillaries' SINGLE_THRESHOLD, which capillaries itself retired
+# in favour of a cross-encoder -- and it was never calibrated here, because zero
+# rows have ever carried an embedding. It is also model-specific, and the model
+# changed. 0.0 admits everything; packet.py now does the real filtering by
+# score. Set this once a few weeks of real memories show a usable distribution.
+RELEVANCE_THRESHOLD = float(os.getenv("ARTERIES_RELEVANCE_THRESHOLD", "0.0"))
 
 # Minimum rerank confidence before a retrieved prompt is injected into the
 # agent's context. Measured against the reembedded corpus: planner-style turns

@@ -1,12 +1,11 @@
 """Explicit model/user-driven memory: art remember.
 
-Writes directly to persistent (project-scoped) and optionally evergreen
+Writes directly to persistent (project-scoped)
 (cross-project), bypassing the extraction heuristics. For facts the
 extractor would miss — preferences, decisions, constraints stated by the
 user or model.
 
     art remember "I prefer tabs over spaces"
-    art remember "I prefer tabs over spaces" --also-evergreen
     art remember list
     art remember edit <id> --fact "updated text"
     art remember rm <id>
@@ -20,7 +19,7 @@ from collections.abc import Sequence
 
 from arteries import storage
 from arteries.config import PROJECT_ID
-from arteries.evergreen import _infer_domains
+from arteries.docs import _infer_domains
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -31,7 +30,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_p.add_argument("fact", nargs="+")
     add_p.add_argument("--domains", default="")
     add_p.add_argument("--confidence", type=float, default=1.0)
-    add_p.add_argument("--also-evergreen", action="store_true", help="promote to evergreen too")
 
     list_p = sub.add_parser("list", help="list user-written persistent memories")
     list_p.add_argument("--limit", type=int, default=50)
@@ -71,7 +69,6 @@ def _add(argv: Sequence[str], parser: argparse.ArgumentParser) -> int:
     p.add_argument("fact", nargs="+")
     p.add_argument("--domains", default="")
     p.add_argument("--confidence", type=float, default=1.0)
-    p.add_argument("--also-evergreen", action="store_true")
     args = p.parse_args(argv)
     return _do_add(args)
 
@@ -90,16 +87,6 @@ def _do_add(args) -> int:
         embedding=embedding,
     )
     print(f"persistent: {pid[:8]}  {fact}")
-
-    if args.also_evergreen:
-        eid = storage.insert_evergreen(
-            fact=fact,
-            domains=domains,
-            confidence=args.confidence,
-            embedding=embedding,
-            source_meta={"source_type": "user_remember", "persistent_id": pid},
-        )
-        print(f"evergreen:  {eid[:8]}  (promoted)")
 
     return 0
 

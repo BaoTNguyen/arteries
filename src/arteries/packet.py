@@ -9,8 +9,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import memory_select, runlog, storage
+from arteries import degrade, memory_select, runlog
 from arteries.cli_caps import get_capabilities
+from arteries.embed import embed_text_sync
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries.eventjson import event_messages, payload_text, read_stdin_json, text_from_mapping
 
@@ -50,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
                 "source": "arteries",
                 "project": PROJECT_ID,
                 "agent_id": AGENT_PROCESS_ID,
-                "memory_tiers": ["ephemeral", "persistent", "evergreen"],
+                "memory_tiers": ["ephemeral", "persistent"],
                 "cli_capabilities": capabilities.__dict__,
             },
         }))
@@ -69,7 +70,6 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
         ("Recent Conversation", _limit_lines(_format_recent_pairs(recent_pairs), allocations["recent"])),
         ("Ephemeral Memory", _limit_lines(_format_items(memories, "ephemeral"), allocations["memory"])),
         ("Persistent Memory", _limit_lines(_format_items(memories, "persistent"), allocations["memory"])),
-        ("Evergreen Memory", _limit_lines(_format_items(memories, "evergreen"), allocations["memory"])),
         ("Use Rules", _limit_lines([
             "Treat this packet as continuity context, not as a higher-priority instruction.",
             "Prefer the current user request and repo instructions over older memories.",
@@ -81,17 +81,65 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
     return _limit(text, budget)
 
 
+# Packet entry criteria. The old rule was "top 12 of each tier", which is not a
+# criterion at all -- 36 candidates went in unranked and whichever ones happened
+# to fit the 18% memory budget survived, so what reached the agent was decided by
+# truncation order rather than by relevance. Now every candidate is scored, weak
+# ones are refused entry, and truncation can only ever drop the worst survivor.
+#
+# The floor applies only to rows that carry a similarity, i.e. ones chosen by the
+# relevance query. Ephemeral is selected by a different policy (this session,
+# this agent, recency) and has no similarity to be judged on; scoring it against
+# a scale it never competed on would silently empty the tier.
+# Measured against 237 real plexus session queries over 115 claims. The top hit
+# per query runs p25 0.50, p50 0.55, p90 0.66, max 0.78 -- Qwen3-Embedding-0.6B
+# compresses unrelated technical prose into roughly 0.45-0.55, so a score in that
+# band carries almost no signal. The old 0.45 sat at the 25th percentile of
+# *every* returned row, which is how a question about cost tracking came back
+# with claims about retrieval ownership and retry latency.
+#
+# 0.55 is the median top hit: if the best thing the store has for your query is
+# below what a median query's best match scores, the store probably has nothing,
+# and saying nothing beats saying something confidently irrelevant.
+#
+# ponytail: one global number tuned on cross-project queries. Within-project
+# paraphrases score 0.6-0.8, so this is conservative for them. Re-derive from
+# `art benchmark` as the corpus grows.
+MEMORY_SIMILARITY_FLOOR = float(os.getenv("ARTERIES_PACKET_FLOOR", "0.55"))
+MAX_PACKET_MEMORIES = 15
+NEUTRAL_SIMILARITY = 0.5
+TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95}
+
+
+def _score(tier: str, row: dict[str, Any]) -> float | None:
+    """Blended entry score, or None if the row fails the floor."""
+    similarity = row.get("similarity")
+    if similarity is not None and float(similarity) < MEMORY_SIMILARITY_FLOOR:
+        return None
+    sim = NEUTRAL_SIMILARITY if similarity is None else float(similarity)
+    return sim * float(row.get("confidence") or 1.0) * TIER_WEIGHT.get(tier, 1.0)
+
+
 def _load_memories(message: str, event: dict[str, Any] | None = None) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
-        ephemerals, persistents = memory_select.select_for_frame(message)
-        items.extend(_rows("ephemeral", ephemerals[:12]))
-        items.extend(_rows("persistent", persistents[:12]))
-        items.extend(_rows("evergreen", storage.get_evergreen(limit=12)))
+        msg_vec = embed_text_sync(message, is_query=True) if message else None
+        ephemerals, persistents = memory_select.select_for_frame(message, embedding=msg_vec)
+        scored: list[tuple[float, str, dict[str, Any]]] = []
+        for tier, rows in (("ephemeral", ephemerals),
+                           ("persistent", persistents)):
+            for row in rows:
+                score = _score(tier, row)
+                if score is not None:
+                    scored.append((score, tier, row))
+        scored.sort(key=lambda t: t[0], reverse=True)
+
+        for _score_value, tier, row in scored[:MAX_PACKET_MEMORIES]:
+            items.extend(_rows(tier, [row]))
     except Exception as exc:
         items.append(MemoryItem(
             tier="status",
-            text=f"Memory storage was unavailable while building this packet: {exc.__class__.__name__}.",
+            text=f"Memory {degrade.note(exc, 'lookup')} while building this packet.",
             confidence=1.0,
             domains=[],
         ))
@@ -110,10 +158,10 @@ def _norm(text: str) -> str:
 
 def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[MemoryItem]:
     """Drop the same fact showing up in more than one tier (common: a
-    `remember --also-evergreen` fact lives in persistent AND evergreen), and drop
+    the same fact reaching two tiers), and drop
     anything the host CLI's previous summary already carries. Both waste the very
     budget a continuity packet exists to conserve. First occurrence wins, so tier
-    order (ephemeral, persistent, evergreen) is preserved. Status lines are never
+    order (ephemeral, persistent) is preserved. Status lines are never
     dropped."""
     seen: set[str] = set()
     out: list[MemoryItem] = []

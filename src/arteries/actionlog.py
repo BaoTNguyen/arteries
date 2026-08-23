@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -142,15 +143,26 @@ def recent_decisions(
         return _recent_jsonl(project if not episode else None, episode, limit, repo_path)
 
 
-def ingest_heart_episodes(path: str | Path, repo_path: str | Path | None = None) -> int:
-    """Backfill the rewards table from heart's runs dir (*/episode.json) or an
-    episodes.jsonl export. Heart never talks to Postgres (stdlib-only), so this
-    is the credit-assignment bridge: decisions get their episode reward here."""
-    path = Path(path)
-    if path.is_dir():
-        episodes = [json.loads(p.read_text()) for p in sorted(path.glob("*/episode.json"))]
+def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | None = None) -> int:
+    """Backfill the rewards table from episode records.
+
+    This is the credit-assignment bridge: heart and marrow are stdlib-only and
+    never talk to Postgres, so decisions get their episode reward here.
+
+    `source` may be a JSONL path, a directory of `*/episode.json`, or None to
+    read JSONL from stdin. **Prefer stdin.** Arteries defines the record shape
+    and the sender pipes it in; reaching into another repo's directory layout
+    couples this to whichever of them happens to own the filesystem this week,
+    and RL traffic is moving to marrow.
+    """
+    if source is None:
+        episodes = [json.loads(line) for line in sys.stdin.read().splitlines() if line.strip()]
     else:
-        episodes = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        path = Path(source)
+        if path.is_dir():
+            episodes = [json.loads(p.read_text()) for p in sorted(path.glob("*/episode.json"))]
+        else:
+            episodes = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
     ingested = set()
     try:
@@ -315,3 +327,7 @@ def _recent_jsonl(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# heart still calls this name; marrow will use ingest_episodes directly.
+ingest_heart_episodes = ingest_episodes
