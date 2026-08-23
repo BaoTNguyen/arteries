@@ -38,7 +38,11 @@ def get_current_frame(message: str, embedding: list[float] | None = None) -> Mem
 def _build_frame(message: str, embedding: list[float] | None = None) -> MemoryFrame:
     ephemerals, persistents = memory_select.select_for_frame(message, embedding=embedding)
 
-    # reinforce what we surfaced — this is the only writer of access_count
+    # Reinforce what we surfaced. Not to reorder it -- persistent stays
+    # relevance-ranked -- but so a claim nobody ever sees becomes identifiable,
+    # and prunable. This is the only usage signal the store has.
+    storage.touch_persistent([str(r["id"]) for r in persistents[:10] if r.get("id")])
+
     retrievals = storage.get_recent_retrievals(PROJECT_ID, AGENT_PROCESS_ID, limit=10)
 
     active_domains = storage.get_active_domains(PROJECT_ID)

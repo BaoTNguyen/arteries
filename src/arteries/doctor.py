@@ -43,6 +43,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 # derived_from edge points at them and provenance back to the raw turn is the
 # whole reason those edges exist.
 EPHEMERAL_RETENTION_DAYS = int(os.getenv("ARTERIES_EPHEMERAL_RETENTION_DAYS", "14"))
+# Longer than ephemeral: a retired claim is the answer to "what did we used to
+# think", and that question outlives a working set by a good margin.
+CLAIM_RETENTION_DAYS = int(os.getenv("ARTERIES_CLAIM_RETENTION_DAYS", "90"))
 
 _COLLECTABLE_SQL = """
     SELECT {select} FROM arteries.ephemeral e
@@ -54,6 +57,70 @@ _COLLECTABLE_SQL = """
             AND m.valid_until IS NULL
       )
 """
+
+
+# A tombstoned claim is filtered from every read, but it is still the target of
+# `supersedes` edges that say what replaced it. Deleting one that something
+# cites destroys the audit trail; deleting one that nothing cites frees a row.
+# Same rule as ephemeral collection.
+_COLLECTABLE_CLAIMS = """
+    SELECT {select} FROM arteries.persistent p
+    WHERE p.valid_until IS NOT NULL
+      AND p.valid_until < now() - (%s || ' days')::interval
+      AND NOT EXISTS (
+          SELECT 1 FROM arteries.memory_edges m
+          WHERE m.valid_until IS NULL
+            AND ((m.dst_kind = 'persistent' AND m.dst_id = p.id::text)
+              OR (m.src_kind = 'persistent' AND m.src_id = p.id::text))
+      )
+"""
+
+# An entity nothing live mentions any more. Cheap to recreate if it comes back,
+# and it otherwise sits in the uniqueness index forever holding a name.
+_ORPHAN_ENTITIES = """
+    SELECT {select} FROM arteries.entities e
+    WHERE NOT EXISTS (
+        SELECT 1 FROM arteries.memory_edges m
+        JOIN arteries.persistent p ON p.id::text = m.src_id
+        WHERE m.dst_kind = 'entity' AND m.dst_id = e.id::text
+          AND m.valid_until IS NULL AND p.valid_until IS NULL
+    )
+"""
+
+
+def _retire_edges_to_dead_claims(conn) -> int:
+    """Retire edges whose target has been tombstoned.
+
+    Reads already filter on the claim's own validity, so these are not surfacing
+    anything -- but a live edge to a dead claim is a lie about the graph's shape
+    and it accumulates.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE arteries.memory_edges m SET valid_until = now()
+            WHERE m.valid_until IS NULL AND m.dst_kind = 'persistent'
+              AND EXISTS (SELECT 1 FROM arteries.persistent p
+                          WHERE p.id::text = m.dst_id AND p.valid_until IS NOT NULL)
+        """)
+        conn.commit()
+        return cur.rowcount
+
+
+def _collect_claims(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM arteries.persistent p WHERE p.id IN ("
+                    f"{_COLLECTABLE_CLAIMS.format(select='p.id')})",
+                    (CLAIM_RETENTION_DAYS,))
+        conn.commit()
+        return cur.rowcount
+
+
+def _collect_entities(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM arteries.entities e WHERE e.id IN ("
+                    f"{_ORPHAN_ENTITIES.format(select='e.id')})")
+        conn.commit()
+        return cur.rowcount
 
 
 def _collect_ephemeral(conn) -> int:
@@ -154,6 +221,32 @@ def integrity(project: str) -> dict[str, Any]:
             cur.execute("SELECT count(*) FROM arteries.scope_members WHERE project_id = %s",
                         (project,))
             out["scope_registered"] = bool(cur.fetchone()[0])
+
+            cur.execute(_COLLECTABLE_CLAIMS.format(select="count(*)"), (CLAIM_RETENTION_DAYS,))
+            out["collectable_claims"] = cur.fetchone()[0]
+
+            cur.execute(_ORPHAN_ENTITIES.format(select="count(*)"))
+            out["orphan_entities"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT count(*) FROM arteries.memory_edges m
+                WHERE m.valid_until IS NULL AND m.dst_kind = 'persistent'
+                  AND EXISTS (SELECT 1 FROM arteries.persistent p
+                              WHERE p.id::text = m.dst_id AND p.valid_until IS NOT NULL)
+            """)
+            out["edges_to_dead_claims"] = cur.fetchone()[0]
+
+            # Both sides of a contradiction still live. Nothing resolves these
+            # automatically -- the compiler flagged the conflict without picking
+            # a winner -- so they are surfaced for a human.
+            cur.execute("""
+                SELECT count(*) FROM arteries.memory_edges m
+                JOIN arteries.persistent a ON a.id::text = m.src_id
+                JOIN arteries.persistent b ON b.id::text = m.dst_id
+                WHERE m.rel = 'contradicts' AND m.valid_until IS NULL
+                  AND a.valid_until IS NULL AND b.valid_until IS NULL
+            """)
+            out["unresolved_contradictions"] = cur.fetchone()[0]
     except Exception as exc:
         out["error"] = exc.__class__.__name__
 
@@ -183,11 +276,18 @@ def fix(project: str) -> dict[str, Any]:
                 LIMIT 200
             """, (project,))
             rows = cur.fetchall()
-        retired = _retire_dangling(conn)
+        # Order matters. Deletions orphan the edges that pointed at what they
+        # removed, so the dangling sweep runs last -- running it first left
+        # eight fresh dangling edges behind the entity collection.
+        retired = _retire_edges_to_dead_claims(conn)
         collected = _collect_ephemeral(conn)
+        claims = _collect_claims(conn)
+        entities = _collect_entities(conn)
+        retired += _retire_dangling(conn)
         if not rows:
             return {"embedded": 0, "dangling_edges_retired": retired,
-                    "ephemeral_collected": collected}
+                    "ephemeral_collected": collected, "claims_collected": claims,
+                    "orphan_entities_removed": entities}
         vectors = embed_texts_sync([r["fact"] for r in rows])
         done = 0
         with conn.cursor() as cur:
@@ -199,7 +299,8 @@ def fix(project: str) -> dict[str, Any]:
                 done += 1
             conn.commit()
         return {"embedded": done, "of": len(rows),
-                "dangling_edges_retired": retired, "ephemeral_collected": collected}
+                "dangling_edges_retired": retired, "ephemeral_collected": collected,
+                "claims_collected": claims, "orphan_entities_removed": entities}
     finally:
         conn.close()
 
