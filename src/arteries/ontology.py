@@ -340,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "load":
         result = load(args.path, args.source)
+        reset_cache()  # anything resolving later in this process must see it
         kinds = ", ".join(f"{k}={v}" for k, v in result.items()
                           if k not in ("source", "terms"))
         print(f"loaded {result['terms']} terms from {result['source']} ({kinds})")

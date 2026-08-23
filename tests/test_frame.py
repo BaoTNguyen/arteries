@@ -62,3 +62,27 @@ class BuildFrameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScopeTierTests(unittest.TestCase):
+    """The frame's third tier is sibling-repo context.
+
+    It was renamed from evergreen and then left empty for several commits, which
+    silently zeroed two of capillaries' four ranking boosts.
+    """
+
+    def test_recurring_domains_needs_more_than_one_project(self):
+        rows = [
+            {"project_id": "arteries", "domains": ["technical", "AI"]},
+            {"project_id": "capillaries", "domains": ["technical"]},
+            {"project_id": "arteries", "domains": ["finance"]},
+        ]
+        self.assertEqual(frame._recurring(rows, "arteries"), ["technical"])
+
+    def test_a_single_project_has_no_recurring_domains(self):
+        rows = [{"project_id": "arteries", "domains": ["technical"]}] * 3
+        self.assertEqual(frame._recurring(rows, "arteries"), [])
+
+    def test_rows_without_a_project_fall_back_to_home(self):
+        rows = [{"domains": ["technical"]}, {"project_id": "arteries", "domains": ["technical"]}]
+        self.assertEqual(frame._recurring(rows, "arteries"), [])
