@@ -76,13 +76,17 @@ For each memory also record:
 - "entities": the concrete things it is about, as {"name","kind"} where kind is
   concept, module, or dependency. Name modules and dependencies as they appear
   in the code. Do not invent entities for generic words.
+- "duplicate_of": the id of an existing memory this merely restates, if any. Use
+  this when the existing memory already says the same thing and the new wording
+  adds nothing -- not when the new fact is more specific, corrects it, or covers
+  a different case. Those are relations, not duplicates.
 - "relations": how it interacts with the numbered existing memories above, as
   {"persistent_id","rel"} where rel is supports, refines, contradicts, or
   depends_on. Use the id exactly as given; omit the field if nothing relates.
 - "decision": only when kind is decision, as {"chose","over":[...],"because"}.
 
 Respond with compact JSON only -- no indentation, no whitespace between keys:
-{"new_memories":[{"fact":"...","domains":["..."],"confidence":0.9,"kind":"fact","entities":[{"name":"pgvector","kind":"dependency"}],"relations":[{"persistent_id":"uuid","rel":"refines"}]}],"superseded":[{"persistent_id":"uuid","reason":"replaced by: ...","replaced_by":0}]}
+{"new_memories":[{"fact":"...","domains":["..."],"confidence":0.9,"kind":"fact","entities":[{"name":"pgvector","kind":"dependency"}],"duplicate_of":null,"relations":[{"persistent_id":"uuid","rel":"refines"}]}],"superseded":[{"persistent_id":"uuid","reason":"replaced by: ...","replaced_by":0}]}
 
 Do not explain what you discarded. Compilation is generation-bound on local
 hardware, and prose about rejected records costs more time than the memories
@@ -227,8 +231,20 @@ def _release_claimed(conn, ids: list) -> None:
 #
 # ponytail: both numbers are guesses calibrated against exactly one observed
 # duplicate. Tune them once there is a week of real data.
-DUPLICATE_SIM = 0.93   # at or above: mechanical duplicate, never reaches the LLM
-RELATED_SIM = 0.75     # between: the LLM decides refine / contradict / distinct
+# The dedupe criterion is the model's judgement, not a distance.
+#
+# Cosine cannot tell restatement from subsumption. Two facts at 0.90 may both be
+# worth keeping -- different repos, different cases -- while two at 0.85 may have
+# one strictly containing the other. A single threshold has to be wrong in one
+# direction or the other, and picking it was guesswork against a single observed
+# duplicate.
+#
+# So the model names duplicates explicitly. It already sees the candidate and its
+# nearest existing neighbours in the same prompt, which is more context than a
+# number ever has. The threshold below survives only as a backstop for near-
+# identical strings, set high enough that firing it is unambiguous.
+DUPLICATE_SIM = float(os.getenv("ARTERIES_DUPLICATE_SIM", "0.97"))
+RELATED_SIM = 0.75     # the band the model is shown, not a rejection rule
 
 
 def _load_persistent_context(conn, batch: list[dict] | None = None,
@@ -278,14 +294,27 @@ def _reject_duplicates(conn, memories: list[dict], vectors: list,
                        project_id: str | None = None) -> tuple[list, list, list]:
     """Drop facts the store already holds, before they are written.
 
-    Stage one of promotion, and the only deterministic one: a cosine at or above
-    DUPLICATE_SIM against anything live in scope is a restatement, and no model
-    opinion is needed to say so. This is what bounds growth -- the LLM pass is a
-    decomposer (53 ephemeral rows produced 76 facts) and will not shrink itself.
+    Two ways a candidate is refused, in order. First the model's own call: it
+    named an existing memory this merely restates, having seen both texts. Then a
+    cosine backstop at DUPLICATE_SIM for near-identical strings the model let
+    through.
+
+    Something has to bound growth -- the LLM pass is a decomposer, 53 ephemeral
+    rows produced 76 facts -- but the bound reads better as a judgement than as a
+    distance, because cosine cannot tell restatement from subsumption.
     """
     kept, kept_vecs, rejected = [], [], []
     with conn.cursor() as cur:
         for mem, vec in zip(memories, vectors):
+            # The model's own call, made with both texts in front of it.
+            named = mem.get("duplicate_of")
+            if named and _is_uuid(named):
+                cur.execute("SELECT fact FROM arteries.persistent WHERE id = %s", (named,))
+                row = cur.fetchone()
+                if row:
+                    rejected.append({"fact": mem["fact"], "duplicate_of": row[0],
+                                     "by": "model"})
+                    continue
             if vec is None:
                 kept.append(mem)
                 kept_vecs.append(vec)
@@ -304,7 +333,7 @@ def _reject_duplicates(conn, memories: list[dict], vectors: list,
             row = cur.fetchone()
             if row and row[1] is not None and float(row[1]) >= DUPLICATE_SIM:
                 rejected.append({"fact": mem["fact"], "duplicate_of": row[0],
-                                 "similarity": round(float(row[1]), 3)})
+                                 "similarity": round(float(row[1]), 3), "by": "cosine"})
                 continue
             kept.append(mem)
             kept_vecs.append(vec)
@@ -329,6 +358,8 @@ def validate_response(payload: Any) -> list[str]:
     if not isinstance(mems, list):
         return ["new_memories is not a list"]
     for i, m in enumerate(mems):
+        if isinstance(m, dict) and m.get("duplicate_of") and not _is_uuid(m["duplicate_of"]):
+            problems.append(f"new_memories[{i}] duplicate_of is not a uuid")
         if not isinstance(m, dict) or not str(m.get("fact", "")).strip():
             problems.append(f"new_memories[{i}] has no fact")
             continue

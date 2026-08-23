@@ -103,41 +103,62 @@ def add_edge(cur, project_id: str, src_kind: str, src_id: str, rel: str,
 
 def expand(conn, project_id: str, seed_ids: list[str], *, hops: int = 1,
            decay: float = 0.6, limit: int = 40) -> list[dict[str, Any]]:
-    """Claims reachable from the seeds, weight-decayed per hop.
+    """Claims reachable from the seeds, weight-decayed, two ways.
 
-    The scope filter is on the claim side, so a shared entity cannot leak one
+    **Directly**, along claim-to-claim edges -- refines, supports, contradicts,
+    supersedes. These are the explicit interactions the compiler found.
+
+    **Through a shared entity**, claim -> mentions -> entity <- mentions -
+    claim. This is the traversal that earns the entity layer, and it is the
+    common one: in a real store there are 52 mentions edges producing 210
+    co-mentioning claim pairs, against 33 direct claim-to-claim edges. An
+    earlier version of this function walked only direct edges and returned
+    nothing useful, because most edges leaving a claim go to its provenance or
+    its entities, not to another claim.
+
+    The scope filter sits on the claim side, so a shared entity cannot leak one
     group's claims into another's traversal.
     """
     if not seed_ids:
         return []
+    seeds = [str(s) for s in seed_ids]
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             SCOPE_CTE + """
-            , walk AS (
-                SELECT id::text AS nid, 1.0::float AS score, 0 AS hop
-                FROM arteries.persistent WHERE id = ANY(%(seeds)s::uuid[])
-                UNION ALL
-                SELECT e.dst_id, w.score * e.weight * %(decay)s, w.hop + 1
-                FROM walk w
-                JOIN arteries.memory_edges e
-                  ON e.src_kind = 'persistent' AND e.src_id = w.nid
-                 AND e.valid_until IS NULL
-                WHERE w.hop < %(hops)s
-            )
+            , direct AS (
+                SELECT e.dst_id AS nid, e.weight * %(decay)s AS score, e.rel
+                FROM arteries.memory_edges e
+                WHERE e.src_kind = 'persistent' AND e.src_id = ANY(%(seeds)s)
+                  AND e.dst_kind = 'persistent' AND e.valid_until IS NULL
+            ),
+            shared_entity AS (
+                SELECT b.src_id AS nid,
+                       %(decay)s * %(decay)s AS score,
+                       'shares:' || en.name AS rel
+                FROM arteries.memory_edges a
+                JOIN arteries.memory_edges b
+                  ON b.dst_id = a.dst_id AND b.src_id <> a.src_id
+                 AND b.rel = 'mentions' AND b.valid_until IS NULL
+                JOIN arteries.entities en ON en.id = a.dst_id::uuid
+                WHERE a.rel = 'mentions' AND a.src_id = ANY(%(seeds)s)
+                  AND a.valid_until IS NULL
+            ),
+            reached AS (SELECT * FROM direct UNION ALL SELECT * FROM shared_entity)
             SELECT DISTINCT ON (p.id)
-                   p.id, p.fact, p.domains, p.confidence, w.score, w.hop
-            FROM walk w
-            JOIN arteries.persistent p ON p.id = w.nid::uuid
+                   p.id, p.fact, p.domains, p.confidence, p.kind,
+                   r.score, r.rel AS via
+            FROM reached r
+            JOIN arteries.persistent p ON p.id = r.nid::uuid
             WHERE p.project_id IN (SELECT project_id FROM scope)
               AND p.valid_until IS NULL
-              AND w.hop > 0
-            ORDER BY p.id, w.score DESC
+              AND NOT (p.id::text = ANY(%(seeds)s))
+            ORDER BY p.id, r.score DESC
             LIMIT %(limit)s
             """,
-            {"project": project_id, "seeds": [str(s) for s in seed_ids],
-             "hops": hops, "decay": decay, "limit": limit},
+            {"project": project_id, "seeds": seeds, "decay": decay, "limit": limit},
         )
-        return [dict(r) for r in cur.fetchall()]
+        rows = [dict(r) for r in cur.fetchall()]
+    return sorted(rows, key=lambda r: float(r["score"]), reverse=True)
 
 
 def stats(project_id: str, db_config: dict | None = None) -> dict[str, Any]:
