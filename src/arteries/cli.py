@@ -6,11 +6,11 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from arteries import doctor, docs, graph, ingest, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
+from arteries import benchmark, doctor, docs, graph, ingest, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe", "ingest", "rewards", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe", "ingest", "rewards", "benchmark", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -44,6 +44,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if ns.command == "graph":
         return graph.main(ns.args)
+
+    if ns.command == "benchmark":
+        return benchmark.main(ns.args)
 
     if ns.command == "observe":
         return observe.main(ns.args)
