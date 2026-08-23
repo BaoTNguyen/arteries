@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS arteries.ephemeral (
     fact            TEXT NOT NULL,
     embedding       VECTOR(EMBED_DIM),
     domains         JSONB NOT NULL DEFAULT '[]',
+    confidence      REAL NOT NULL DEFAULT 1.0,   -- unused here; the main checkout reads it
     source_ts       TIMESTAMPTZ NOT NULL DEFAULT now(),
     access_count    INT NOT NULL DEFAULT 0,
     project_id      TEXT NOT NULL,
@@ -45,9 +46,9 @@ CREATE INDEX IF NOT EXISTS idx_eph_agent
     WHERE status = 'uncompiled';
 
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'user';
--- Dropped: it only ever held 1.0 for user turns and 0.5 for assistant ones,
--- which is exactly what `source` already says.
-ALTER TABLE arteries.ephemeral DROP COLUMN IF EXISTS confidence;
+-- Kept, though this branch no longer writes it: the main checkout still selects
+-- it, and both run against the same database. Drop it when main has moved.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS confidence REAL NOT NULL DEFAULT 1.0;
 
 CREATE INDEX IF NOT EXISTS idx_eph_domains
     ON arteries.ephemeral USING gin (domains);
@@ -65,23 +66,17 @@ CREATE TABLE IF NOT EXISTS arteries.persistent (
     source_project_id TEXT,
     parent_ids      UUID[] DEFAULT '{}',   -- lineage: ephemeral records compiled from
     child_ids       UUID[] DEFAULT '{}',   -- lineage: evergreen records compiled into
-    origin          TEXT,             -- NULL = compiled | 'user' = art remember | 'reviewed' = art docs
+    scope           TEXT,             -- NULL = compiled | 'user' = art remember | 'reviewed' = art docs
     source_meta     JSONB NOT NULL DEFAULT '{}',
     valid_from      TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_until     TIMESTAMPTZ
 );
 
--- Renamed from `scope`, which collided with scope groups once those existed.
--- Guarded: RENAME COLUMN is not idempotent and schema.sql is re-run on setup.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns
-               WHERE table_schema = 'arteries' AND table_name = 'persistent'
-                 AND column_name = 'scope') THEN
-        ALTER TABLE arteries.persistent RENAME COLUMN scope TO origin;
-    END IF;
-END $$;
-ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS origin TEXT;
+-- Named `scope` for provenance (compiled | user | reviewed), which unhappily
+-- collides with scope *groups*. Renaming it was attempted and reverted: the
+-- main checkout reads this column against the same database, so a rename from
+-- a feature branch breaks whatever branch is actually running.
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS scope TEXT;
 -- fact | decision | preference | constraint
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'fact';
 -- Document provenance: path, line span, and digest for facts imported
