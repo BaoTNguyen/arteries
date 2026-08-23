@@ -87,14 +87,14 @@ def insert_ephemeral(
 def get_persistent(
     project_id: str,
     limit: int = 50,
-    origin: str | None = None,
+    scope: str | None = None,
 ) -> list[dict[str, Any]]:
     """Live persistent memories for this project's whole scope, newest first."""
-    origin_filter = "AND p.origin = %(origin)s" if origin else ""
+    origin_filter = "AND p.scope = %(origin)s" if scope else ""
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             SCOPE_CTE + f"""
-            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.origin, p.project_id
+            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.scope, p.project_id
             FROM arteries.persistent p
             WHERE p.project_id IN (SELECT project_id FROM scope)
               AND p.valid_until IS NULL
@@ -102,7 +102,7 @@ def get_persistent(
             ORDER BY p.source_ts DESC
             LIMIT %(limit)s
             """,
-            {"project": project_id, "origin": origin, "limit": limit},
+            {"project": project_id, "origin": scope, "limit": limit},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -153,7 +153,7 @@ def insert_persistent(
     fact: str,
     domains: list[str],
     confidence: float = 1.0,
-    origin: str | None = None,
+    scope: str | None = None,
     embedding: list[float] | None = None,
     source_meta: dict[str, Any] | None = None,
 ) -> str:
@@ -161,7 +161,7 @@ def insert_persistent(
         cur.execute(
             """
             INSERT INTO arteries.persistent
-                (fact, embedding, domains, confidence, project_id, origin, source_meta)
+                (fact, embedding, domains, confidence, project_id, scope, source_meta)
             VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::jsonb)
             RETURNING id
             """,
@@ -171,7 +171,7 @@ def insert_persistent(
                 psycopg2.extras.Json(domains),
                 confidence,
                 project_id,
-                origin,
+                scope,
                 psycopg2.extras.Json(source_meta or {}),
             ),
         )
