@@ -74,6 +74,56 @@ def _should_include_parent_ephemeral(context: AgentContext) -> bool:
     return context.capabilities.observes_subagents
 
 
+# Graph expansion runs only when cosine came back thin. A strong seed set is
+# already the answer; walking outward from it would add weaker neighbours to a
+# frame that is budget-limited anyway. Thin means: few results, or the best one
+# was not very close.
+EXPAND_WHEN_FEWER_THAN = 5
+EXPAND_WHEN_TOP_BELOW = 0.55
+EXPAND_HOPS = 1
+
+
+def _expand(seeds: list[dict], context: AgentContext, limit: int) -> list[dict]:
+    """Add claims reachable from the seeds along the graph, ranked below them.
+
+    A neighbour is worth surfacing precisely when similarity search missed it --
+    a fact that contradicts, refines, or shares an entity with a strong hit is
+    relevant by association rather than by wording. Weight-decayed so it never
+    outranks a direct match.
+    """
+    if not seeds:
+        return []
+    try:
+        import psycopg2
+
+        from arteries import graph
+        from arteries.config import DB_CONFIG
+
+        conn = psycopg2.connect(**DB_CONFIG)
+        try:
+            reached = graph.expand(
+                conn, context.project_id, [str(s["id"]) for s in seeds],
+                hops=EXPAND_HOPS, limit=limit,
+            )
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("graph expansion unavailable", exc_info=True)
+        return []
+
+    seen = {str(s["id"]) for s in seeds}
+    added = []
+    for row in reached:
+        if str(row["id"]) in seen:
+            continue
+        # `similarity` so the packet scores it on the same axis as a direct hit,
+        # but derived from hop distance rather than from the query vector.
+        row["similarity"] = float(row.get("score") or 0.0)
+        row["via_graph"] = True
+        added.append(row)
+    return added
+
+
 def _select_persistent(
     message: str,
     context: AgentContext,
@@ -85,12 +135,20 @@ def _select_persistent(
         query_emb = embedding or embed_text_sync(message, is_query=True)
         has_emb = bool(query_emb) and storage.has_embeddings(context.project_id)
         if query_emb and has_emb:
-            return storage.get_persistent_by_relevance(
+            seeds = storage.get_persistent_by_relevance(
                 context.project_id,
                 query_emb,
                 limit=20,
                 threshold=RELEVANCE_THRESHOLD,
             )
+            top = max((float(s.get("similarity") or 0.0) for s in seeds), default=0.0)
+            if len(seeds) < EXPAND_WHEN_FEWER_THAN or top < EXPAND_WHEN_TOP_BELOW:
+                expanded = _expand(seeds, context, limit=20 - len(seeds))
+                if expanded:
+                    logger.info("graph expansion added %d claims to %d seeds",
+                                len(expanded), len(seeds))
+                return seeds + expanded
+            return seeds
         # Relevance was requested but we couldn't do it — no query embedding
         # (embedder down) or no stored embeddings. We fall back to recency, which
         # is a different, weaker read; say so rather than degrade silently.

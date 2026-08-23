@@ -83,3 +83,49 @@ class EdgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExpandShapeTests(unittest.TestCase):
+    """Expansion must traverse shared entities, not only claim-to-claim edges.
+
+    Most edges leaving a claim go to its provenance or its entities. In a real
+    store: 206 derived_from, 52 mentions, and only 33 claim-to-claim. An earlier
+    version walked direct edges only and returned nothing, while 210 pairs of
+    claims sat one shared entity apart.
+    """
+
+    def test_query_covers_both_traversals(self):
+        import inspect
+        sql = inspect.getsource(graph.expand)
+        self.assertIn("shared_entity", sql)
+        self.assertIn("direct", sql)
+        self.assertIn("'mentions'", sql)
+
+    def test_scope_filter_is_on_the_claim_side(self):
+        """A shared entity must not leak one group's claims into another's."""
+        import inspect
+        sql = inspect.getsource(graph.expand)
+        self.assertIn("p.project_id IN (SELECT project_id FROM scope)", sql)
+
+    def test_seeds_are_excluded_from_their_own_expansion(self):
+        import inspect
+        self.assertIn("NOT (p.id::text = ANY", inspect.getsource(graph.expand))
+
+
+class SelectionTests(unittest.TestCase):
+    def test_expansion_only_runs_when_cosine_came_back_thin(self):
+        from arteries import memory_select
+        self.assertGreater(memory_select.EXPAND_WHEN_FEWER_THAN, 0)
+        self.assertLess(memory_select.EXPAND_WHEN_TOP_BELOW, 1.0)
+
+    def test_expansion_failure_is_survivable(self):
+        from unittest.mock import patch
+
+        from arteries import memory_select
+        ctx = memory_select.AgentContext(
+            cli="generic", project_id="p", agent_id="a", parent_agent_id=None,
+            agent_role="parent", event="prompt",
+            capabilities=memory_select.get_capabilities("generic"),
+        )
+        with patch("psycopg2.connect", side_effect=OSError("down")):
+            self.assertEqual(memory_select._expand([{"id": "x"}], ctx, 5), [])
