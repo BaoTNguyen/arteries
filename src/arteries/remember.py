@@ -83,7 +83,7 @@ def _do_add(args) -> int:
         fact=fact,
         domains=domains,
         confidence=args.confidence,
-        origin="user",
+        scope="user",
         embedding=embedding,
     )
     print(f"persistent: {pid[:8]}  {fact}")
@@ -92,7 +92,7 @@ def _do_add(args) -> int:
 
 
 def _do_list(args) -> int:
-    rows = storage.get_persistent(PROJECT_ID, limit=args.limit, origin="user")
+    rows = storage.get_persistent(PROJECT_ID, limit=args.limit, scope="user")
     if args.as_json:
         print(json.dumps(rows, indent=2, default=str))
         return 0
@@ -138,7 +138,7 @@ def _do_rm(args) -> int:
 
 
 def _resolve_id(prefix: str) -> str | None:
-    rows = storage.get_persistent(PROJECT_ID, limit=500, origin="user")
+    rows = storage.get_persistent(PROJECT_ID, limit=500, scope="user")
     matches = [str(r["id"]) for r in rows if str(r["id"]).startswith(prefix)]
     if len(matches) == 1:
         return matches[0]
