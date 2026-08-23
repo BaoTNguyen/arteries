@@ -133,3 +133,38 @@ class SelectionTests(unittest.TestCase):
         )
         with patch("psycopg2.connect", side_effect=OSError("down")):
             self.assertEqual(memory_select._expand([{"id": "x"}], ctx, 5), [])
+
+
+class ExpansionScoringTests(unittest.TestCase):
+    """A neighbour may not outscore the seed it was reached from.
+
+    graph.expand handed every direct-edge neighbour a flat 0.6 regardless of
+    seed quality, so a query whose best cosine hit was 0.50 got neighbours at
+    0.60 -- clearing a relevance floor the seed itself had only just met.
+    Relevance cannot grow as you walk away from the query.
+    """
+
+    def test_score_is_multiplied_by_the_seed_it_came_from(self):
+        import inspect
+        src = inspect.getsource(graph.expand)
+        self.assertIn("strength", src)
+        self.assertIn("from_id", src)
+        self.assertIn('row["score"] = float(row["score"]) * strength', src)
+
+    def test_expand_takes_seed_rows_not_bare_ids(self):
+        """Ids alone carry no similarity, so scoring could not be relative."""
+        import inspect
+        params = inspect.signature(graph.expand).parameters
+        self.assertIn("seeds", params)
+        self.assertNotIn("seed_ids", params)
+
+    def test_a_weak_seed_cannot_produce_a_strong_neighbour(self):
+        from unittest.mock import MagicMock
+        conn = MagicMock()
+        cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchall.return_value = [
+            {"id": "n1", "fact": "f", "domains": [], "confidence": 1.0,
+             "kind": "fact", "score": 0.6, "via": "refines", "from_id": "s1"},
+        ]
+        out = graph.expand(conn, "proj", [{"id": "s1", "similarity": 0.30}])
+        self.assertLess(out[0]["score"], 0.30)
