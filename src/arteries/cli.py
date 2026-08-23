@@ -163,9 +163,10 @@ def _activate(args: Sequence[str]) -> int:
 
     import os
 
-    from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
+    from arteries import scope
+    from arteries.config import AGENT_PROCESS_ID
 
-    project = os.environ.get("ARTERIES_PROJECT", PROJECT_ID)
+    project = scope.current_project()
     agent = os.environ.get("ARTERIES_AGENT_ID", AGENT_PROCESS_ID)
     # the run id goes to stdout, and stdout here is context the host will show
     import contextlib
@@ -178,17 +179,19 @@ def _activate(args: Sequence[str]) -> int:
 
     print("ARTERIES MEMORY SYSTEM ACTIVE.\n")
     print(f"This repo is connected to arteries project `{project}`.")
-    print("Arteries observes turns, builds ephemeral/persistent/evergreen memory, "
-          "and may surface retrieved prompts as visible context.")
+    print("Arteries observes turns, builds ephemeral and persistent memory plus a "
+          "knowledge graph, and may surface retrieved prompts as visible context.")
 
     # never let a memory read stop a session from starting
     try:
         from arteries import storage
-        rows = storage.get_evergreen(limit=8)
-    except Exception:
+        rows = storage.get_persistent(project, limit=8)
+    except Exception as exc:
+        from arteries import degrade
+        degrade.note(exc, "session-start memory", project=project)
         rows = []
     if rows:
-        print("\nEvergreen preferences (authoritative source: arteries):")
+        print(f"\nStanding memory for `{project}` and its scope:")
         for r in rows:
             print(f"- {r['fact']}")
     return 0
