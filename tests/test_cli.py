@@ -1,3 +1,5 @@
+import contextlib
+import io
 import unittest
 from unittest.mock import patch
 
@@ -55,3 +57,33 @@ class ArtCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ActivateTests(unittest.TestCase):
+    """`art activate` is the session-start hook: what it prints is the context a
+    host shows. It called storage.get_evergreen long after the rework deleted
+    that function, and swallowed the AttributeError, so every session started
+    with an empty memory block and no error anywhere."""
+
+    def _run(self, **patches):
+        from arteries import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+             patch.object(cli.runs, "main", return_value=0), \
+             patch("arteries.scope.current_project", return_value="arteries"), \
+             patch("arteries.storage.get_persistent", **patches) as read:
+            cli._activate([])
+        return out.getvalue(), read
+
+    def test_prints_persistent_memory_for_the_resolved_project(self):
+        text, read = self._run(return_value=[{"fact": "Entities are scoped to the group."}])
+        self.assertIn("Entities are scoped to the group.", text)
+        # resolved by path, not the "default" that config.PROJECT_ID falls back to
+        self.assertEqual(read.call_args.args[0], "arteries")
+        self.assertNotIn("evergreen", text.lower())
+
+    def test_a_failed_read_is_reported_not_swallowed(self):
+        with patch("arteries.degrade.note") as note:
+            text, _ = self._run(side_effect=RuntimeError("db down"))
+        note.assert_called_once()
+        self.assertIn("ARTERIES MEMORY SYSTEM ACTIVE", text)  # session still starts
