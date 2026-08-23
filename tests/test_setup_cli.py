@@ -1,4 +1,5 @@
 import json
+import re
 import os
 import tempfile
 import tomllib
@@ -11,7 +12,7 @@ from arteries import setup_cli
 
 class SetupCliTests(unittest.TestCase):
     def test_list_supported_providers(self):
-        self.assertEqual(setup_cli.PROVIDERS, ("pi", "codex", "claude", "opencode", "hermes", "cursor"))
+        self.assertEqual(setup_cli.PROVIDERS, ("generic", "pi", "codex", "claude", "opencode", "hermes", "cursor"))
 
     def test_pi_install_check_remove(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,3 +231,80 @@ codex_hooks = true
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeneratedAdapterTests(unittest.TestCase):
+    """Every adapter file an install writes must be runnable as written.
+
+    Two classes of bug live here, and both are silent — the adapter installs,
+    `--check` passes, and nothing is ever observed:
+      1. an unsubstituted `{hooks}` placeholder (the JS/TS bodies cannot be
+         f-strings, so the .replace() is easy to forget), which makes every
+         exec target a literal path named "{hooks}"
+      2. a hook path written relative, which resolves against whatever cwd the
+         host hands the hook
+    """
+
+    ADAPTER_FILES = {
+        "pi": [".pi/extensions/arteries.ts"],
+        "opencode": [".opencode/plugins/arteries.ts"],
+        "cursor": [".cursor/rules/arteries.mdc"],
+        "codex": ["AGENTS.md", ".codex/config.toml"],
+        "hermes": ["HERMES.md"],
+        "claude": [".claude/settings.local.json"],
+    }
+
+    def test_no_unsubstituted_placeholders_and_paths_are_absolute(self):
+        for provider, relatives in self.ADAPTER_FILES.items():
+            for relative in relatives:
+                with self.subTest(provider=provider, file=relative), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.assertEqual(
+                        setup_cli.main(
+                            [provider, "--cwd", str(root), "--project", "demo"]), 0)
+                    text = (root / relative).read_text(encoding="utf-8")
+                    self.assertNotIn("{hooks}", text,
+                                     f"{provider} ships a literal placeholder")
+                    absolute = str(root / ".arteries" / "hooks")
+                    self.assertIn(absolute, text)
+                    # blank the absolute references; anything still naming the
+                    # hooks dir is doing it relative to an unknown cwd
+                    self.assertNotIn(".arteries/hooks", text.replace(absolute, ""),
+                                     f"{provider} references hooks by relative path")
+
+
+class PiExtensionTests(unittest.TestCase):
+    def _extension(self) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            setup_cli.main(["pi", "--cwd", str(root), "--project", "demo"])
+            return (root / ".pi/extensions/arteries.ts").read_text(encoding="utf-8")
+
+    def test_registers_only_events_pi_actually_emits(self):
+        """The adapter once listened for "message_updated" and
+        "assistant_response". Pi emits neither, so it observed nothing for its
+        entire life while installing and checking clean."""
+        text = self._extension()
+        # names from ExtensionAPI.on() in @earendil-works/pi-coding-agent
+        valid = {
+            "session_start", "session_before_compact", "session_compact",
+            "session_shutdown", "context", "before_provider_request",
+            "after_provider_response", "before_agent_start", "agent_start",
+            "agent_end", "turn_start", "turn_end", "message_start",
+            "message_update", "message_end", "tool_execution_start",
+            "tool_execution_end", "model_select", "user_bash", "input",
+            "tool_call", "tool_result",
+        }
+        registered = set(re.findall(r'pi\.on\("([a-z_]+)"', text))
+        self.assertTrue(registered, "extension registers no handlers at all")
+        self.assertEqual(registered - valid, set())
+
+    def test_observes_prompts_and_reports_usage(self):
+        text = self._extension()
+        # the prompt hook `pi` claims in PROVIDER_LEVELS
+        self.assertIn("before_agent_start", text)
+        self.assertIn("hook-observe.sh", text)
+        # Pi hands usage over directly, so it never needs a transcript parser
+        self.assertIn("ARTERIES_USAGE_TOKENS_IN", text)
+        self.assertIn("ARTERIES_USAGE_MODEL", text)

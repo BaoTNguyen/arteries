@@ -65,7 +65,17 @@ if _preset in _PRESETS:
     for _k, _v in _PRESETS[_preset].items():
         os.environ.setdefault(_k, _v)
 
-EPHEMERAL_MODE = os.getenv("ARTERIES_EPHEMERAL", "compile")
+# compile  write ephemeral, promote to persistent in the background (default)
+# keep     write ephemeral, never promote — `art remember` and `art compile` are
+#          the deliberate paths up. For interactive sessions, where compiling
+#          every assistant reply turned six days of work into 178 permanent
+#          "memories" that were mostly narration of what had just been said.
+# discard  never write ephemeral at all; an in-process buffer serves this turn only
+_EPHEMERAL_MODES = ("compile", "keep", "discard")
+EPHEMERAL_MODE = os.getenv("ARTERIES_EPHEMERAL", "compile").strip().lower()
+if EPHEMERAL_MODE not in _EPHEMERAL_MODES:
+    # an unrecognised value must not silently mean "stop remembering"
+    EPHEMERAL_MODE = "compile"
 PERSISTENT_READ = os.getenv("ARTERIES_PERSISTENT_READ", "relevance")
 # Cosine floor for a persistent memory to be eligible at all. The old 0.3 was
 # inherited from capillaries' SINGLE_THRESHOLD, which capillaries itself retired

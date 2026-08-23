@@ -31,7 +31,7 @@ Capillaries decides which prompt fits. Arteries gives that decision a memory fra
 
 Every coding CLI is bolting on its own memory feature, each incompatible with the next. Arteries takes the opposite bet — one memory substrate, many front-ends:
 
-- **One memory across six CLIs.** Codex, Claude Code, Pi, OpenCode, Cursor, and Hermes all read and write the same project memory through explicit per-CLI adapters. Switch tools mid-project and the context follows you instead of resetting.
+- **One memory across any CLI.** Codex, Claude Code, Pi, OpenCode, Cursor, and Hermes get explicit adapters; everything else gets `generic`, which needs only the ability to run a command and read stdout. Switch tools mid-project and the context follows you instead of resetting.
 - **Memory that surfaces by relevance, not recency.** Persistent memories are embedded at compile time and matched against the current message by vector similarity. A test-writing subagent surfaces test memories, a code agent surfaces code memories — task isolation falls out of the embeddings, with no scope labels to maintain.
 - **Three tiers with real half-lives.** Ephemeral (per process, high churn), persistent (per project, compiled facts), evergreen (global, explicitly promoted). Observations get compiled up the tiers in the background; they don't all live forever at the same weight.
 - **An audit trail that keeps gate and retrieval honest.** A gate opening on a nearest-match title and the prompt actually retrieved are logged as distinct events, with bounded previews and SHA-256 hashes. You can reconstruct why a prompt surfaced months later.
@@ -73,13 +73,13 @@ Capillaries owns:
 - prompt gating
 - prompt search and reranking
 - private prompt corpus access
-- shared memory contract types such as `MemoryFrame`
 
 Arteries owns:
 
-- explicit setup adapters for Codex, Claude Code, Pi, OpenCode, Hermes, and Cursor
+- explicit setup adapters for Codex, Claude Code, Pi, OpenCode, Hermes, and Cursor, plus a host-agnostic `generic` adapter
 - `.arteries/` runtime scripts inside target repos
 - ephemeral, persistent, and evergreen memory storage
+- the memory contract types (`arteries.memory_types`: `MemoryFrame` and its tiers)
 - `MemoryFrame` assembly
 - compaction packets
 - central trace output
@@ -93,6 +93,21 @@ The two repos should usually sit next to each other:
 ```
 
 The scripts assume that sibling layout unless you pass `--capillaries-root`.
+
+The two import each other, in opposite directions and at different weights.
+Arteries imports capillaries' retrieval entry points (`find`, `gate`);
+capillaries imports exactly one arteries module, `arteries.memory_types` —
+stdlib dataclasses, no psycopg2, no database. So capillaries needs arteries on
+the path, but never touches its storage. Install both editable, either order:
+
+```bash
+pip install -e ../arteries && pip install -e ../capillaries
+```
+
+The contract types live with the producer on purpose. They were in capillaries
+until arteries could not define its own output without importing the consumer
+of it — which meant retrieval could not be swapped out or removed without
+taking the memory contract with it.
 
 ## Services it expects
 
@@ -347,7 +362,7 @@ The wrapper resolves the interpreter through `scripts/_env.sh`. It also remember
 
 ## Set up a project
 
-Go to the project you want the agent to work in, then run the setup command for each CLI you use there. Setup is additive: installing Cursor later does not remove an existing Codex, Claude, Pi, OpenCode, or Hermes adapter.
+Go to the project you want the agent to work in, then run the setup command for each CLI you use there. Setup is additive: installing Cursor later does not remove an existing Codex, Claude, Pi, OpenCode, Hermes, or generic adapter. For a CLI with no adapter of its own, use `generic` (below).
 
 List supported adapters:
 
@@ -365,6 +380,100 @@ bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add opencode
 bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add cursor
 bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add hermes
 ```
+
+### Adding a CLI that has no adapter
+
+`generic` is the adapter for everything else — a new model runner, an editor
+plugin, a shell script, anything that can run a command and read its stdout. It
+assumes no vendor hook format, so nothing has to be written for a CLI to be
+supported.
+
+```bash
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add generic
+```
+
+That writes `.arteries/bin/art`, a wrapper carrying `PYTHONPATH` and project
+identity so the caller needs no environment of its own. Point the host at two
+commands:
+
+```bash
+# session start — prints evergreen memory as context
+/abs/path/to/repo/.arteries/bin/art activate --cli <name>
+
+# each turn — prompt on argv or stdin, retrieval on stdout
+/abs/path/to/repo/.arteries/bin/art observe --cli <name> "<user prompt>"
+echo "<user prompt>" | /abs/path/to/repo/.arteries/bin/art observe --cli <name>
+```
+
+`observe` prints nothing when the retrieval gate abstains, so it is safe to
+splice into a prompt path unconditionally.
+
+Pick any `--cli <name>` you like. It is a free-form attribution label; unknown
+names fall back to a generic capability profile rather than failing. The label
+is recorded on the *run*, so it takes effect at `activate` — a later `observe`
+joins whatever run that CLI already has open. Runs are keyed per CLI, so two
+CLIs working the same repo never land on each other's run.
+
+Token counts are read automatically only from Claude and Codex transcripts.
+Any other host should declare what it already knows, or its turns price at zero
+on the cost panel:
+
+```bash
+.arteries/bin/art observe --cli <name> --tokens-in 1200 --tokens-out 340 "<prompt>"
+```
+
+Equivalently, via env: `ARTERIES_USAGE_TOKENS_IN`, `ARTERIES_USAGE_TOKENS_OUT`,
+`ARTERIES_USAGE_CACHE_READ`, `ARTERIES_USAGE_CACHE_WRITE_5M`,
+`ARTERIES_USAGE_CACHE_WRITE_1H`. Values that are missing, non-numeric, or
+negative are dropped rather than coerced — a garbled count is worse than none,
+because it prices as though it were measured.
+
+Send `ARTERIES_USAGE_MODEL` too. Counts alone cannot be priced: Opus and Haiku
+on the same CLI differ by more than an order of magnitude, so a rate card needs
+the model, not just the vendor. Claude and Codex transcripts are read for it
+automatically (Codex only names its model in `thread_settings_applied`, and can
+switch mid-session). A model with no counts is ignored — it is not a
+measurement.
+
+Every `turn.observed` also carries `usage_source`, which says how the number was
+arrived at:
+
+| `usage_source` | Meaning |
+| --- | --- |
+| `reported` | the host declared its own counts |
+| `claude_transcript` / `codex_rollout` | parsed from the session transcript |
+| `unavailable` | **no way to measure this turn** — no transcript, no declaration |
+| absent | measured fine; this turn simply made no API call |
+
+`unavailable` is the one to watch. Without it, a host with no adapter is
+indistinguishable on the cost panel from a host that genuinely cost nothing, and
+the gap stays invisible indefinitely.
+
+Compaction and subagent events are not covered by `generic`. They are genuinely
+host-specific; there is nothing to hook if the host does not emit them. A CLI
+that does emit them deserves its own adapter in `setup_cli.py`.
+
+### Keeping every repo current
+
+Generated hook commands carry absolute paths, so a repo keeps whatever the
+installer emitted the day it ran. After changing anything in `setup_cli.py`,
+re-emit across every repo at once:
+
+```bash
+# preview: list each repo and the providers detected in it
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup sync ~/Coding/Projects --check
+
+# reinstall and verify every provider already wired into every repo
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup sync ~/Coding/Projects
+```
+
+`sync` detects providers by artifact, not by what `.arteries/config.json`
+claims — that field records what setup was *told*, and it drifts. It cannot go
+through `check` either: a repo installed by an older version fails its own
+check, and repairing exactly those repos is the point.
+
+Exit status is non-zero if any provider fails verification, so this is safe to
+run from CI or a git hook.
 
 The older shorthand still works:
 
@@ -399,8 +508,13 @@ bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add cursor --pro
 Smoke test the shared runtime:
 
 ```bash
-bash .arteries/smoke.sh "arteries setup test"
+bash .arteries/smoke.sh "arteries setup test"           # dry run
+bash .arteries/smoke.sh --write "arteries setup test"   # persist what it extracts
 ```
+
+The default is a dry run (`ARTERIES_EPHEMERAL=discard`): every code path runs,
+nothing reaches storage. It used to write for real, and a noticeable share of
+one project's stored facts turned out to be this script talking to itself.
 
 ## What setup installs
 
@@ -515,6 +629,69 @@ Promotion is one detached LLM pass per turn. It compares each candidate against
 0.93 cosine a fact is refused mechanically, and the 0.75–0.93 band is what the
 model sees so it can judge refinement against contradiction.
 
+
+### Controlling what gets promoted
+
+`ARTERIES_EPHEMERAL` decides how far up the tiers an observation travels:
+
+| value | ephemeral | persistent | use it for |
+|---|---|---|---|
+| `compile` (default) | written | promoted in the background | project work you want remembered without asking |
+| `keep` | written | never, on its own | interactive sessions |
+| `discard` | in-process buffer only | never | throwaway or isolated runs |
+
+`keep` exists because compilation does not distinguish a discovery from a
+description of one. Every assistant reply gets mined alongside your prompt, and
+in a long working session most replies are narration — six days of interactive
+work in one project produced 178 permanent memories, the bulk of them restating
+what had just been done, all at ~0.94 confidence. They then compete with real
+project facts in relevance-filtered retrieval.
+
+Under `keep`, nothing about recording changes. Turns still land in
+`agent_events`, assistant replies are still stored with a 2000-character
+preview, `art search` still finds them, and ephemeral still feeds the current
+`MemoryFrame`. Only the automatic promotion stops. Two deliberate paths up
+remain:
+
+```bash
+art remember add "the codex JS hook swallows every error and exits 0"
+art remember add "I prefer stdlib-first implementations" --also-evergreen
+art compile        # promote this agent's ephemeral now
+```
+
+Enable it per session, or in the hook command for a repo whose sessions are
+mostly conversational:
+
+```bash
+ARTERIES_EPHEMERAL=keep art observe --cli <name> "<prompt>"
+```
+
+An unrecognised value falls back to `compile`, so a typo cannot silently turn
+memory off. The `readonly` and `clean` presets in `ARTERIES_MEMORY` still map to
+`discard`; `keep` is not part of a preset because it is a per-session judgement
+about the work, not an isolation level.
+
+### Pruning what already accumulated
+
+`keep` stops the growth; it does nothing about a backlog. Every frame build now
+bumps `access_count` on the persistent rows it surfaces, which gives the backlog
+a signal it never had — retrieval stays relevance-ranked and does not read the
+counter, so its only job is to make disuse visible:
+
+```sql
+SELECT count(*) FROM arteries.persistent
+WHERE project_id = 'plexus' AND access_count = 0 AND source_ts < now() - interval '30 days';
+```
+
+A memory that has not surfaced once in a month of real work is not earning its
+place in retrieval. Rows written by `art remember` carry `scope = 'user'`;
+exclude those, since a fact you promoted deliberately is not junk just because
+it has not come up yet.
+
+The counter starts at zero for every existing row, so it only means anything
+after a few weeks of use. Before then, `access_count = 0` means "not yet
+measured", not "never useful" — the same trap `usage_source` exists to avoid on
+the cost side.
 
 ## Relevance-filtered retrieval
 
