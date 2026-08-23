@@ -69,21 +69,39 @@ def current_run(
     if run_id:
         return _run_payload(run_id, project, agent, cli_name, repo)
 
-    current_path = repo / ".arteries" / "current-run.json"
-    if current_path.exists():
+    # Runs are keyed by CLI, not just by repo. A single repo is worked by several
+    # CLIs, and a shared current-run file meant whoever called `runs start` last
+    # owned every subsequent turn — a Claude turn landing on a Codex run, priced
+    # against the wrong rate card. Each CLI now resumes its own run.
+    for candidate in (_current_run_path(repo, cli_name), repo / ".arteries" / "current-run.json"):
+        if not candidate.exists():
+            continue
         try:
-            data = json.loads(current_path.read_text(encoding="utf-8"))
-            if data.get("run_id"):
-                return _run_payload(
-                    str(data["run_id"]),
-                    project_id or os.getenv("ARTERIES_PROJECT") or data.get("project_id") or PROJECT_ID or repo.name,
-                    agent_id or os.getenv("ARTERIES_AGENT_ID") or data.get("agent_id") or AGENT_PROCESS_ID,
-                    cli or os.getenv("AGENT_CLI") or os.getenv("ARTERIES_CLI") or data.get("cli") or "unknown",
-                    repo,
-                    started_at=data.get("started_at"),
-                )
+            data = json.loads(candidate.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            continue
+        if not data.get("run_id"):
+            continue
+        if candidate.name == "current-run.json":
+            file_cli = _cli(data.get("cli"))
+            if cli_name == "unknown":
+                # nothing was declared, so there is no identity to keep separate:
+                # adopt the open run rather than forking an "unknown" one
+                cli_name = file_cli
+            elif file_cli != cli_name:
+                # a named CLI never inherits another's run — that is the bug
+                continue
+        run = _run_payload(
+            str(data["run_id"]),
+            project_id or os.getenv("ARTERIES_PROJECT") or data.get("project_id") or PROJECT_ID or repo.name,
+            agent_id or os.getenv("ARTERIES_AGENT_ID") or data.get("agent_id") or AGENT_PROCESS_ID,
+            cli_name,
+            repo,
+            started_at=data.get("started_at"),
+        )
+        if candidate.name == "current-run.json":
+            _write_current_run(repo, run)  # migrate it under the per-CLI key
+        return run
 
     run = _run_payload(str(uuid.uuid4()), project, agent, cli_name, repo)
     _write_current_run(repo, run)
@@ -129,6 +147,8 @@ def log_event(
         store = "jsonl"  # degradation signal: pulse health watches this
     spool_emit(
         source, event_type, turn_id=turn_id, store=store,
+        project_id=run["project_id"], repo=run["repo_path"],
+        cli=run["cli"], agent_id=run["agent_id"],
         **{k: v for k, v in event["payload"].items() if k not in ("episode_id", "task_id")},
     )
     return event
@@ -270,10 +290,23 @@ def _run_payload(run_id: str, project_id: str, agent_id: str, cli: str, repo: Pa
     }
 
 
+def _cli_slug(cli: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(cli).lower()) or "unknown"
+
+
+def _current_run_path(repo: Path, cli: str) -> Path:
+    return repo / ".arteries" / "runs" / f"current-{_cli_slug(cli)}.json"
+
+
 def _write_current_run(repo: Path, run: dict[str, Any]) -> None:
-    current_path = repo / ".arteries" / "current-run.json"
-    current_path.parent.mkdir(parents=True, exist_ok=True)
-    current_path.write_text(json.dumps(run, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    blob = json.dumps(run, indent=2, sort_keys=True, default=str) + "\n"
+    per_cli = _current_run_path(repo, run.get("cli") or "unknown")
+    per_cli.parent.mkdir(parents=True, exist_ok=True)
+    per_cli.write_text(blob, encoding="utf-8")
+    # legacy pointer: whoever wrote last. Nothing routes turns through it any
+    # more, but `art trace` and external readers still expect the old path.
+    legacy = repo / ".arteries" / "current-run.json"
+    legacy.write_text(blob, encoding="utf-8")
 
 
 def _write_db_run(run: dict[str, Any]) -> None:
