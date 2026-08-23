@@ -38,6 +38,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if report["ok"] else 1
 
 
+# Ephemeral is a working set: a row that was compiled and produced nothing is
+# spent. Rows that *did* produce a memory are kept regardless of age, because a
+# derived_from edge points at them and provenance back to the raw turn is the
+# whole reason those edges exist.
+EPHEMERAL_RETENTION_DAYS = int(os.getenv("ARTERIES_EPHEMERAL_RETENTION_DAYS", "14"))
+
+_COLLECTABLE_SQL = """
+    SELECT {select} FROM arteries.ephemeral e
+    WHERE e.status = 'cleared'
+      AND e.source_ts < now() - (%s || ' days')::interval
+      AND NOT EXISTS (
+          SELECT 1 FROM arteries.memory_edges m
+          WHERE m.dst_kind = 'ephemeral' AND m.dst_id = e.id::text
+            AND m.valid_until IS NULL
+      )
+"""
+
+
+def _collect_ephemeral(conn) -> int:
+    """Delete spent ephemeral rows. Nothing that is cited is ever removed."""
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM arteries.ephemeral e WHERE e.id IN ("
+                    f"{_COLLECTABLE_SQL.format(select='e.id')})",
+                    (EPHEMERAL_RETENTION_DAYS,))
+        conn.commit()
+        return cur.rowcount
+
+
 def integrity(project: str) -> dict[str, Any]:
     """Cheap consistency checks that need no repair to be worth reporting."""
     import psycopg2
@@ -77,6 +105,9 @@ def integrity(project: str) -> dict[str, Any]:
             """)
             out["stranded_claims"] = cur.fetchone()[0]
 
+            cur.execute(_COLLECTABLE_SQL.format(select="count(*)"), (EPHEMERAL_RETENTION_DAYS,))
+            out["collectable_ephemeral"] = cur.fetchone()[0]
+
             cur.execute("SELECT count(*) FROM arteries.scope_members WHERE project_id = %s",
                         (project,))
             out["scope_registered"] = bool(cur.fetchone()[0])
@@ -107,8 +138,10 @@ def fix(project: str) -> dict[str, Any]:
             """, (project,))
             rows = cur.fetchall()
         retired = _retire_dangling(conn)
+        collected = _collect_ephemeral(conn)
         if not rows:
-            return {"embedded": 0, "dangling_edges_retired": retired}
+            return {"embedded": 0, "dangling_edges_retired": retired,
+                    "ephemeral_collected": collected}
         vectors = embed_texts_sync([r["fact"] for r in rows])
         done = 0
         with conn.cursor() as cur:
@@ -119,7 +152,8 @@ def fix(project: str) -> dict[str, Any]:
                             (vec, row["id"]))
                 done += 1
             conn.commit()
-        return {"embedded": done, "of": len(rows), "dangling_edges_retired": retired}
+        return {"embedded": done, "of": len(rows),
+                "dangling_edges_retired": retired, "ephemeral_collected": collected}
     finally:
         conn.close()
 
