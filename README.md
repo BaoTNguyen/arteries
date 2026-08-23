@@ -31,7 +31,7 @@ Capillaries decides which prompt fits. Arteries gives that decision a memory fra
 
 Every coding CLI is bolting on its own memory feature, each incompatible with the next. Arteries takes the opposite bet — one memory substrate, many front-ends:
 
-- **One memory across six CLIs.** Codex, Claude Code, Pi, OpenCode, Cursor, and Hermes all read and write the same project memory through explicit per-CLI adapters. Switch tools mid-project and the context follows you instead of resetting.
+- **One memory across any CLI.** Codex, Claude Code, Pi, OpenCode, Cursor, and Hermes get explicit adapters; everything else gets `generic`, which needs only the ability to run a command and read stdout. Switch tools mid-project and the context follows you instead of resetting.
 - **Memory that surfaces by relevance, not recency.** Persistent memories are embedded at compile time and matched against the current message by vector similarity. A test-writing subagent surfaces test memories, a code agent surfaces code memories — task isolation falls out of the embeddings, with no scope labels to maintain.
 - **Three tiers with real half-lives.** Ephemeral (per process, high churn), persistent (per project, compiled facts), evergreen (global, explicitly promoted). Observations get compiled up the tiers in the background; they don't all live forever at the same weight.
 - **An audit trail that keeps gate and retrieval honest.** A gate opening on a nearest-match title and the prompt actually retrieved are logged as distinct events, with bounded previews and SHA-256 hashes. You can reconstruct why a prompt surfaced months later.
@@ -73,13 +73,13 @@ Capillaries owns:
 - prompt gating
 - prompt search and reranking
 - private prompt corpus access
-- shared memory contract types such as `MemoryFrame`
 
 Arteries owns:
 
-- explicit setup adapters for Codex, Claude Code, Pi, OpenCode, Hermes, and Cursor
+- explicit setup adapters for Codex, Claude Code, Pi, OpenCode, Hermes, and Cursor, plus a host-agnostic `generic` adapter
 - `.arteries/` runtime scripts inside target repos
 - ephemeral, persistent, and evergreen memory storage
+- the memory contract types (`arteries.memory_types`: `MemoryFrame` and its tiers)
 - `MemoryFrame` assembly
 - compaction packets
 - central trace output
@@ -94,6 +94,21 @@ The two repos should usually sit next to each other:
 
 The scripts assume that sibling layout unless you pass `--capillaries-root`.
 
+The two import each other, in opposite directions and at different weights.
+Arteries imports capillaries' retrieval entry points (`find`, `gate`);
+capillaries imports exactly one arteries module, `arteries.memory_types` —
+stdlib dataclasses, no psycopg2, no database. So capillaries needs arteries on
+the path, but never touches its storage. Install both editable, either order:
+
+```bash
+pip install -e ../arteries && pip install -e ../capillaries
+```
+
+The contract types live with the producer on purpose. They were in capillaries
+until arteries could not define its own output without importing the consumer
+of it — which meant retrieval could not be swapped out or removed without
+taking the memory contract with it.
+
 ## Services it expects
 
 For memory and retrieval to work, keep these available locally:
@@ -102,7 +117,7 @@ For memory and retrieval to work, keep these available locally:
 - the `capillaries` database
 - an OpenAI-compatible embedding endpoint, usually `http://127.0.0.1:8003/v1/embeddings`
 - an OpenAI-compatible chat/completions endpoint, usually `http://127.0.0.1:8001/v1/chat/completions`
-- capillaries importable on `PYTHONPATH`
+- capillaries importable (see [Development environment](#development-environment))
 
 Defaults live in `src/arteries/config.py` and environment variables can override them:
 
@@ -120,8 +135,210 @@ Initialize the arteries schema once:
 
 ```bash
 cd /home/bao-tn/Coding/Projects/arteries
-bash scripts/setup-db.sh
+art setup <provider>   # applies the schema too
 ```
+
+## Development environment
+
+Work inside a virtualenv at `.venv`. uv is the primary path, matching
+capillaries:
+
+```bash
+uv sync --extra ontology
+```
+
+That is the whole setup. It creates `.venv`, installs arteries editable,
+resolves capillaries from the sibling checkout via `[tool.uv.sources]`, and
+pulls rdflib for the ontology loader. A cold sync takes about seven seconds
+because uv shares its cache with the capillaries checkout next door.
+
+`uv.lock` is committed. Re-lock after changing dependencies:
+
+```bash
+uv lock
+uv run pytest tests/ -q
+```
+
+Plain pip still works for anyone without uv:
+
+```bash
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install -e ../capillaries      # sibling first, it is not on PyPI
+.venv/bin/pip install -e '.[ontology]'
+```
+
+`--system-site-packages` on the pip path avoids rebuilding capillaries' ML
+stack (dspy, scikit-learn, pandas, the reranker) per checkout. uv does not need
+the flag; its cache hardlinks instead of copying.
+
+Every script in `scripts/` sources `scripts/_env.sh`, which prefers
+`.venv/bin/python` and falls back to `python3` with `PYTHONPATH` set. So both
+of these work, and the first one is the one to prefer:
+
+```bash
+bash scripts/test.sh              # uses .venv when present, whoever created it
+uv run art ontology stats         # or .venv/bin/art, same thing
+```
+
+The fallback exists so a fresh checkout runs before anyone has made a venv. It
+cannot see optional extras, so `art ontology load` will tell you to install
+rdflib rather than failing halfway.
+
+### What imports what
+
+Arteries declares two hard dependencies and one optional extra:
+
+| Import | Declared in | Used by | Notes |
+| --- | --- | --- | --- |
+| `psycopg2` | `dependencies` | everything touching Postgres | |
+| `httpx` | `dependencies` | `embed.py`, `compile.py` | |
+| `rdflib` | `[ontology]` extra | `ontology.load` only | never imported at runtime; grounding reads the cached T-Box out of Postgres and matches with stdlib `difflib` |
+| `pytest` | `dev` group | tests | `uv sync` installs it; pip ignores groups |
+
+`uv sync --extra ontology` gets all of the above. `pip install -e '.[ontology]'`
+gets everything except the `dev` group, which is where capillaries lives — see
+below.
+
+Capillaries is a hard requirement that pip cannot resolve — it is not on PyPI,
+so naming it in `dependencies` would fetch a stranger's package. It is declared
+in the `dev` dependency group with `[tool.uv.sources]` pinning it to
+`../capillaries`, which gives uv a real declaration while leaving
+`pip install -e .` working, since PEP 735 groups are opt-in. On the pip path,
+install the sibling yourself. Arteries imports four things from it:
+
+| Import | Where | Degrades if missing? |
+| --- | --- | --- |
+| `capillaries.config.paths` (`EMBED_MODEL`, `EMBED_DIM`, `EMBED_URL`, `QUERY_PREFIX`) | `config.py` | yes — falls back to local defaults |
+| `capillaries.agent.inference.DOMAIN_KEYWORDS` | `extract.py` | yes — falls back to `evergreen.DOMAIN_KEYWORDS` |
+| `capillaries.agent.gate.gate` | `eval.py` | no — hard import |
+| `capillaries.find.find` | `eval.py` | no — hard import |
+
+The embedding config is a **shared contract**, not an arteries setting: both
+projects write vectors into the same Postgres, so the model and dimension have
+to agree. They silently disagreed once — capillaries moved to
+Qwen3-Embedding-0.6B at 1024 dims while arteries stayed on arctic-embed at 768,
+which would have failed every embedding write. Importing the values rather than
+restating them is what stops that recurring. `migrate_embed_dim.py` resizes an
+existing database when the model changes.
+
+## Getting things into memory
+
+| Command | For | Shape |
+| --- | --- | --- |
+| *(automatic)* | your turns in a coding CLI | the hook path |
+| `art observe` | one note from heart, plexus, or marrow | short text, stdin or argument |
+| `art ingest` | documents and plans | file, directory, or `-` for stdin |
+| `art docs` | mining a repo's Markdown for facts you approve | review file |
+| `art rewards` | episode rewards from marrow | JSONL on stdin |
+| `art remember` | a fact you are stating directly | argument |
+
+`art ingest` chunks, compiles, and graphs in one step, so a plan keeps its
+structure and every claim carries provenance back to the passage it came from:
+
+```bash
+art ingest design.md
+plexus plan --goal retrieval | art ingest - --kind plan --name plexus:goal/retrieval
+```
+
+`--kind plan` chunks finer than `--kind document`. A plan is read for its parts,
+not its gist: at document sizes a four-section plan came back as one claim, and
+at plan sizes the same text yields three, with each step keeping its own
+entities.
+
+Re-sending is free — an unchanged digest is a no-op.
+
+### Images
+
+Arteries does not look at pictures, deliberately. Whoever put the image in front
+of you has already seen it, and their description beats what a small local model
+would produce from the same pixels. So the description is an input:
+
+```bash
+art ingest diagram.png --describe "Architecture: capillaries feeds arteries, which feeds heart. Arrows one way."
+```
+
+The description is what gets embedded, compiled, and graphed; the image is
+recorded by path and digest so a claim can point back at it. Ask for an image
+without one and arteries says so rather than storing a filename nobody can
+search.
+
+**Images inside a document are handled for you.** A plan that says
+`![architecture](arch.png)` would otherwise ingest the literal string `![arch]`
+and lose the picture. Instead the reference is replaced inline with a
+description before chunking, so the diagram's content lands in the same chunk as
+the prose around it:
+
+```
+Before:  The current shape is shown below.  ![architecture](arch.png)
+After:   The current shape is shown below.  [Image: architecture] Three boxes
+         left to right: capillaries, arteries, heart. Arrows point one way…
+```
+
+These go to a **frontier model** (`claude-opus-5` by default), not the local one.
+Embedded images are rare — a handful per plan — and unlike a chat turn the
+description becomes permanent memory, so accuracy is worth more here than
+keeping the call on-box. Credentials resolve the usual way: `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, or an `ant auth login` profile. Set
+`ARTERIES_FRONTIER_VISION_MODEL=""` to opt out.
+
+With no credentials and no local endpoint the document still ingests and the
+text reads `[Image not described: arch.png]` — a reader should know a picture
+was there. Remote URLs are skipped; ingestion never fetches from the network.
+
+Set `ARTERIES_VISION_URL` to an endpoint that accepts images and `--describe`
+becomes optional — descriptions are generated at ingest instead. `llama-server`
+answers only when started with `--mmproj`; without it, `vision_available()` is
+false and the supplied-description path is the one that runs.
+
+`art identity` sends nothing. It prints the environment an orchestrator should
+spawn a child with, so the child's memories attribute to the parent.
+
+## The knowledge graph
+
+Compiling writes structure and facts together, so nothing reaches the graph that
+did not survive promotion.
+
+```bash
+art graph stats                  # edge and entity counts
+art graph entities --kind dependency
+art graph why <memory-id>        # what this fact contradicts, refines, came from
+```
+
+Edges: `derived_from` (provenance back to the turns), `mentions` (to entities),
+`supports` / `refines` / `contradicts` / `depends_on` (between claims),
+`supersedes` (carrying the reason the compiler gives), and `chose` / `over` /
+`because` for decisions.
+
+It is one Postgres table and recursive CTEs — no graph database. Measured at the
+three-year projection (80k claims, 320k edges): one hop 0.15 ms, two 0.32 ms,
+three 2.1 ms.
+
+## Ontology grounding
+
+Extracted names are grounded against a vocabulary so that "vector store",
+"vector database", and "the pgvector store" collapse to one node instead of
+fragmenting the graph into synonyms.
+
+```bash
+uv run art ontology load prov-o.ttl --source prov-o
+uv run art ontology load skos.rdf --source skos
+uv run art ontology stats
+uv run art ontology resolve "was derived from"
+```
+
+Any format rdflib reads works: Turtle, RDF/XML, N-Triples, JSON-LD. Reloading
+the same `--source` replaces its terms, so editing a `.ttl` and re-running is
+the expected loop.
+
+PROV-O is the recommended starting vocabulary. `wasDerivedFrom`,
+`wasRevisionOf`, `wasGeneratedBy`, and `wasInvalidatedBy` map onto lineage
+arteries already tracks in `parent_ids`, `superseded_by`, and the compile run
+that produced a fact. SKOS covers the domain taxonomy.
+
+A name the ontology does not recognise is **kept with `ontology_valid = false`**,
+never dropped — a vocabulary you are still growing must not eat the facts it
+does not cover yet. A wrong canonicalization asserts a false identity; a miss
+costs nothing, so the matching cutoff is tuned to prefer the miss.
 
 ## Command entry points
 
@@ -141,11 +358,11 @@ cd /home/bao-tn/Coding/Projects/arteries
 bash scripts/art.sh setup --list
 ```
 
-The wrapper sets `PYTHONPATH` for arteries and capillaries. It also remembers the directory you called it from, so setup commands can target the current project without `--cwd`.
+The wrapper resolves the interpreter through `scripts/_env.sh`. It also remembers the directory you called it from, so setup commands can target the current project without `--cwd`.
 
 ## Set up a project
 
-Go to the project you want the agent to work in, then run the setup command for each CLI you use there. Setup is additive: installing Cursor later does not remove an existing Codex, Claude, Pi, OpenCode, or Hermes adapter.
+Go to the project you want the agent to work in, then run the setup command for each CLI you use there. Setup is additive: installing Cursor later does not remove an existing Codex, Claude, Pi, OpenCode, Hermes, or generic adapter. For a CLI with no adapter of its own, use `generic` (below).
 
 List supported adapters:
 
@@ -163,6 +380,100 @@ bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add opencode
 bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add cursor
 bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add hermes
 ```
+
+### Adding a CLI that has no adapter
+
+`generic` is the adapter for everything else — a new model runner, an editor
+plugin, a shell script, anything that can run a command and read its stdout. It
+assumes no vendor hook format, so nothing has to be written for a CLI to be
+supported.
+
+```bash
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add generic
+```
+
+That writes `.arteries/bin/art`, a wrapper carrying `PYTHONPATH` and project
+identity so the caller needs no environment of its own. Point the host at two
+commands:
+
+```bash
+# session start — prints evergreen memory as context
+/abs/path/to/repo/.arteries/bin/art activate --cli <name>
+
+# each turn — prompt on argv or stdin, retrieval on stdout
+/abs/path/to/repo/.arteries/bin/art observe --cli <name> "<user prompt>"
+echo "<user prompt>" | /abs/path/to/repo/.arteries/bin/art observe --cli <name>
+```
+
+`observe` prints nothing when the retrieval gate abstains, so it is safe to
+splice into a prompt path unconditionally.
+
+Pick any `--cli <name>` you like. It is a free-form attribution label; unknown
+names fall back to a generic capability profile rather than failing. The label
+is recorded on the *run*, so it takes effect at `activate` — a later `observe`
+joins whatever run that CLI already has open. Runs are keyed per CLI, so two
+CLIs working the same repo never land on each other's run.
+
+Token counts are read automatically only from Claude and Codex transcripts.
+Any other host should declare what it already knows, or its turns price at zero
+on the cost panel:
+
+```bash
+.arteries/bin/art observe --cli <name> --tokens-in 1200 --tokens-out 340 "<prompt>"
+```
+
+Equivalently, via env: `ARTERIES_USAGE_TOKENS_IN`, `ARTERIES_USAGE_TOKENS_OUT`,
+`ARTERIES_USAGE_CACHE_READ`, `ARTERIES_USAGE_CACHE_WRITE_5M`,
+`ARTERIES_USAGE_CACHE_WRITE_1H`. Values that are missing, non-numeric, or
+negative are dropped rather than coerced — a garbled count is worse than none,
+because it prices as though it were measured.
+
+Send `ARTERIES_USAGE_MODEL` too. Counts alone cannot be priced: Opus and Haiku
+on the same CLI differ by more than an order of magnitude, so a rate card needs
+the model, not just the vendor. Claude and Codex transcripts are read for it
+automatically (Codex only names its model in `thread_settings_applied`, and can
+switch mid-session). A model with no counts is ignored — it is not a
+measurement.
+
+Every `turn.observed` also carries `usage_source`, which says how the number was
+arrived at:
+
+| `usage_source` | Meaning |
+| --- | --- |
+| `reported` | the host declared its own counts |
+| `claude_transcript` / `codex_rollout` | parsed from the session transcript |
+| `unavailable` | **no way to measure this turn** — no transcript, no declaration |
+| absent | measured fine; this turn simply made no API call |
+
+`unavailable` is the one to watch. Without it, a host with no adapter is
+indistinguishable on the cost panel from a host that genuinely cost nothing, and
+the gap stays invisible indefinitely.
+
+Compaction and subagent events are not covered by `generic`. They are genuinely
+host-specific; there is nothing to hook if the host does not emit them. A CLI
+that does emit them deserves its own adapter in `setup_cli.py`.
+
+### Keeping every repo current
+
+Generated hook commands carry absolute paths, so a repo keeps whatever the
+installer emitted the day it ran. After changing anything in `setup_cli.py`,
+re-emit across every repo at once:
+
+```bash
+# preview: list each repo and the providers detected in it
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup sync ~/Coding/Projects --check
+
+# reinstall and verify every provider already wired into every repo
+bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup sync ~/Coding/Projects
+```
+
+`sync` detects providers by artifact, not by what `.arteries/config.json`
+claims — that field records what setup was *told*, and it drifts. It cannot go
+through `check` either: a repo installed by an older version fails its own
+check, and repairing exactly those repos is the point.
+
+Exit status is non-zero if any provider fails verification, so this is safe to
+run from CI or a git hook.
 
 The older shorthand still works:
 
@@ -197,8 +508,13 @@ bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add cursor --pro
 Smoke test the shared runtime:
 
 ```bash
-bash .arteries/smoke.sh "arteries setup test"
+bash .arteries/smoke.sh "arteries setup test"           # dry run
+bash .arteries/smoke.sh --write "arteries setup test"   # persist what it extracts
 ```
+
+The default is a dry run (`ARTERIES_EPHEMERAL=discard`): every code path runs,
+nothing reaches storage. It used to write for real, and a noticeable share of
+one project's stored facts turned out to be this script talking to itself.
 
 ## What setup installs
 
@@ -276,17 +592,106 @@ On compaction, arteries builds a continuity packet with:
 
 Arteries never fabricates missing assistant answers. If a CLI only exposes user prompts, the packet marks assistant text as not captured.
 
+## Scope: which repos share a memory
+
+A **scope** is a set of repos that read each other's persistent memory. Five
+harness repos behave as one brain; a standalone project keeps its own.
+
+```bash
+art scope add harness ~/Coding/Projects/{arteries,capillaries,heart,plexus,marrow}
+art scope show          # which group covers this directory
+art scope move marrow standalone
+```
+
+Arteries is **opt-in**: a directory that resolves to no scope is not observed at
+all — no ephemeral, no telemetry, no run log. `art setup` registers the repo it
+runs in, so setting a repo up is what opts it in.
+
+Tracking resolves by longest matching repo path, so subdirectories inherit and
+an untracked project stays untracked everywhere beneath it.
+
 ## Memory tiers
 
-Arteries stores memory in the `arteries` schema inside the shared `capillaries` database.
+Two tiers and a graph.
 
-Ephemeral memory is per project and per agent process. It is high churn. It captures recent observations before compilation.
+| Tier | Scope | Lifecycle |
+| --- | --- | --- |
+| **ephemeral** | one agent process | one row per turn, whole; exits by being compiled |
+| **persistent** | the scope group | distilled by the compile pass; tombstoned, never deleted |
+| **graph** | entities scoped to the group | written by the same pass that writes persistent |
 
-Persistent memory is per project. It stores compiled project facts, preferences, and decisions. Each persistent memory is embedded at compile time (via the embedding server at port 8003) and retrieved by vector similarity against the current message, so only relevant memories surface in the MemoryFrame.
+Evergreen is gone. It held zero rows for its entire existence, and the frame's
+third slot is now `scope` — context from sibling repos rather than a permanence
+claim nothing enforced.
 
-Evergreen memory is global. It stores cross-project facts you have explicitly imported or promoted.
+Promotion is one detached LLM pass per turn. It compares each candidate against
+**every** live persistent row in scope through the vector index: at or above
+0.93 cosine a fact is refused mechanically, and the 0.75–0.93 band is what the
+model sees so it can judge refinement against contradiction.
 
-Recent retrievals are also stored, so the frame can tell capillaries which prompts have already surfaced.
+
+### Controlling what gets promoted
+
+`ARTERIES_EPHEMERAL` decides how far up the tiers an observation travels:
+
+| value | ephemeral | persistent | use it for |
+|---|---|---|---|
+| `compile` (default) | written | promoted in the background | project work you want remembered without asking |
+| `keep` | written | never, on its own | interactive sessions |
+| `discard` | in-process buffer only | never | throwaway or isolated runs |
+
+`keep` exists because compilation does not distinguish a discovery from a
+description of one. Every assistant reply gets mined alongside your prompt, and
+in a long working session most replies are narration — six days of interactive
+work in one project produced 178 permanent memories, the bulk of them restating
+what had just been done, all at ~0.94 confidence. They then compete with real
+project facts in relevance-filtered retrieval.
+
+Under `keep`, nothing about recording changes. Turns still land in
+`agent_events`, assistant replies are still stored with a 2000-character
+preview, `art search` still finds them, and ephemeral still feeds the current
+`MemoryFrame`. Only the automatic promotion stops. Two deliberate paths up
+remain:
+
+```bash
+art remember add "the codex JS hook swallows every error and exits 0"
+art remember add "I prefer stdlib-first implementations" --also-evergreen
+art compile        # promote this agent's ephemeral now
+```
+
+Enable it per session, or in the hook command for a repo whose sessions are
+mostly conversational:
+
+```bash
+ARTERIES_EPHEMERAL=keep art observe --cli <name> "<prompt>"
+```
+
+An unrecognised value falls back to `compile`, so a typo cannot silently turn
+memory off. The `readonly` and `clean` presets in `ARTERIES_MEMORY` still map to
+`discard`; `keep` is not part of a preset because it is a per-session judgement
+about the work, not an isolation level.
+
+### Pruning what already accumulated
+
+`keep` stops the growth; it does nothing about a backlog. Every frame build now
+bumps `access_count` on the persistent rows it surfaces, which gives the backlog
+a signal it never had — retrieval stays relevance-ranked and does not read the
+counter, so its only job is to make disuse visible:
+
+```sql
+SELECT count(*) FROM arteries.persistent
+WHERE project_id = 'plexus' AND access_count = 0 AND source_ts < now() - interval '30 days';
+```
+
+A memory that has not surfaced once in a month of real work is not earning its
+place in retrieval. Rows written by `art remember` carry `scope = 'user'`;
+exclude those, since a fact you promoted deliberately is not junk just because
+it has not come up yet.
+
+The counter starts at zero for every existing row, so it only means anything
+after a few weeks of use. Before then, `access_count = 0` means "not yet
+measured", not "never useful" — the same trap `usage_source` exists to avoid on
+the cost side.
 
 ## Relevance-filtered retrieval
 
@@ -305,7 +710,7 @@ If the embedding server is down or no persistent memories have embeddings yet, r
 Backfill existing persistent memories:
 
 ```bash
-art backfill-embeddings --project career-ops
+art doctor --fix --project career-ops
 ```
 
 ## Subagent memory isolation
@@ -492,11 +897,11 @@ bash scripts/art.sh evergreen import --review evergreen_review.md --write
 Manage evergreen memories directly:
 
 ```bash
-art evergreen list
-art evergreen list --json
-art evergreen add "User prefers pytest" --domains "technical,testing" --confidence 0.9
-art evergreen edit <id-prefix> --fact "Updated fact" --domains "technical"
-art evergreen rm <id-prefix>
+art docs list
+art docs list --json
+art docs add "User prefers pytest" --domains "technical,testing" --confidence 0.9
+art docs edit <id-prefix> --fact "Updated fact" --domains "technical"
+art docs rm <id-prefix>
 ```
 
 ID prefixes are matched uniquely — pass enough characters to be unambiguous.
@@ -506,14 +911,19 @@ ID prefixes are matched uniquely — pass enough characters to be unambiguous.
 Run local tests without Postgres or model services:
 
 ```bash
-bash scripts/test.sh
+bash scripts/test.sh              # unittest, via scripts/_env.sh
+uv run pytest tests/ -q
 ```
 
-Run live memory-tier tests against Postgres:
+Run live tests against Postgres:
 
 ```bash
-PYTHONPATH=src ARTERIES_LIVE_TESTS=1 python3 -m unittest tests.test_live_memory_tiers -v
+ARTERIES_LIVE_TESTS=1 uv run pytest tests/ -q
 ```
+
+The live set covers the memory tiers and the ontology loader. The loader test
+needs the `[ontology]` extra; without it that one test skips rather than
+failing.
 
 The live tests create temporary records and clean up after themselves. The persistent compile path mocks the external LLM call, so it only needs Postgres.
 
@@ -562,7 +972,7 @@ If Postgres is down, arteries still writes fallback JSONL under `.arteries/runs/
 These scripts are safe entry points to approve in Codex instead of approving broad `bash` access:
 
 ```bash
-bash scripts/setup-db.sh
+art setup <provider>   # applies the schema too
 bash scripts/test.sh
 bash scripts/live-test.sh
 bash scripts/eval.sh "thanks"

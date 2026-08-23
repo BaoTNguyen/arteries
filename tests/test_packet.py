@@ -12,16 +12,15 @@ class DedupeTests(unittest.TestCase):
         return packet.MemoryItem(tier=tier, text=text, confidence=1.0, domains=[])
 
     def test_same_fact_across_tiers_kept_once_first_tier_wins(self):
-        # remember --also-evergreen writes the same fact to persistent + evergreen
         items = [
             self._item("persistent", "Prefer scoped implementations."),
-            self._item("evergreen", "prefer scoped implementations."),  # case/space dup
+            self._item("persistent", "prefer scoped implementations."),  # case/space dup
         ]
         out = packet._dedupe_memories(items, previous_summary="")
         self.assertEqual([i.tier for i in out], ["persistent"])
 
     def test_fact_already_in_previous_summary_is_dropped(self):
-        items = [self._item("evergreen", "User prefers tabs over spaces.")]
+        items = [self._item("persistent", "User prefers tabs over spaces.")]
         out = packet._dedupe_memories(
             items, previous_summary=packet._norm("Earlier: user prefers tabs over spaces, noted."))
         self.assertEqual(out, [])
@@ -44,19 +43,13 @@ class PacketTests(unittest.TestCase):
             "fact": "Project integrates coding CLIs through hooks.",
             "domains": ["technical"],
             "confidence": 0.9,
-        }])), patch.object(packet.storage, "get_evergreen", return_value=[{
-            "id": "g1",
-            "fact": "Prefer scoped implementations.",
-            "domains": ["preference"],
-            "confidence": 1.0,
-        }]):
+        }])):
             text = packet.build_packet("manual compact", budget=4000)
 
         self.assertIn("## Current Context", text)
         self.assertIn("Capabilities:", text)
         self.assertIn("Recent user wants Pi first.", text)
         self.assertIn("Project integrates coding CLIs through hooks.", text)
-        self.assertIn("Prefer scoped implementations.", text)
         self.assertIn("Treat this packet as continuity context", text)
 
 
@@ -72,8 +65,7 @@ class PacketTests(unittest.TestCase):
             ]
         }
 
-        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
-             patch.object(packet.storage, "get_evergreen", return_value=[]):
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])):
             text = packet.build_packet("auto compact", event=event, budget=8000)
 
         self.assertIn("## Recent Conversation", text)
@@ -91,7 +83,6 @@ class PacketTests(unittest.TestCase):
         }]
 
         with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
-             patch.object(packet.storage, "get_evergreen", return_value=[]), \
              patch.object(packet.runlog, "recent_events", return_value=events):
             text = packet.build_packet("manual compact", budget=4000)
 
@@ -115,7 +106,6 @@ class PacketTests(unittest.TestCase):
         ]
 
         with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
-             patch.object(packet.storage, "get_evergreen", return_value=[]), \
              patch.object(packet.runlog, "recent_events", return_value=events):
             text = packet.build_packet("manual compact", budget=4000)
 
@@ -136,3 +126,28 @@ class PacketTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FloorCalibrationTests(unittest.TestCase):
+    """The floor has to sit above the model's noise band.
+
+    Measured over 237 real plexus queries against 115 claims: top-hit
+    similarity runs p25 0.50, p50 0.55, p90 0.66. Qwen3-Embedding-0.6B puts
+    unrelated technical prose at roughly 0.45-0.55, so the old 0.45 admitted the
+    25th percentile of everything -- which is how a question about cost tracking
+    returned claims about retrieval ownership.
+    """
+
+    def test_floor_sits_above_the_noise_band(self):
+        self.assertGreaterEqual(packet.MEMORY_SIMILARITY_FLOOR, 0.55)
+
+    def test_a_row_below_the_floor_is_refused(self):
+        self.assertIsNone(packet._score("persistent", {"similarity": 0.50, "confidence": 1.0}))
+
+    def test_a_row_above_the_floor_is_admitted(self):
+        self.assertIsNotNone(packet._score("persistent", {"similarity": 0.70, "confidence": 1.0}))
+
+    def test_rows_without_a_similarity_are_judged_by_another_policy(self):
+        """Ephemeral is selected by session and recency, not by distance, so it
+        has no similarity to be measured against this floor."""
+        self.assertIsNotNone(packet._score("ephemeral", {"confidence": 1.0}))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -63,9 +65,31 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+logger = logging.getLogger(__name__)
+
+
 def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = False) -> int:
     """Store an assistant response as ephemeral and log the capture events."""
-    stored = store_assistant_response(text)
+    # The user turn this replies to, so restatements of the question can be
+    # dropped. Best effort: no transcript means no reference and nothing is cut.
+    # `conversation` is not on this branch -- it is untracked work in the main
+    # checkout -- so this import fails here and restatement filtering silently
+    # never runs. Say so once rather than pretending there was no transcript,
+    # which is what the bare handler did.
+    user_turn = ""
+    try:
+        from arteries.conversation import recent_turns
+    except ImportError:
+        logger.debug("arteries.conversation absent; assistant restatement "
+                     "filtering is inactive on this branch")
+    else:
+        try:
+            prior = recent_turns(limit=1)
+            user_turn = prior[-1] if prior else ""
+        except Exception as exc:
+            from arteries import degrade
+            degrade.note(exc, "recent turn lookup")
+    stored = store_assistant_response(text, user_turn)
     preview = text[:2000]
     payload = {
         "assistant_preview": preview,
