@@ -36,7 +36,7 @@ def get_ephemeral(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, fact, domains, source_ts, status
+            SELECT id, fact, domains, source_ts, status, source
             FROM arteries.ephemeral
             WHERE project_id = %s
               AND agent_process_id = %s
