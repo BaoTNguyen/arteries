@@ -161,41 +161,6 @@ def expand(conn, project_id: str, seed_ids: list[str], *, hops: int = 1,
     return sorted(rows, key=lambda r: float(r["score"]), reverse=True)
 
 
-def claims_naming(conn, project_id: str, scope_id: str, names: list[str],
-                  limit: int = 8) -> list[dict[str, Any]]:
-    """Claims that mention an entity the query named.
-
-    The route cosine cannot take. A bare identifier is a short, low-signal
-    string to embed -- "reranker.py" shares almost nothing with the prose of a
-    claim about it -- but it is an exact key into the entity table. Matching is
-    on the canonical name and the raw name the extractor first saw, so a query
-    finds an entity whether or not the ontology renamed it.
-    """
-    if not names:
-        return []
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            SCOPE_CTE + """
-            SELECT DISTINCT ON (p.id)
-                   p.id, p.fact, p.domains, p.confidence, p.kind,
-                   e.name AS via
-            FROM arteries.entities e
-            JOIN arteries.memory_edges m
-              ON m.dst_kind = 'entity' AND m.dst_id = e.id::text
-             AND m.rel = 'mentions' AND m.valid_until IS NULL
-            JOIN arteries.persistent p ON p.id = m.src_id::uuid
-            WHERE e.scope_id = %(scope)s
-              AND (lower(e.name) = ANY(%(names)s) OR lower(e.raw_name) = ANY(%(names)s))
-              AND p.project_id IN (SELECT project_id FROM scope)
-              AND p.valid_until IS NULL
-            ORDER BY p.id, p.source_ts DESC
-            LIMIT %(limit)s
-            """,
-            {"project": project_id, "scope": scope_id, "names": names, "limit": limit},
-        )
-        return [dict(r) for r in cur.fetchall()]
-
-
 def stats(project_id: str, db_config: dict | None = None) -> dict[str, Any]:
     from arteries.config import DB_CONFIG
     conn = psycopg2.connect(**(db_config or DB_CONFIG))
