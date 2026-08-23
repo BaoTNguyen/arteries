@@ -91,32 +91,50 @@ def _rank(target: str, rows: list[dict]) -> int | None:
 
 
 def run(cases: list[dict], project: str, window: int) -> dict:
+    """Cosine alone against the routed path that actually runs in production.
+
+    The second arm calls `_select_persistent`, not `_expand` -- measuring a code
+    path the system does not take is how a benchmark quietly stops describing
+    anything.
+    """
     from arteries import memory_select, storage
     from arteries.embed import embed_text_sync
 
     ctx = memory_select.context_from_env()
-    cosine_ranks, expanded_ranks, recovered = [], [], []
+    cosine_ranks, routed_ranks, recovered = [], [], []
+    strategies: dict[str, int] = {}
 
     for case in cases:
         vec = embed_text_sync(case["query"], is_query=True)
         seeds = storage.get_persistent_by_relevance(project, vec, limit=window, threshold=0.0)
-        added = memory_select._expand(seeds, ctx, limit=8)
+
+        from arteries import route as router
+        plan = router.choose(case["query"], seeds)
+        strategies[plan.strategy] = strategies.get(plan.strategy, 0) + 1
+
+        if plan.strategy == "cosine":
+            routed = seeds
+        elif plan.strategy == "cosine+entity":
+            routed = seeds + memory_select._by_entity(plan.entities, ctx)
+        else:
+            routed = seeds + memory_select._expand(seeds[:5], ctx, limit=8)
+
         r_cos = _rank(case["id"], seeds)
-        r_exp = _rank(case["id"], seeds + added)
+        r_routed = _rank(case["id"], routed)
         cosine_ranks.append(r_cos)
-        expanded_ranks.append(r_exp)
-        if r_cos is None and r_exp is not None:
-            recovered.append(case["query"])
+        routed_ranks.append(r_routed)
+        if r_cos is None and r_routed is not None:
+            recovered.append({"query": case["query"], "via": plan.strategy,
+                              "rank": r_routed})
 
     def score(ranks: list[int | None]) -> dict:
         n = len(ranks) or 1
-        return {
-            "found": sum(1 for r in ranks if r),
-            "mrr": round(sum(1 / r for r in ranks if r) / n, 3),
-        }
+        return {"found": sum(1 for r in ranks if r),
+                "mrr": round(sum(1 / r for r in ranks if r) / n, 3)}
 
     return {"window": window, "n": len(cases), "cosine": score(cosine_ranks),
-            "expanded": score(expanded_ranks), "recovered": recovered}
+            "routed": score(routed_ranks), "recovered": recovered,
+            "strategies": strategies}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,15 +177,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(f"\n{len(cases)} queries, target claim known\n")
-    print(f"  {'window':>6}  {'cosine':>12}  {'+expansion':>12}   recovered")
+    print(f"  {'window':>6}  {'cosine':>12}  {'routed':>12}   recovered")
     for r in results:
-        c, e = r["cosine"], r["expanded"]
+        c, e = r["cosine"], r["routed"]
         print(f"  {r['window']:>6}  {c['found']:>3}/{r['n']} ({c['mrr']:.2f})"
               f"  {e['found']:>3}/{r['n']} ({e['mrr']:.2f})   "
               f"{len(r['recovered'])}")
+    for rec in results[0]["recovered"][:4]:
+        print(f"          + via {rec['via']:<18} rank {rec['rank']}  {rec['query'][:44]}")
+    print(f"\n  routes chosen: {results[-1]['strategies']}")
     widest = max(results, key=lambda r: r["window"])
-    if widest["expanded"]["found"] == widest["cosine"]["found"]:
-        print("\n  At the widest window expansion changes nothing -- cosine is not "
+    if widest["routed"]["found"] == widest["cosine"]["found"]:
+        print("  At the widest window routing changes nothing -- cosine is not "
               "missing\n  anything yet. Re-run as the corpus grows.")
     return 0
 
