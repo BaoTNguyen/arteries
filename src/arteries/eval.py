@@ -32,7 +32,7 @@ from arteries.config import (
     RETRIEVAL_MIN_CONFIDENCE,
 )
 from arteries.assistant import capture_response, read_last_assistant
-from arteries import scope, storage
+from arteries import degrade, scope, storage
 from arteries.embed import embed_text_sync
 from arteries.extract import extract_and_store
 
@@ -83,10 +83,10 @@ async def evaluate(message: str) -> str | None:
                 PROJECT_ID, AGENT_PROCESS_ID, msg_vec)
             runlog.log_event("memory.coverage.measured", "arteries",
                              {"coverage": round(coverage, 3)}, turn_id=turn_id)
-        except Exception:
-            # Telemetry must never fail a turn, but a swallowed NameError here
-            # is how this block shipped broken and green the first time.
-            logger.debug("coverage measurement failed", exc_info=True)
+        except Exception as exc:
+            # This block shipped broken and green the first time -- undefined
+            # names inside a bare handler. degrade.note is why it would not now.
+            degrade.note(exc, "coverage measurement", turn_id=turn_id)
 
     try:
         extracted = extract_and_store(message, embedding=msg_vec)

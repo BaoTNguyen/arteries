@@ -72,8 +72,9 @@ def _query(sql: str, params: tuple | dict = (), *, db_config: dict | None = None
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
-    except Exception:
-        logger.debug("scope lookup unavailable; treating as unconfigured", exc_info=True)
+    except Exception as exc:
+        from arteries import degrade
+        degrade.note(exc, "scope lookup")
         return []
     finally:
         if conn is not None:

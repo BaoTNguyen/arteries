@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import memory_select, runlog
+from arteries import degrade, memory_select, runlog
 from arteries.cli_caps import get_capabilities
 from arteries.embed import embed_text_sync
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
@@ -125,7 +125,7 @@ def _load_memories(message: str, event: dict[str, Any] | None = None) -> list[Me
     except Exception as exc:
         items.append(MemoryItem(
             tier="status",
-            text=f"Memory storage was unavailable while building this packet: {exc.__class__.__name__}.",
+            text=f"Memory {degrade.note(exc, 'lookup')} while building this packet.",
             confidence=1.0,
             domains=[],
         ))

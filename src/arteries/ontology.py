@@ -220,8 +220,9 @@ def _lookup(db_config: dict | None = None) -> dict[str, tuple[str, str, str]]:
                         continue
                     table[key] = (uri, kind, label)
             _cache = table
-    except Exception:
-        logger.debug("ontology lookup unavailable; grounding disabled", exc_info=True)
+    except Exception as exc:
+        from arteries import degrade
+        degrade.note(exc, "ontology lookup")
         _cache = {}
     finally:
         if conn is not None:

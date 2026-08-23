@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from arteries import actionlog, route, storage
+from arteries import actionlog, degrade, route, storage
 from arteries.cli_caps import CliCapabilities, get_capabilities
 from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PERSISTENT_READ, PROJECT_ID, RELEVANCE_THRESHOLD
 from arteries.embed import embed_text_sync
@@ -112,8 +112,8 @@ def _expand(seeds: list[dict], context: AgentContext, limit: int) -> list[dict]:
             )
         finally:
             conn.close()
-    except Exception:
-        logger.debug("graph expansion unavailable", exc_info=True)
+    except Exception as exc:
+        degrade.note(exc, "graph expansion")
         return []
 
     seen = {str(s["id"]) for s in seeds}
