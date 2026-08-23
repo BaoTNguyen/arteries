@@ -113,10 +113,14 @@ class ExpandShapeTests(unittest.TestCase):
 
 
 class SelectionTests(unittest.TestCase):
-    def test_expansion_only_runs_when_cosine_came_back_thin(self):
+    def test_thinness_is_measured_by_quality_not_row_count(self):
+        """RELEVANCE_THRESHOLD is 0.0 pending calibration, so the query always
+        returns its full limit. A count-based gate never fires -- which is what
+        happened the first time this was wired."""
         from arteries import memory_select
-        self.assertGreater(memory_select.EXPAND_WHEN_FEWER_THAN, 0)
-        self.assertLess(memory_select.EXPAND_WHEN_TOP_BELOW, 1.0)
+        self.assertGreater(memory_select.STRONG_SIMILARITY, 0.5)
+        self.assertGreater(memory_select.EXPAND_WHEN_STRONG_FEWER_THAN, 0)
+        self.assertFalse(hasattr(memory_select, "EXPAND_WHEN_FEWER_THAN"))
 
     def test_expansion_failure_is_survivable(self):
         from unittest.mock import patch
