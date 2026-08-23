@@ -243,7 +243,7 @@ def import_review(review_path: Path, write: bool = False) -> dict[str, Any]:
                 fact=block["fact"],
                 domains=block["domains"] or _infer_domains(block["fact"]),
                 confidence=block["confidence"],
-                origin="reviewed",
+                scope="reviewed",
                 embedding=vectors.get(block["memory_id"]),
                 source_meta=source_meta,
             ))
