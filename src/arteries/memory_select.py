@@ -54,6 +54,11 @@ def select_for_frame(
     return ephemerals, persistents
 
 
+def select_ephemeral(context: AgentContext | None = None) -> list[dict]:
+    """Return the current process's eligible ephemeral context."""
+    return _select_ephemeral(context or context_from_env())
+
+
 def _select_ephemeral(context: AgentContext) -> list[dict]:
     if EPHEMERAL_MODE == "discard":
         return get_ephemeral_buffer()[-20:]
