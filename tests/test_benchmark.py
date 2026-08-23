@@ -44,3 +44,27 @@ class ScoringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContextConsistencyTests(unittest.TestCase):
+    """The benchmark's retrieval context must name the project it is measuring.
+
+    It did not, once: `context_from_env()` reads ARTERIES_PROJECT, which nobody
+    running `art benchmark` by hand has set, so the context resolved to "default"
+    while queries ran against the cwd-resolved project. The scope CTE found no
+    members, every expansion returned empty, and three consecutive reports said
+    expansion recovered nothing. It was never running.
+    """
+
+    def test_run_builds_its_context_from_the_measured_project(self):
+        import inspect
+        src = inspect.getsource(benchmark.run)
+        self.assertIn("project_id=project", src)
+        # `env_ctx = ...` is fine; what must not happen is using it directly
+        self.assertNotIn("\n    ctx = memory_select.context_from_env()", src)
+
+    def test_run_reports_what_expansion_costs(self):
+        import inspect
+        src = inspect.getsource(benchmark.run)
+        for field in ("claims_added", "useful_added", "noise_ratio", "displaced"):
+            self.assertIn(field, src)

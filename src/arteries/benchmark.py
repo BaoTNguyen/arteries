@@ -91,50 +91,80 @@ def _rank(target: str, rows: list[dict]) -> int | None:
 
 
 def run(cases: list[dict], project: str, window: int) -> dict:
-    """Cosine alone against the routed path that actually runs in production.
+    """Three arms on identical queries.
 
-    The second arm calls `_select_persistent`, not `_expand` -- measuring a code
-    path the system does not take is how a benchmark quietly stops describing
-    anything.
+    `cosine` is persistent retrieval alone. `expansion` forces the graph walk on
+    for every query regardless of the gate -- that is the A/B of the mechanism
+    itself, and the gate would otherwise hide it by rarely firing. `routed` is
+    what production does, gated.
+
+    Also reports what expansion costs: claims added per query, and how many of
+    those were the target versus filler occupying context budget.
     """
-    from arteries import memory_select, storage
+    from arteries import memory_select, route as router, storage
     from arteries.embed import embed_text_sync
 
-    ctx = memory_select.context_from_env()
-    cosine_ranks, routed_ranks, recovered = [], [], []
+    # context_from_env() reads ARTERIES_PROJECT, which a human running `art
+    # benchmark` has not set -- so it resolved to "default" while the queries ran
+    # against the cwd-resolved project. The scope CTE then found no members and
+    # every expansion returned empty. Build the context from the same project the
+    # rest of the run uses.
+    env_ctx = memory_select.context_from_env()
+    ctx = memory_select.AgentContext(
+        cli=env_ctx.cli, project_id=project, agent_id=env_ctx.agent_id,
+        parent_agent_id=env_ctx.parent_agent_id, agent_role=env_ctx.agent_role,
+        event=env_ctx.event, capabilities=env_ctx.capabilities,
+    )
+    arms: dict[str, list] = {"cosine": [], "expansion": [], "routed": []}
+    recovered, lost, added_counts = [], [], []
     strategies: dict[str, int] = {}
 
     for case in cases:
         vec = embed_text_sync(case["query"], is_query=True)
         seeds = storage.get_persistent_by_relevance(project, vec, limit=window, threshold=0.0)
 
-        from arteries import route as router
+        forced = memory_select._expand(seeds[:5], ctx, limit=8)
+        added_counts.append(len(forced))
+
         plan = router.choose(case["query"], seeds)
         strategies[plan.strategy] = strategies.get(plan.strategy, 0) + 1
-
         if plan.strategy == "cosine":
             routed = seeds
         elif plan.strategy == "cosine+entity":
             routed = seeds + memory_select._by_entity(plan.entities, ctx)
         else:
-            routed = seeds + memory_select._expand(seeds[:5], ctx, limit=8)
+            routed = seeds + forced
 
-        r_cos = _rank(case["id"], seeds)
-        r_routed = _rank(case["id"], routed)
-        cosine_ranks.append(r_cos)
-        routed_ranks.append(r_routed)
-        if r_cos is None and r_routed is not None:
-            recovered.append({"query": case["query"], "via": plan.strategy,
-                              "rank": r_routed})
+        r = {"cosine": _rank(case["id"], seeds),
+             "expansion": _rank(case["id"], seeds + forced),
+             "routed": _rank(case["id"], routed)}
+        for k, v in r.items():
+            arms[k].append(v)
+        if r["cosine"] is None and r["expansion"] is not None:
+            recovered.append({"query": case["query"], "rank": r["expansion"]})
+        # Expansion appends below the seeds, so it cannot displace a hit. If this
+        # ever fires, the ordering contract broke.
+        if r["cosine"] is not None and r["expansion"] is not None \
+                and r["expansion"] > r["cosine"]:
+            lost.append(case["query"])
 
     def score(ranks: list[int | None]) -> dict:
         n = len(ranks) or 1
         return {"found": sum(1 for r in ranks if r),
                 "mrr": round(sum(1 / r for r in ranks if r) / n, 3)}
 
-    return {"window": window, "n": len(cases), "cosine": score(cosine_ranks),
-            "routed": score(routed_ranks), "recovered": recovered,
-            "strategies": strategies}
+    total_added = sum(added_counts)
+    return {
+        "window": window, "n": len(cases),
+        "cosine": score(arms["cosine"]),
+        "expansion": score(arms["expansion"]),
+        "routed": score(arms["routed"]),
+        "recovered": recovered, "displaced": lost,
+        "claims_added": total_added,
+        "useful_added": len(recovered),
+        "noise_ratio": round(1 - (len(recovered) / total_added), 3) if total_added else None,
+        "strategies": strategies,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,19 +207,32 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(f"\n{len(cases)} queries, target claim known\n")
-    print(f"  {'window':>6}  {'cosine':>12}  {'routed':>12}   recovered")
+    print(f"  {'window':>6} {'cosine':>13} {'+expansion':>13} {'routed':>13}"
+          f" {'added':>7} {'useful':>7}")
     for r in results:
-        c, e = r["cosine"], r["routed"]
-        print(f"  {r['window']:>6}  {c['found']:>3}/{r['n']} ({c['mrr']:.2f})"
-              f"  {e['found']:>3}/{r['n']} ({e['mrr']:.2f})   "
-              f"{len(r['recovered'])}")
-    for rec in results[0]["recovered"][:4]:
-        print(f"          + via {rec['via']:<18} rank {rec['rank']}  {rec['query'][:44]}")
-    print(f"\n  routes chosen: {results[-1]['strategies']}")
+        c, e, t = r["cosine"], r["expansion"], r["routed"]
+        print(f"  {r['window']:>6} {c['found']:>4}/{r['n']} ({c['mrr']:.2f})"
+              f" {e['found']:>4}/{r['n']} ({e['mrr']:.2f})"
+              f" {t['found']:>4}/{r['n']} ({t['mrr']:.2f})"
+              f" {r['claims_added']:>7} {r['useful_added']:>7}")
+
     widest = max(results, key=lambda r: r["window"])
-    if widest["routed"]["found"] == widest["cosine"]["found"]:
-        print("  At the widest window routing changes nothing -- cosine is not "
-              "missing\n  anything yet. Re-run as the corpus grows.")
+    print()
+    if widest["displaced"]:
+        print(f"  WARNING: expansion pushed {len(widest['displaced'])} targets down. "
+              "It appends below\n  seeds and must never displace a hit.")
+    for rec in widest["recovered"][:4]:
+        print(f"  recovered at rank {rec['rank']}: {rec['query'][:56]}")
+    if widest["noise_ratio"] is not None:
+        print(f"\n  expansion added {widest['claims_added']} claims across "
+              f"{widest['n']} queries; {widest['useful_added']} were the target.")
+        print(f"  noise ratio {widest['noise_ratio']:.0%} -- the rest occupy context "
+              "budget without\n  being what was asked for. That is not automatically "
+              "waste (a neighbour can\n  be useful without being the target) but it is "
+              "the cost side of the trade.")
+    if widest["expansion"]["found"] == widest["cosine"]["found"]:
+        print("\n  Expansion recovers nothing cosine missed at this corpus size.")
+    print(f"\n  routes production would choose: {widest['strategies']}")
     return 0
 
 
