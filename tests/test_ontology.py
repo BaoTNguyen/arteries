@@ -82,7 +82,17 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(match.name, "wasDerivedFrom")
 
 
+def _rdflib_available() -> bool:
+    try:
+        import rdflib  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 @unittest.skipUnless(LIVE_TESTS, "set ARTERIES_LIVE_TESTS=1 to run the live loader test")
+@unittest.skipUnless(_rdflib_available(),
+                     "rdflib is the [ontology] extra; loading needs it, resolving does not")
 class LoadTests(unittest.TestCase):
     def test_load_then_resolve_without_rdflib_on_the_read_path(self):
         import pathlib
