@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from arteries import storage
+from arteries import actionlog, degrade, route, storage
 from arteries.cli_caps import CliCapabilities, get_capabilities
 from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PERSISTENT_READ, PROJECT_ID, RELEVANCE_THRESHOLD
 from arteries.embed import embed_text_sync
@@ -43,11 +43,20 @@ def context_from_env() -> AgentContext:
     )
 
 
-def select_for_frame(message: str, context: AgentContext | None = None) -> tuple[list[dict], list[dict]]:
+def select_for_frame(
+    message: str,
+    context: AgentContext | None = None,
+    embedding: list[float] | None = None,
+) -> tuple[list[dict], list[dict]]:
     context = context or context_from_env()
     ephemerals = _select_ephemeral(context)
-    persistents = _select_persistent(message, context)
+    persistents = _select_persistent(message, context, embedding)
     return ephemerals, persistents
+
+
+def select_ephemeral(context: AgentContext | None = None) -> list[dict]:
+    """Return the current process's eligible ephemeral context."""
+    return _select_ephemeral(context or context_from_env())
 
 
 def _select_ephemeral(context: AgentContext) -> list[dict]:
@@ -70,19 +79,92 @@ def _should_include_parent_ephemeral(context: AgentContext) -> bool:
     return context.capabilities.observes_subagents
 
 
-def _select_persistent(message: str, context: AgentContext) -> list[dict]:
+# Graph expansion runs only when cosine came back thin. A strong seed set is
+# already the answer; walking outward from it would add weaker neighbours to a
+# frame that is budget-limited anyway.
+#
+# "Thin" has to mean *quality*, not row count. RELEVANCE_THRESHOLD is 0.0 while
+# it awaits calibration, so the query always returns its full limit and a
+# count-based gate never fires -- which is exactly what happened when this was
+# first wired: expansion was reachable in tests and dead in practice. Count how
+# many seeds clear a real bar instead.
+STRONG_SIMILARITY = 0.65
+EXPAND_WHEN_STRONG_FEWER_THAN = 5
+EXPAND_HOPS = 1
+
+
+def _expand(seeds: list[dict], context: AgentContext, limit: int) -> list[dict]:
+    """Add claims reachable from the seeds along the graph, ranked below them.
+
+    A neighbour is worth surfacing precisely when similarity search missed it --
+    a fact that contradicts, refines, or shares an entity with a strong hit is
+    relevant by association rather than by wording. Weight-decayed so it never
+    outranks a direct match.
+    """
+    if not seeds:
+        return []
+    try:
+        import psycopg2
+
+        from arteries import graph
+        from arteries.config import DB_CONFIG
+
+        conn = psycopg2.connect(**DB_CONFIG)
+        try:
+            # Whole seed rows, not just ids: expand scores each neighbour
+            # relative to the seed it came from.
+            reached = graph.expand(conn, context.project_id, seeds,
+                                   hops=EXPAND_HOPS, limit=limit)
+        finally:
+            conn.close()
+    except Exception as exc:
+        degrade.note(exc, "graph expansion")
+        return []
+
+    seen = {str(s["id"]) for s in seeds}
+    added = []
+    for row in reached:
+        if str(row["id"]) in seen:
+            continue
+        # `similarity` so the packet scores it on the same axis as a direct hit,
+        # but derived from hop distance rather than from the query vector.
+        row["similarity"] = float(row.get("score") or 0.0)
+        row["via_graph"] = True
+        added.append(row)
+    return added
+
+
+def _select_persistent(
+    message: str,
+    context: AgentContext,
+    embedding: list[float] | None = None,
+) -> list[dict]:
     if PERSISTENT_READ == "none":
         return []
     if PERSISTENT_READ == "relevance":
-        query_emb = embed_text_sync(message)
+        query_emb = embedding or embed_text_sync(message, is_query=True)
         has_emb = bool(query_emb) and storage.has_embeddings(context.project_id)
         if query_emb and has_emb:
-            return storage.get_persistent_by_relevance(
+            seeds = storage.get_persistent_by_relevance(
                 context.project_id,
                 query_emb,
                 limit=20,
                 threshold=RELEVANCE_THRESHOLD,
             )
+            plan = route.choose(seeds)
+            actionlog.log_decision(
+                "retrieval.route",
+                chosen_action=plan.strategy,
+                available_actions=["cosine", "cosine+expansion"],
+                observation=plan.as_payload(),
+            )
+            if plan.strategy == "cosine":
+                return seeds
+            added = _expand(seeds[:5], context, limit=8)
+            if added:
+                logger.info("%s added %d claims to %d seeds",
+                            plan.strategy, len(added), len(seeds))
+            return seeds + added
         # Relevance was requested but we couldn't do it — no query embedding
         # (embedder down) or no stored embeddings. We fall back to recency, which
         # is a different, weaker read; say so rather than degrade silently.

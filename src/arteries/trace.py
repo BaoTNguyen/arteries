@@ -46,7 +46,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "memories": {
             "ephemeral": _safe(lambda: storage.get_ephemeral(project, agent, limit=ns.memories)),
             "persistent": _safe(lambda: storage.get_persistent(project, limit=ns.memories)),
-            "evergreen": _safe(lambda: storage.get_evergreen(limit=ns.memories)),
         },
     }
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
