@@ -19,15 +19,24 @@ import asyncio
 import contextlib
 import hashlib
 import io
+import logging
 import os
 import sys
 
 from arteries import actionlog, runlog
-from arteries.config import EPHEMERAL_MODE, PERSISTENT_READ, RETRIEVAL_MIN_CONFIDENCE
+from arteries.config import (
+    AGENT_PROCESS_ID,
+    EPHEMERAL_MODE,
+    PERSISTENT_READ,
+    PROJECT_ID,
+    RETRIEVAL_MIN_CONFIDENCE,
+)
 from arteries.assistant import capture_response, read_last_assistant
-from arteries import scope
+from arteries import scope, storage
 from arteries.embed import embed_text_sync
 from arteries.extract import extract_and_store
+
+logger = logging.getLogger(__name__)
 from arteries.frame import get_current_frame
 
 # capillaries is a hard dependency of arteries (the frame contract types
@@ -63,6 +72,21 @@ async def evaluate(message: str) -> str | None:
     # by relevance, and to measure how well the session already covers this
     # turn. Embedding per record instead would put N calls on the hook path.
     msg_vec = embed_text_sync(message, is_query=True)
+
+    # How well this session already covers the turn. Recorded, not acted on:
+    # skipping retrieval on a bad reading is invisible -- the agent just works
+    # without a prompt it should have had -- so this builds the distribution a
+    # threshold can later be chosen from.
+    if msg_vec:
+        try:
+            coverage = storage.max_ephemeral_similarity(
+                PROJECT_ID, AGENT_PROCESS_ID, msg_vec)
+            runlog.log_event("memory.coverage.measured", "arteries",
+                             {"coverage": round(coverage, 3)}, turn_id=turn_id)
+        except Exception:
+            # Telemetry must never fail a turn, but a swallowed NameError here
+            # is how this block shipped broken and green the first time.
+            logger.debug("coverage measurement failed", exc_info=True)
 
     try:
         extracted = extract_and_store(message, embedding=msg_vec)
@@ -204,8 +228,6 @@ async def evaluate(message: str) -> str | None:
                             },
                             turn_id=turn_id,
                         )
-                        from arteries import storage
-                        from arteries.config import PROJECT_ID, AGENT_PROCESS_ID
                         storage.log_retrieval(
                             project_id=PROJECT_ID,
                             agent_process_id=AGENT_PROCESS_ID,

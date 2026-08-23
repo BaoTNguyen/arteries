@@ -348,7 +348,9 @@ async def ingest_image(path: Path, project: str, description: str | None = None)
     not searchable and never will be. The image itself is recorded by path and
     digest so a claim can point back at the picture it came from.
     """
-    description = (description or "").strip() or describe_image(path)
+    description = (description or "").strip()
+    if not description and vision_available():
+        description = describe_image(path)
     if not description:
         return {"path": str(path), "status": "needs_description"}
 
@@ -450,7 +452,9 @@ def resolve_images(text: str, base_dir: Path) -> tuple[str, list[dict]]:
     """Replace image references with descriptions. Returns (text, report)."""
     report: list[dict] = []
     for raw, alt, path in find_image_refs(text, base_dir):
-        description = describe_with_frontier(path, alt) or describe_image(path)
+        description = describe_with_frontier(path, alt)
+        if not description and vision_available():
+            description = describe_image(path)
         if description:
             label = alt or path.name
             replacement = f"[Image: {label}] {description} (source: {path.name})"

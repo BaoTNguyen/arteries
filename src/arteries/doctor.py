@@ -66,6 +66,49 @@ def _collect_ephemeral(conn) -> int:
         return cur.rowcount
 
 
+# Public functions that are reached some way other than a direct call, so an
+# absent caller is not evidence of anything.
+_REACHED_INDIRECTLY = {
+    "main",            # CLI dispatch and __main__ blocks
+    "setup", "check",  # setup_cli recipe tables
+    "observe",         # public API for other repos in the stack
+    "ingest_episodes", "ingest_heart_episodes",
+    "run", "choose",   # called through modules that import them qualified
+}
+
+
+def unreached(root: Path | None = None) -> list[str]:
+    """Public functions nothing outside their own module and the tests calls.
+
+    Six times in this rework something was written, looked right, passed tests,
+    and was never invoked -- graph.expand, its edge traversal, the expansion
+    gate, the benchmark's context, MemoryFrame.scope, max_ephemeral_similarity.
+    Tests prove a function behaves when called. They say nothing about whether
+    anything calls it.
+
+    Deliberately crude: a name-level grep, not a call graph. It over-reports
+    rather than under-reports, and _REACHED_INDIRECTLY carries the exceptions.
+    """
+    import re
+
+    root = root or Path(__file__).resolve().parent
+    sources = {p: p.read_text() for p in sorted(root.glob("*.py"))}
+    orphans = []
+    for path, text in sources.items():
+        for match in re.finditer(r"^def ([a-z][a-z0-9_]*)\(", text, re.M):
+            name = match.group(1)
+            if name.startswith("_") or name in _REACHED_INDIRECTLY:
+                continue
+            # Count calls anywhere, including this module's own main() -- a
+            # function its CLI entry point invokes is reached. Subtract the
+            # definition itself, which the pattern also matches.
+            calls = sum(len(re.findall(rf"\b{name}\s*\(", other))
+                        for other in sources.values())
+            if calls - 1 <= 0:
+                orphans.append(f"{path.stem}.{name}")
+    return orphans
+
+
 def integrity(project: str) -> dict[str, Any]:
     """Cheap consistency checks that need no repair to be worth reporting."""
     import psycopg2
@@ -113,6 +156,9 @@ def integrity(project: str) -> dict[str, Any]:
             out["scope_registered"] = bool(cur.fetchone()[0])
     except Exception as exc:
         out["error"] = exc.__class__.__name__
+
+    # Static, so it still reports even when Postgres is unreachable.
+    out["unreached_functions"] = unreached()
     return out
 
 
