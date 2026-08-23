@@ -21,3 +21,24 @@ class DoctorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EphemeralCollectionTests(unittest.TestCase):
+    """Ephemeral is a working set, and nothing has ever collected it.
+
+    A row that was compiled and produced nothing is spent. A row that *did*
+    produce a memory is kept regardless of age -- a derived_from edge points at
+    it, and provenance back to the raw turn is why those edges exist.
+    """
+
+    def test_retention_default_is_conservative(self):
+        self.assertGreaterEqual(doctor.EPHEMERAL_RETENTION_DAYS, 7)
+
+    def test_collect_sql_excludes_cited_rows(self):
+        sql = doctor._COLLECTABLE_SQL
+        self.assertIn("NOT EXISTS", sql)
+        self.assertIn("dst_kind = 'ephemeral'", sql)
+        self.assertIn("status = 'cleared'", sql)
+
+    def test_collect_never_touches_uncompiled_rows(self):
+        self.assertNotIn("uncompiled", doctor._COLLECTABLE_SQL)
