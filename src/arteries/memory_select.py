@@ -45,9 +45,14 @@ def context_from_env() -> AgentContext:
 
 def select_for_frame(message: str, context: AgentContext | None = None) -> tuple[list[dict], list[dict]]:
     context = context or context_from_env()
-    ephemerals = _select_ephemeral(context)
+    ephemerals = select_ephemeral(context)
     persistents = _select_persistent(message, context)
     return ephemerals, persistents
+
+
+def select_ephemeral(context: AgentContext | None = None) -> list[dict]:
+    """Return the current process's eligible ephemeral context."""
+    return _select_ephemeral(context or context_from_env())
 
 
 def _select_ephemeral(context: AgentContext) -> list[dict]:

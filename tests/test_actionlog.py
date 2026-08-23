@@ -78,6 +78,10 @@ class ActionlogTests(unittest.TestCase):
         self.assertEqual(observed[0]["episode_id"], "ep-selftest-1")
         self.assertEqual(observed[0]["payload"]["message_chars"], 12)
         self.assertEqual(observed[0]["payload"]["store"], "jsonl")
+        self.assertEqual(observed[0]["payload"]["project_id"], "actionlog-selftest")
+        self.assertEqual(observed[0]["payload"]["repo"], str(self.root / "repo"))
+        self.assertIn("cli", observed[0]["payload"])
+        self.assertIn("agent_id", observed[0]["payload"])
         self.assertNotIn("episode_id", observed[0]["payload"])
 
     def test_ingest_heart_episodes(self):

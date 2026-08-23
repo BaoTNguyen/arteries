@@ -39,8 +39,11 @@ def _build_frame(message: str) -> MemoryFrame:
     ephemerals, persistents = memory_select.select_for_frame(message)
 
     evergreens = storage.get_evergreen(limit=20)
-    # reinforce what we surfaced — this is the only writer of access_count
+    # reinforce what we surfaced. Persistent is counted too, not to reorder it —
+    # that stays relevance-ranked — but so a never-surfaced memory is
+    # identifiable later and prunable.
     storage.touch_evergreen([str(r["id"]) for r in evergreens if r.get("id")])
+    storage.touch_persistent([str(r["id"]) for r in persistents[:10] if r.get("id")])
     retrievals = storage.get_recent_retrievals(PROJECT_ID, AGENT_PROCESS_ID, limit=10)
 
     active_domains = storage.get_active_domains(PROJECT_ID)

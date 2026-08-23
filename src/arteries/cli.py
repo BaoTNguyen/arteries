@@ -10,7 +10,7 @@ from arteries import doctor, evergreen, inspect, packet, remember, runs, setup_c
 from arteries.eval import evaluate
 
 
-COMMANDS = ("setup", "evergreen", "setup-db", "eval", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
+COMMANDS = ("setup", "evergreen", "setup-db", "eval", "observe", "activate", "inspect", "runs", "doctor", "packet", "trace", "decisions", "ingest", "backfill-embeddings", "remember", "spawn", "search", "compile")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -46,6 +46,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if result:
             print(result)
         return 0
+    if ns.command == "observe":
+        return _observe(ns.args)
+    if ns.command == "activate":
+        return _activate(ns.args)
     if ns.command == "inspect":
         return inspect.main(ns.args)
     if ns.command == "runs":
@@ -73,6 +77,102 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser.error(f"unknown command: {ns.command}")
     return 2
+
+
+def _cli_env(ns: argparse.Namespace) -> None:
+    """Apply the identity flags shared by the host-agnostic commands.
+
+    These are plain env vars because that is the contract every other module
+    already reads (config.PROJECT_ID and friends resolve at import), so a flag
+    has to be set before anything downstream is touched.
+    """
+    import os
+
+    for flag, var in (("cli", "ARTERIES_CLI"), ("project", "ARTERIES_PROJECT"),
+                      ("agent", "ARTERIES_AGENT_ID"), ("repo", "ARTERIES_REPO"),
+                      ("transcript", "ARTERIES_TRANSCRIPT")):
+        value = getattr(ns, flag, None)
+        if value:
+            os.environ[var] = str(value)
+    for key in ("tokens_in", "tokens_out", "cache_read", "cache_write_5m", "cache_write_1h"):
+        value = getattr(ns, key, None)
+        if value:
+            os.environ[f"ARTERIES_USAGE_{key.upper()}"] = str(value)
+
+
+def _identity_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--cli", default=None, help="host label for attribution; anything goes")
+    p.add_argument("--project", default=None)
+    p.add_argument("--agent", default=None)
+    p.add_argument("--repo", default=None)
+
+
+def _observe(args: Sequence[str]) -> int:
+    """Observe one turn from any host. Prompt on argv or stdin, retrieval on stdout.
+
+    The host-agnostic sibling of the per-CLI hook wrappers: those exist only to
+    normalise each vendor's event JSON, and a CLI that can shell out does not
+    need that layer. Prints nothing when the gate abstains, so it is safe to
+    splice into a prompt unconditionally.
+    """
+    import sys
+
+    p = argparse.ArgumentParser(prog="art observe", description="Observe one turn from any CLI.")
+    p.add_argument("prompt", nargs="*", help="prompt text; read from stdin when omitted")
+    _identity_args(p)
+    p.add_argument("--transcript", default=None, help="session transcript path, if the host has one")
+    for key in ("tokens-in", "tokens-out", "cache-read", "cache-write-5m", "cache-write-1h"):
+        p.add_argument(f"--{key}", type=int, default=None, help="usage the host already measured")
+    ns = p.parse_args(args)
+    _cli_env(ns)
+
+    prompt = " ".join(ns.prompt).strip() if ns.prompt else ("" if sys.stdin.isatty() else sys.stdin.read().strip())
+    if not prompt:
+        return 0
+    result = asyncio.run(evaluate(prompt))
+    if result:
+        print(result)
+    return 0
+
+
+def _activate(args: Sequence[str]) -> int:
+    """Session-start context for any host: opens a run, prints evergreen memory."""
+    p = argparse.ArgumentParser(prog="art activate", description="Session-start context for any CLI.")
+    _identity_args(p)
+    ns = p.parse_args(args)
+    _cli_env(ns)
+
+    import os
+
+    from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
+
+    project = os.environ.get("ARTERIES_PROJECT", PROJECT_ID)
+    agent = os.environ.get("ARTERIES_AGENT_ID", AGENT_PROCESS_ID)
+    # the run id goes to stdout, and stdout here is context the host will show
+    import contextlib
+    import io
+
+    with contextlib.suppress(Exception), contextlib.redirect_stdout(io.StringIO()):
+        runs.main(["start", "--project", project, "--agent", agent,
+                   "--cli", os.environ.get("ARTERIES_CLI", "generic"),
+                   "--repo", os.environ.get("ARTERIES_REPO", os.getcwd())])
+
+    print("ARTERIES MEMORY SYSTEM ACTIVE.\n")
+    print(f"This repo is connected to arteries project `{project}`.")
+    print("Arteries observes turns, builds ephemeral/persistent/evergreen memory, "
+          "and may surface retrieved prompts as visible context.")
+
+    # never let a memory read stop a session from starting
+    try:
+        from arteries import storage
+        rows = storage.get_evergreen(limit=8)
+    except Exception:
+        rows = []
+    if rows:
+        print("\nEvergreen preferences (authoritative source: arteries):")
+        for r in rows:
+            print(f"- {r['fact']}")
+    return 0
 
 
 def _spawn(args: list[str]) -> int:
