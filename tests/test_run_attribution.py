@@ -14,6 +14,10 @@ import pytest
 
 from arteries import runlog
 
+# This module is about the runlog write path; the conftest guard would
+# stub out the very thing under test.
+pytestmark = pytest.mark.writes_events
+
 
 @pytest.fixture
 def repo():
