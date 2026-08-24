@@ -278,9 +278,10 @@ def _search(args: Sequence[str]) -> int:
     import psycopg2
     import psycopg2.extras
 
-    from arteries.config import DB_CONFIG, PROJECT_ID
+    from arteries import scope
+    from arteries.config import DB_CONFIG
 
-    project = ns.project or PROJECT_ID
+    project = ns.project or scope.current_project()
     tsv = ("to_tsvector('english', coalesce(payload->>'message_preview','') || ' ' || "
            "coalesce(payload->>'assistant_preview',''))")
     with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
