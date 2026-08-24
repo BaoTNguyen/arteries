@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from arteries import scope as scope_mod
 from arteries import storage
-from arteries.config import PROJECT_ID
 
 DEFAULT_INCLUDE = ["AGENTS.md", "README.md", "*.md", "*.txt", "*.rst"]
 IGNORE_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build", "target"}
@@ -231,7 +231,8 @@ def import_review(review_path: Path, write: bool = False) -> dict[str, Any]:
             (b["memory_id"] for b in accepted),
             embed_texts_sync([b["fact"] for b in accepted]),
         ))
-        existing = {_normalize_fact(row["fact"]) for row in storage.get_persistent(PROJECT_ID, limit=1000)}
+        project = scope_mod.current_project()
+        existing = {_normalize_fact(row["fact"]) for row in storage.get_persistent(project, limit=1000)}
         for block in accepted:
             normalized = _normalize_fact(block["fact"])
             if normalized in existing:
@@ -239,7 +240,7 @@ def import_review(review_path: Path, write: bool = False) -> dict[str, Any]:
                 continue
             source_meta = _source_meta(block, originals.get(block["memory_id"]), meta.get("import_id"))
             inserted.append(storage.insert_persistent(
-                project_id=PROJECT_ID,
+                project_id=project,
                 fact=block["fact"],
                 domains=block["domains"] or _infer_domains(block["fact"]),
                 confidence=block["confidence"],
