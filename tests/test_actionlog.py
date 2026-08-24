@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import pytest
 import unittest
 from pathlib import Path
 
@@ -70,6 +71,8 @@ class ActionlogTests(unittest.TestCase):
         actionlog.log_reward("task_success", 0.85, components={"public_tests": 1.0}, source="heart")
         kinds = [e["kind"] for e in self._spool_events()]
         self.assertIn("reward.task_success", kinds)
+
+    @pytest.mark.writes_events
 
     def test_runlog_stamps_episode_and_tees(self):
         event = runlog.log_event("turn.observed", "arteries", {"message_chars": 12}, turn_id="turn-2")
