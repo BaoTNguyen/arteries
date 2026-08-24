@@ -46,12 +46,23 @@ class NoteTests(unittest.TestCase):
     def test_a_defect_is_loud_and_does_not_claim_unavailability(self):
         """The old handler told users 'Memory storage was unavailable' for any
         failure at all -- a claim about the database it had never checked."""
-        with patch.object(degrade, "logger") as log:
+        # runlog.log_event is patched because it is not a mock here: it writes
+        # to the live event store. Unpatched, every run of this suite filed a
+        # fabricated internal.bug_swallowed row -- 30 of them by the time anyone
+        # looked -- burying the real defects that event exists to surface.
+        with patch.object(degrade, "logger") as log, \
+             patch("arteries.runlog.log_event") as log_event:
             reason = degrade.note(NameError("storage"), "lookup")
         self.assertNotIn("unavailable", reason)
         self.assertIn("NameError", reason)
         log.error.assert_called_once()
         self.assertTrue(log.error.call_args.kwargs.get("exc_info"))
+
+        # and the event a watcher would act on carries what it needs
+        log_event.assert_called_once()
+        payload = log_event.call_args.args[2]
+        self.assertEqual(payload["where"], "lookup")
+        self.assertEqual(payload["error_type"], "NameError")
 
     def test_reporting_a_bug_never_raises(self):
         """A failure in the reporting path must not become the failure."""
