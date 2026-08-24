@@ -236,11 +236,12 @@ export ARTERIES_PROJECT="${{ARTERIES_PROJECT:-{ctx.project_name}}}"
 export ARTERIES_AGENT_ID="${{ARTERIES_AGENT_ID:-{_agent_id(ctx.project_name)}}}"
 export ARTERIES_CLI="${{ARTERIES_CLI:-{cli_name}}}"
 export ARTERIES_REPO="${{ARTERIES_REPO:-$PROJECT_ROOT}}"
-# capillaries' cross-encoder defaults to CPU, where a warm rerank costs ~1.7s
-# against a 10s hook budget; on GPU the same call is ~0.12s. Cold start is
-# ~4.5s either way, so this only pays off once something stays warm — but it
-# costs nothing to set, and it is what makes a warm path worth building.
-export RERANKER_DEVICE="${{RERANKER_DEVICE:-cuda}}"
+# RERANKER_DEVICE is deliberately not set. It used to be pinned to "cuda",
+# which means device 0 -- the card llama-server fills first -- and it overrode
+# capillaries' _autodetect_device(), whose whole job is picking a card with
+# real headroom on a box that also hosts an LLM and an embedding server.
+# Pinning it turned a working safeguard into a guaranteed OOM. Set it in
+# .arteries/env if a repo genuinely needs to force a device.
 # Per-repo policy, e.g. ARTERIES_EPHEMERAL=keep. Lives outside the generated
 # block so `art setup` can regenerate hooks without discarding it — hand-edited
 # hook commands do not survive a sync. Precedence: caller env, then this file,
