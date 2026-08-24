@@ -1,4 +1,5 @@
 import tempfile
+import pytest
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from arteries import doctor
 
 
 class DoctorTests(unittest.TestCase):
+    @pytest.mark.writes_events
     def test_check_works_with_jsonl_fallback_when_db_is_down(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(doctor.psycopg2, "connect", side_effect=RuntimeError("db down")):
