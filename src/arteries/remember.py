@@ -17,8 +17,8 @@ import argparse
 import json
 from collections.abc import Sequence
 
+from arteries import scope as scope_mod
 from arteries import storage
-from arteries.config import PROJECT_ID
 from arteries.docs import _infer_domains
 
 
@@ -79,7 +79,7 @@ def _do_add(args) -> int:
     embedding = _embed(fact)
 
     pid = storage.insert_persistent(
-        project_id=PROJECT_ID,
+        project_id=scope_mod.current_project(),
         fact=fact,
         domains=domains,
         confidence=args.confidence,
@@ -92,7 +92,7 @@ def _do_add(args) -> int:
 
 
 def _do_list(args) -> int:
-    rows = storage.get_persistent(PROJECT_ID, limit=args.limit, scope="user")
+    rows = storage.get_persistent(scope_mod.current_project(), limit=args.limit, scope="user")
     if args.as_json:
         print(json.dumps(rows, indent=2, default=str))
         return 0
@@ -111,7 +111,7 @@ def _do_edit(args) -> int:
     if not resolved:
         return 1
     domains = [d.strip() for d in args.domains.split(",") if d.strip()] if args.domains else None
-    ok = storage.update_persistent(resolved, PROJECT_ID, fact=args.fact, domains=domains, confidence=args.confidence)
+    ok = storage.update_persistent(resolved, scope_mod.current_project(), fact=args.fact, domains=domains, confidence=args.confidence)
     if ok:
         if args.fact:
             vec = _embed(args.fact)
@@ -128,7 +128,7 @@ def _do_rm(args) -> int:
     resolved = _resolve_id(args.id)
     if not resolved:
         return 1
-    ok = storage.remove_persistent(resolved, PROJECT_ID)
+    ok = storage.remove_persistent(resolved, scope_mod.current_project())
     if ok:
         print(f"Removed: {resolved[:8]}")
     else:
@@ -138,14 +138,25 @@ def _do_rm(args) -> int:
 
 
 def _resolve_id(prefix: str) -> str | None:
-    rows = storage.get_persistent(PROJECT_ID, limit=500, scope="user")
-    matches = [str(r["id"]) for r in rows if str(r["id"]).startswith(prefix)]
+    """A live claim id in this project, by prefix.
+
+    Reads span the whole scope, so a sibling repo's claim resolves here but
+    cannot be written -- storage filters every write on project_id. Say which
+    repo owns it rather than reporting "not found" for a row we just found.
+    """
+    project = scope_mod.current_project()
+    rows = storage.get_persistent(project, limit=500)
+    matches = [r for r in rows if str(r["id"]).startswith(prefix)]
     if len(matches) == 1:
-        return matches[0]
+        owner = matches[0].get("project_id")
+        if owner and owner != project:
+            print(f"{prefix} belongs to project '{owner}'; run this from that repo.")
+            return None
+        return str(matches[0]["id"])
     if not matches:
         print(f"No memory matching: {prefix}")
         return None
-    print(f"Ambiguous prefix '{prefix}', matches: {', '.join(m[:12] for m in matches)}")
+    print(f"Ambiguous prefix '{prefix}', matches: {', '.join(str(m['id'])[:12] for m in matches)}")
     return None
 
 
