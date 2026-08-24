@@ -49,6 +49,8 @@ class LiveMemoryTierTests(unittest.TestCase):
             cur.execute("DELETE FROM arteries.retrievals WHERE project_id = %s", (self.project_id,))
             cur.execute("DELETE FROM arteries.persistent WHERE project_id = %s", (self.project_id,))
             cur.execute("DELETE FROM arteries.ephemeral WHERE project_id = %s", (self.project_id,))
+            # the compile pass writes the graph too; this teardown predates it
+            cur.execute("DELETE FROM arteries.memory_edges WHERE project_id = %s", (self.project_id,))
             conn.commit()
 
     def test_1_ephemeral_extracts_stores_and_enters_frame(self):
