@@ -31,6 +31,19 @@ class EvaluateTests(unittest.IsolatedAsyncioTestCase):
             "explicit continuation of prior assistant result",
         )
 
+    def test_triage_skips_bare_imperative(self):
+        """"Clean up" retrieved a spreadsheet-cleaning workflow at 0.974: the
+        directive test only reads the first word, and "clean" is not in it."""
+        self.assertEqual(
+            arteries_eval._triage_skip_reason("Clean up", ["Deleted 432 rows."]),
+            "bare imperative continuing prior assistant result",
+        )
+        # nothing to continue, so the message stands on its own
+        self.assertIsNone(arteries_eval._triage_skip_reason("Clean up", []))
+        # a named object is a specification, not a reference
+        self.assertIsNone(arteries_eval._triage_skip_reason(
+            "Clean up the scope_members table", ["Deleted 432 rows."]))
+
     def test_triage_allows_unresolved_request(self):
         self.assertIsNone(arteries_eval._triage_skip_reason(
             "build a 13-week cash flow model for a SaaS startup", []

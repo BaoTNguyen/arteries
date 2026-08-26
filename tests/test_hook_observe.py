@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from arteries import hook_observe
+from arteries.eval import RETRIEVED_OPEN
 
 
 class HookObserveTests(unittest.TestCase):
@@ -23,7 +24,11 @@ class HookObserveTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         evaluate.assert_called_once_with("Build it")
-        print_.assert_called_once_with("retrieved prompt")
+        # wrapped, not bare: injected context arrives in the same channel the
+        # user's own words do, so it has to announce what it is
+        printed = print_.call_args.args[0]
+        self.assertIn("retrieved prompt", printed)
+        self.assertTrue(printed.startswith(RETRIEVED_OPEN), printed[:60])
 
 
 if __name__ == "__main__":
