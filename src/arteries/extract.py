@@ -200,6 +200,12 @@ def store_assistant_response(text: str, user_turn: str = "") -> int:
             "source": "assistant",
         })
         return 1
+    # Embedded here rather than handed down like the user path: this text is
+    # the previous turn's answer, not the current message, so there is no vector
+    # to reuse. Without it every assistant row lands NULL and the coverage
+    # signal in eval.py compares each turn only against the user's own earlier
+    # questions -- which cannot show that an answer already exists.
+    from arteries.embed import embed_text_sync
     storage.insert_ephemeral(
         project_id=PROJECT_ID,
         agent_process_id=AGENT_PROCESS_ID,
@@ -207,5 +213,6 @@ def store_assistant_response(text: str, user_turn: str = "") -> int:
         domains=domains,
         parent_agent_id=PARENT_AGENT_ID,
         source="assistant",
+        embedding=embed_text_sync(stripped),
     )
     return 1

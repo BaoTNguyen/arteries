@@ -25,7 +25,7 @@ import psycopg2.extras
 
 from arteries import runlog
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
-from arteries.spool import spool_emit
+from arteries.journal import journal_append
 
 
 def episode_id() -> str | None:
@@ -64,7 +64,7 @@ def log_decision(
         "created_at": _now_iso(),
     }
     store = _persist(record, "decision", run, repo_path)
-    spool_emit(
+    journal_append(
         "arteries",
         f"decision.{decision_type}",
         turn_id=turn_id,
@@ -106,7 +106,7 @@ def log_reward(
         "created_at": _now_iso(),
     }
     store = _persist(record, "reward", run, repo_path)
-    spool_emit(
+    journal_append(
         "arteries", f"reward.{reward_type}", turn_id=turn_id,
         value=value, reward_source=source, store=store,
     )
@@ -224,7 +224,7 @@ def _persist(record: dict, kind: str, run: dict, repo_path: str | Path | None) -
             _write_jsonl(run, kind, record, repo_path)
             return "jsonl"
         except Exception:
-            return "lost"  # the spool tee still fires; never break the caller
+            return "lost"  # the journal tee still fires; never break the caller
 
 
 def _db_insert_decision(record: dict) -> None:
