@@ -133,10 +133,16 @@ async def evaluate(message: str) -> str | None:
     # Opt-in: a repo nobody registered is not observed at all -- no ephemeral,
     # no telemetry, no run log. Ahead of every write, and it logs once so the
     # skip is visible in `art doctor` rather than looking like a dead hook.
-    if not scope.is_tracked():
+    # is_tracked() resolves the *cwd*, but every row written below is stamped
+    # with PROJECT_ID from the environment, and nothing made the two agree. A
+    # benchmark exporting ARTERIES_PROJECT=capillaries-regression-20260819 and
+    # running inside a registered repo got full write access under a project
+    # nobody registered: 42 of 73 rows in arteries.retrievals arrived that way.
+    if not scope.is_tracked() or not scope.scope_for(PROJECT_ID):
         runlog.log_event(
             "turn.skipped_untracked", "arteries",
             {"cwd": os.environ.get("ARTERIES_EVENT_CWD") or os.getcwd(),
+             "project": PROJECT_ID,
              "hint": "art scope add <group> <repo path>"},
         )
         return None
