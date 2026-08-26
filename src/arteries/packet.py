@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build an Arteries continuity packet.")
     parser.add_argument("--format", choices=("markdown", "pi-compaction-json"), default="markdown")
     parser.add_argument("--message", default="", help="current user message or compaction reason")
-    parser.add_argument("--budget", type=int, default=6000, help="approximate character budget")
+    parser.add_argument("--budget", type=int, default=20000, help="approximate character budget")
     parser.add_argument("--stdin-json", action="store_true", help="read CLI event JSON from stdin")
     args = parser.parse_args(argv)
 
@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def build_packet(message: str = "", event: dict[str, Any] | None = None, budget: int = 6000) -> str:
+def build_packet(message: str = "", event: dict[str, Any] | None = None, budget: int = 20000) -> str:
     event = event or {}
     memories = _load_memories(message, event)
     recent_pairs = _load_recent_pairs(event)
@@ -257,23 +257,25 @@ def _pairs_from_runlog(limit: int) -> list[RecentPair]:
     except Exception:
         return []
 
-    pairs_by_turn: dict[str, RecentPair] = {}
     ordered: list[RecentPair] = []
-    pending: RecentPair | None = None
+    index_by_turn: dict[str, int] = {}
+    responses: list[tuple[str | None, bool, str, str]] = []
+    session = os.getenv("ARTERIES_SESSION_ID") or ""
+
     for event in reversed(events):
         event_type = str(event.get("event_type") or "")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         turn_id = str(event.get("turn_id") or "") or None
+        if _other_session(payload, session):
+            continue
 
         if event_type == "turn.observed":
             user = payload_text(payload, "message_preview", "message", "prompt", "user")
             if not user:
                 continue
-            pair = RecentPair(user=user)
-            ordered.append(pair)
-            pending = pair
             if turn_id:
-                pairs_by_turn[turn_id] = pair
+                index_by_turn[turn_id] = len(ordered)
+            ordered.append(RecentPair(user=user))
             continue
 
         if event_type in {"turn.assistant", "assistant.response", "message.assistant", "turn.completed"}:
@@ -286,21 +288,85 @@ def _pairs_from_runlog(limit: int) -> list[RecentPair]:
                 "response",
                 "text",
             )
-            if not assistant:
-                continue
-            pair = pairs_by_turn.get(turn_id or "") if turn_id else pending
-            if payload.get("prior_turn"):
-                # transcript capture runs at the start of turn N and describes
-                # turn N-1, so attach to the pair before the one sharing turn_id
-                anchor = pairs_by_turn.get(turn_id or "")
-                if anchor is not None and anchor in ordered and ordered.index(anchor) > 0:
-                    pair = ordered[ordered.index(anchor) - 1]
-                else:
-                    pair = next((p for p in reversed(ordered) if not p.assistant), None)
-            if pair and not pair.assistant:
-                pair.assistant = assistant
+            # An edited/resubmitted prompt fires the capture again, so the same
+            # assistant text arrives twice under two turn_ids. Printing it under
+            # two different questions is always wrong; one of them is a ghost.
+            answers = payload_text(payload, "answers_preview")
+            # An edited/resubmitted prompt fires the capture again, so the same
+            # assistant text arrives twice under two turn_ids. Printing it under
+            # two different questions is always wrong; one of them is a ghost.
+            if assistant and (not responses or responses[-1][3] != assistant):
+                responses.append((turn_id, bool(payload.get("prior_turn")), answers, assistant))
+
+    # Resolved in a second pass because a capture fires at the start of turn N
+    # while describing turn N-1, and it can reach the store before turn N's own
+    # turn.observed row. Anchoring during the first pass therefore looked up a
+    # turn that did not exist yet.
+    keys = [_norm(pair.user) for pair in ordered]
+    for turn_id, prior_turn, answers, assistant in responses:
+        index = _match_question(keys, answers) if answers else None
+        if index is None:
+            index = _by_position(index_by_turn.get(turn_id or ""), prior_turn, ordered)
+        if index is None:
+            continue
+        # Last capture wins: a turn can be captured more than once, and the
+        # later read of the transcript is always the more complete one.
+        ordered[index].assistant = assistant
 
     return ordered[-limit:]
+
+
+def _other_session(payload: dict[str, Any], session: str) -> bool:
+    """True when this event belongs to a different session of the same CLI.
+
+    Runs are keyed by (repo, CLI), deliberately, so every Claude session in one
+    repo shares a run and the packet was merging concurrent conversations into a
+    single Recent Conversation -- other people's questions, answered by nobody.
+    Session is the finer key the host CLI already hands us.
+
+    Rows written before session stamping carry no session_id and are kept: a
+    packet with some extra turns beats one that renders empty.
+    """
+    if not session:
+        return False
+    row = str(payload.get("session_id") or "")
+    return bool(row) and row != session
+
+
+def _match_question(keys: list[str], answers: str) -> int | None:
+    """Index of the question an answer names, latest match first.
+
+    Both sides are stored truncated -- the question at 2000 chars, the join key
+    at 200 -- so they are compared on whichever prefix is shorter. Latest wins
+    because a resubmitted prompt leaves an identical earlier row behind and the
+    live one is the later of the two.
+    """
+    key = _norm(answers)
+    if not key:
+        return None
+    for index in reversed(range(len(keys))):
+        candidate = keys[index]
+        if not candidate:
+            continue
+        width = min(len(candidate), len(key))
+        if candidate[:width] == key[:width]:
+            return index
+    return None
+
+
+def _by_position(anchor: int | None, prior_turn: bool, ordered: list[RecentPair]) -> int | None:
+    """Fallback for rows with no join key: rows written before answers_preview
+    existed, and transcripts whose parent chain fell out of the tail window.
+
+    Counting is what the join key replaced, so it stays conservative: a
+    prior_turn row with no anchor, or one whose subject sits outside the
+    window, is dropped rather than guessed onto a neighbour.
+    """
+    if prior_turn:
+        return anchor - 1 if anchor else None
+    if anchor is not None:
+        return anchor
+    return next((i for i in reversed(range(len(ordered))) if not ordered[i].assistant), None)
 
 
 def _format_recent_pairs(pairs: list[RecentPair]) -> list[str]:
@@ -345,10 +411,15 @@ def _section(title: str, lines: list[str]) -> str:
 
 def _allocations(budget: int) -> dict[str, int]:
     budget = max(budget, 1)
+    # _load_recent_pairs asks for 10 pairs and _one_line caps each side at 500
+    # chars, so the recent section needs ~10k to actually deliver 10 turns. At
+    # the old 0.25-of-6000 it got 1500 and dropped seven of them -- the limit
+    # was decorative. Shares sum to 0.96, leaving headroom under the hard
+    # _limit() so the tail section is never the one that gets clipped.
     return {
         "context": int(budget * 0.10),
-        "recent": int(budget * 0.25),
-        "memory": int(budget * 0.18),
+        "recent": int(budget * 0.55),
+        "memory": int(budget * 0.12),
         "rules": int(budget * 0.07),
     }
 

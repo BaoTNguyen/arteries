@@ -102,11 +102,27 @@ class StoreCleanupTests(unittest.TestCase):
         self.assertIn("dst_kind = 'entity'", sql)
         self.assertIn("p.valid_until IS NULL", sql)
 
+    def test_collectors_are_scoped_to_one_project(self):
+        """`art doctor --fix` ran one repo's retention env vars against every
+        project in the database: five repos share this scope, and the three
+        DELETEs carried no project predicate at all."""
+        self.assertIn("e.project_id = %s", doctor._COLLECTABLE_SQL)
+        self.assertIn("p.project_id = %s", doctor._COLLECTABLE_CLAIMS)
+        # entities are keyed by scope, not project
+        self.assertIn("e.scope_id = %s", doctor._ORPHAN_ENTITIES)
+
+    def test_dangling_check_covers_both_ends(self):
+        """Checking dst only reported 0 while 49 edges hung off deleted claims;
+        chose/over edges have a literal dst, so src is the only catchable end."""
+        import inspect
+        src = inspect.getsource(doctor.integrity)
+        self.assertIn("e.src_kind = 'persistent'", src)
+
     def test_dangling_sweep_runs_after_deletions(self):
         """Deleting an entity orphans the mentions edges that pointed at it.
         Sweeping first left eight fresh dangling edges behind."""
         import inspect
         src = inspect.getsource(doctor.fix)
-        collect_at = src.index("_collect_entities(conn)")
+        collect_at = src.index("_collect_entities(conn,")
         sweep_at = src.rindex("_retire_dangling(conn)")
         self.assertGreater(sweep_at, collect_at)
