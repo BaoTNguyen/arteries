@@ -10,6 +10,7 @@ import os
 from typing import Any
 
 from arteries import runlog
+from arteries.config import PROJECT_ID
 from arteries.cli_normalize import apply_event_env, normalize
 from arteries.eventjson import (
     AGENT_TRANSCRIPT_KEYS,
@@ -61,14 +62,15 @@ def main(argv: list[str] | None = None) -> int:
         text = read_last_assistant(args.transcript)
 
     if text:
-        capture_response(text)
+        capture_response(text, turn_id=_open_turn_id())
     return 0
 
 
 logger = logging.getLogger(__name__)
 
 
-def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = False) -> int:
+def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = False,
+                     answers: str = "") -> int:
     """Store an assistant response as ephemeral and log the capture events."""
     # The user turn this replies to, so restatements of the question can be
     # dropped. Best effort: no transcript means no reference and nothing is cut.
@@ -99,6 +101,10 @@ def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = F
     if prior_turn:
         # captured at the start of turn N, this answers turn N-1
         payload["prior_turn"] = True
+    if answers:
+        # the question this answers, read off the transcript's parent chain.
+        # packet.py matches on this instead of counting turns backwards.
+        payload["answers_preview"] = answers[:200]
     runlog.log_event("assistant.response", "arteries", payload, turn_id=turn_id)
     runlog.log_event(
         "memory.assistant.stored",
@@ -107,6 +113,22 @@ def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = F
         turn_id=turn_id,
     )
     return stored
+
+
+def _open_turn_id() -> str | None:
+    """turn_id of the most recent observed turn, or None.
+
+    A Stop hook is a fresh process, so eval.py's in-memory turn_id is gone by
+    the time this runs. Reading the last turn.observed row back is the join.
+    """
+    try:
+        for event in runlog.recent_events(project_id=PROJECT_ID, limit=20,
+                                          repo_path=os.getenv("ARTERIES_REPO")):
+            if str(event.get("event_type")) == "turn.observed" and event.get("turn_id"):
+                return str(event["turn_id"])
+    except Exception:
+        pass
+    return None
 
 
 def assistant_text_from_event(event: dict[str, Any]) -> str:
@@ -127,12 +149,10 @@ def assistant_text_from_event(event: dict[str, Any]) -> str:
                       "response", "output", "text") or ""
 
 
-def read_last_assistant(transcript_path: str) -> str:
-    """Walk a JSONL transcript backwards to find the last assistant message with text.
+def _tail_entries(transcript_path: str) -> list[dict[str, Any]]:
+    """Parse the tail of a JSONL transcript into entries, oldest first.
 
-    Handles both flat entries ({"role": "assistant", ...}) and Claude Code's
-    nested format ({"type": "assistant", "message": {...}}). Reads only the
-    file tail so huge transcripts stay cheap.
+    Reads only the last TAIL_BYTES so huge transcripts stay cheap.
     """
     try:
         with open(transcript_path, "rb") as f:
@@ -141,11 +161,12 @@ def read_last_assistant(transcript_path: str) -> str:
             f.seek(max(0, size - TAIL_BYTES))
             raw = f.read().decode("utf-8", errors="replace")
     except OSError:
-        return ""
+        return []
     lines = raw.splitlines()
     if size > TAIL_BYTES and lines:
         lines = lines[1:]  # first line is likely truncated mid-record
-    for line in reversed(lines):
+    entries: list[dict[str, Any]] = []
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -153,17 +174,85 @@ def read_last_assistant(transcript_path: str) -> str:
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(entry, dict):
-            continue
-        role = entry.get("role") or entry.get("type")
-        if role != "assistant":
-            continue
-        message = entry.get("message") if isinstance(entry.get("message"), dict) else entry
-        text = text_from_mapping(message)
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _assistant_text(entry: dict[str, Any]) -> str:
+    if (entry.get("role") or entry.get("type")) != "assistant":
+        return ""
+    message = entry.get("message") if isinstance(entry.get("message"), dict) else entry
+    return text_from_mapping(message)
+
+
+def _user_prompt(entry: dict[str, Any]) -> str:
+    """Text of a real user prompt, or "" for tool results and everything else.
+
+    Claude Code files tool results as user entries too; the discriminator is
+    that a typed prompt's content is a string, while a tool result is a list of
+    tool_result blocks.
+    """
+    if (entry.get("role") or entry.get("type")) != "user":
+        return ""
+    message = entry.get("message") if isinstance(entry.get("message"), dict) else entry
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    return ""
+
+
+def read_last_assistant(transcript_path: str) -> str:
+    """The last assistant message with text, or "".
+
+    Handles both flat entries ({"role": "assistant", ...}) and Claude Code's
+    nested format ({"type": "assistant", "message": {...}}).
+    """
+    for entry in reversed(_tail_entries(transcript_path)):
+        text = _assistant_text(entry)
         if text:
             return text
         # tool-use-only entry: keep scanning for the last one with text
     return ""
+
+
+def read_last_exchange(transcript_path: str) -> tuple[str, str]:
+    """(last assistant text, the user prompt it answers).
+
+    The second half is the join key. Deriving "which question is this an answer
+    to" from the transcript's own parentUuid chain is the difference between a
+    fact and a guess: the old scheme inferred it by subtracting one from the
+    turn counter, so a single skipped capture silently shifted every earlier
+    pair onto the wrong question.
+
+    The prompt comes back empty when the parent chain leaves the tail window,
+    which callers should treat as "no join key", not as an error.
+    """
+    entries = _tail_entries(transcript_path)
+    by_uuid = {e["uuid"]: e for e in entries if e.get("uuid")}
+
+    answer = None
+    for entry in reversed(entries):
+        if _assistant_text(entry):
+            answer = entry
+            break
+    if answer is None:
+        return "", ""
+
+    seen: set[str] = set()
+    node = answer
+    while node is not None:
+        parent = node.get("parentUuid")
+        if not parent or parent in seen:
+            break
+        seen.add(parent)
+        node = by_uuid.get(parent)
+        if node is None:
+            break
+        prompt = _user_prompt(node)
+        if prompt:
+            return _assistant_text(answer), prompt
+    return _assistant_text(answer), ""
 
 
 if __name__ == "__main__":

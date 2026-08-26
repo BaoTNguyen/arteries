@@ -112,6 +112,199 @@ class PacketTests(unittest.TestCase):
         self.assertIn("Q: user asked", text)
         self.assertIn("A: assistant answered", text)
 
+    def test_recent_conversation_excludes_other_sessions(self):
+        events = [
+            {"event_type": "turn.observed", "turn_id": "t3",
+             "payload": {"message_preview": "mine again", "session_id": "s-me"}},
+            {"event_type": "turn.observed", "turn_id": "t2",
+             "payload": {"message_preview": "someone else's turn", "session_id": "s-other"}},
+            {"event_type": "turn.observed", "turn_id": "t1",
+             "payload": {"message_preview": "mine", "session_id": "s-me"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events), \
+             patch.dict("os.environ", {"ARTERIES_SESSION_ID": "s-me"}):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("1. Q: mine", text)
+        self.assertIn("2. Q: mine again", text)
+        self.assertNotIn("someone else", text)
+
+    def test_rows_without_a_session_are_kept(self):
+        # everything written before session stamping. Filtering these out would
+        # render an empty packet on an existing store.
+        events = [
+            {"event_type": "turn.observed", "turn_id": "t1",
+             "payload": {"message_preview": "an older turn"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events), \
+             patch.dict("os.environ", {"ARTERIES_SESSION_ID": "s-me"}):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("Q: an older turn", text)
+
+    def test_no_session_in_env_filters_nothing(self):
+        events = [
+            {"event_type": "turn.observed", "turn_id": "t1",
+             "payload": {"message_preview": "a turn", "session_id": "s-other"}},
+        ]
+
+        env = {k: v for k, v in __import__("os").environ.items() if k != "ARTERIES_SESSION_ID"}
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events), \
+             patch.dict("os.environ", env, clear=True):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("Q: a turn", text)
+
+    def test_join_key_beats_position_when_a_capture_was_skipped(self):
+        # turn-2's answer was never captured. Counting backwards would slide
+        # turn-3's answer onto turn-2 and every earlier pair with it.
+        events = [
+            {"event_type": "assistant.response", "turn_id": "turn-4",
+             "payload": {"assistant_preview": "answer about caching",
+                         "answers_preview": "how does caching work", "prior_turn": True}},
+            {"event_type": "turn.observed", "turn_id": "turn-4",
+             "payload": {"message_preview": "fourth question"}},
+            {"event_type": "turn.observed", "turn_id": "turn-3",
+             "payload": {"message_preview": "how does caching work"}},
+            {"event_type": "turn.observed", "turn_id": "turn-2",
+             "payload": {"message_preview": "an unanswered question"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("1. Q: an unanswered question\n   A: [not captured", text)
+        self.assertIn("2. Q: how does caching work\n   A: answer about caching", text)
+
+    def test_join_key_picks_the_live_copy_of_a_resubmitted_prompt(self):
+        events = [
+            {"event_type": "assistant.response", "turn_id": "turn-3",
+             "payload": {"assistant_preview": "the answer",
+                         "answers_preview": "same question", "prior_turn": True}},
+            {"event_type": "turn.observed", "turn_id": "turn-3",
+             "payload": {"message_preview": "later question"}},
+            {"event_type": "turn.observed", "turn_id": "turn-2",
+             "payload": {"message_preview": "same question"}},
+            {"event_type": "turn.observed", "turn_id": "turn-1",
+             "payload": {"message_preview": "same question"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("1. Q: same question\n   A: [not captured", text)
+        self.assertIn("2. Q: same question\n   A: the answer", text)
+
+    def test_truncated_join_key_still_matches_a_longer_question(self):
+        events = [
+            {"event_type": "assistant.response", "turn_id": "turn-2",
+             "payload": {"assistant_preview": "the answer",
+                         "answers_preview": "explain the retry", "prior_turn": True}},
+            {"event_type": "turn.observed", "turn_id": "turn-2",
+             "payload": {"message_preview": "next"}},
+            {"event_type": "turn.observed", "turn_id": "turn-1",
+             "payload": {"message_preview": "explain the retry policy in detail please"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("1. Q: explain the retry policy in detail please\n   A: the answer", text)
+
+    def test_stop_capture_attaches_to_its_own_turn(self):
+        # Stop fires at the end of turn N and the transcript's last assistant
+        # message is turn N's answer -- no prior_turn, no offset
+        events = [
+            {"event_type": "assistant.response", "turn_id": "turn-2",
+             "payload": {"assistant_preview": "second answer"}},
+            {"event_type": "turn.observed", "turn_id": "turn-2",
+             "payload": {"message_preview": "second question"}},
+            {"event_type": "assistant.response", "turn_id": "turn-1",
+             "payload": {"assistant_preview": "first answer"}},
+            {"event_type": "turn.observed", "turn_id": "turn-1",
+             "payload": {"message_preview": "first question"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("1. Q: first question\n   A: first answer", text)
+        self.assertIn("2. Q: second question\n   A: second answer", text)
+
+    def test_later_capture_of_the_same_turn_replaces_the_earlier_one(self):
+        events = [
+            {"event_type": "assistant.response", "turn_id": "turn-1",
+             "payload": {"assistant_preview": "the complete answer"}},
+            {"event_type": "assistant.response", "turn_id": "turn-1",
+             "payload": {"assistant_preview": "partial"}},
+            {"event_type": "turn.observed", "turn_id": "turn-1",
+             "payload": {"message_preview": "a question"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("A: the complete answer", text)
+        self.assertNotIn("partial", text)
+
+    def test_prior_turn_capture_attaches_to_the_turn_it_describes(self):
+        # the capture for turn-2 describes turn-1 and lands before turn-2's own
+        # turn.observed row -- the case that used to staple it onto turn-1's
+        # neighbour instead
+        events = [
+            {"event_type": "turn.observed", "turn_id": "turn-2",
+             "payload": {"message_preview": "second question"}},
+            {"event_type": "assistant.response", "turn_id": "turn-2",
+             "payload": {"assistant_preview": "answer to first", "prior_turn": True}},
+            {"event_type": "turn.observed", "turn_id": "turn-1",
+             "payload": {"message_preview": "first question"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertIn("1. Q: first question\n   A: answer to first", text)
+        self.assertIn("2. Q: second question\n   A: [not captured", text)
+
+    def test_prior_turn_capture_outside_the_window_is_dropped(self):
+        events = [
+            {"event_type": "assistant.response", "turn_id": "turn-1",
+             "payload": {"assistant_preview": "answer to turn zero", "prior_turn": True}},
+            {"event_type": "turn.observed", "turn_id": "turn-1",
+             "payload": {"message_preview": "only question"}},
+        ]
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])), \
+             patch.object(packet.runlog, "recent_events", return_value=events):
+            text = packet.build_packet("manual compact", budget=4000)
+
+        self.assertNotIn("answer to turn zero", text)
+
+    def test_recent_section_keeps_all_ten_pairs_at_full_length(self):
+        long = "x" * 600
+        event = {"messages": [
+            item for idx in range(10)
+            for item in ({"role": "user", "content": f"question {idx} {long}"},
+                         {"role": "assistant", "content": f"answer {idx} {long}"})
+        ]}
+
+        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])):
+            text = packet.build_packet("auto compact", event=event)
+
+        self.assertNotIn("[Section truncated to fit budget.]", text)
+        self.assertEqual(text.count("Q: question"), 10)
+
     def test_pi_json_format_wraps_summary(self):
         out = io.StringIO()
         with patch.object(packet, "build_packet", return_value="summary"):
