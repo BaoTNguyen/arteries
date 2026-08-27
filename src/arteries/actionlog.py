@@ -143,6 +143,54 @@ def recent_decisions(
         return _recent_jsonl(project if not episode else None, episode, limit, repo_path)
 
 
+def _corpus_feedback(episode: dict) -> None:
+    """Tell capillaries how the prompt it suggested turned out.
+
+    Here rather than in heart for the same reason the gate is: the direction is
+    capillaries -> arteries -> heart, and heart reaching back around arteries to
+    report on a component it should not know about inverts that. This function
+    already has the episode's outcome and reward in hand.
+
+    Arteries had the whole loop for its own memory -- situation out, reward back
+    through this ingest, joined on episode_id. Capillaries heard the question
+    and never the answer, so its relevance signal could not exist at all. It is
+    deliberately not the same signal as the episode reward (they are joined,
+    neither replaces the other), but it needs the outcome to be computed from.
+
+    Best-effort: retrieval feedback must never be what fails a finished episode.
+    """
+    outcome = episode.get("outcome")
+    total = (episode.get("reward") or {}).get("total")
+    for packet in episode.get("context_packets") or []:
+        trace_id = (packet.get("corpus") or {}).get("trace_id")
+        if not trace_id or not outcome:
+            continue
+        body = {"trace_id": trace_id, "outcome": outcome,
+                "notes": f"heart role={packet.get('role')}"}
+        if total is not None:
+            body["quality_score"] = max(0.0, min(1.0, float(total)))
+        _corpus_feedback_post(body)
+
+
+def _corpus_feedback_post(body: dict) -> None:
+    """Post to the daemon rather than calling FeedbackHandler directly.
+
+    The handler wants `mode`, `prompt_id` and `skill_id` -- internals the API
+    layer resolves from the trace. POST /agent/feedback needs only trace_id and
+    outcome, so it is the contract that does not break when those internals
+    move.
+    """
+    import urllib.request
+
+    url = os.getenv("CAPILLARIES_URL", "http://127.0.0.1:8000") + "/agent/feedback"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=20).close()
+    except Exception:
+        pass
+
+
 def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | None = None) -> int:
     """Backfill the rewards table from episode records.
 
@@ -192,6 +240,7 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
                 tokens_out=usage.get("tokens_out"),
                 cost_usd=usage.get("cost_usd"),
             )
+            _corpus_feedback(ep)
             count += 1
     finally:
         for k, v in saved.items():

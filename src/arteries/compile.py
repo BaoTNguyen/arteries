@@ -473,8 +473,22 @@ def _write_results(conn, result: dict, claimed_ids: list,
             cur.execute(
                 """
                 INSERT INTO arteries.persistent
-                    (fact, domains, confidence, project_id, parent_ids, embedding, kind)
-                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s)
+                    (fact, domains, confidence, project_id, parent_ids, embedding,
+                     kind, episode_id, task_id)
+                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s,
+                    -- carried up from the ephemerals this was distilled from,
+                    -- but only when they agree. A fact compiled from several
+                    -- tasks is by construction not about any one of them, so
+                    -- NULL is right: it is general context, never an answer
+                    -- sheet, and the retrieval exclusion should not hide it.
+                    (SELECT CASE WHEN COUNT(DISTINCT episode_id) = 1
+                                 THEN MIN(episode_id) END
+                       FROM arteries.ephemeral
+                      WHERE id = ANY(%s::uuid[]) AND episode_id IS NOT NULL),
+                    (SELECT CASE WHEN COUNT(DISTINCT task_id) = 1
+                                 THEN MIN(task_id) END
+                       FROM arteries.ephemeral
+                      WHERE id = ANY(%s::uuid[]) AND task_id IS NOT NULL))
                 RETURNING id
                 """,
                 (
@@ -485,6 +499,8 @@ def _write_results(conn, result: dict, claimed_ids: list,
                     claimed_ids,
                     vec,
                     mem.get("kind", "fact"),
+                    claimed_ids,
+                    claimed_ids,
                 ),
             )
             claim_id = str(cur.fetchone()[0])
