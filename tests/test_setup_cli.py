@@ -55,8 +55,15 @@ class SetupCliTests(unittest.TestCase):
             self.assertEqual(data["permissions"]["allow"], ["Bash(*)"])
             self.assertIn("SessionStart", data["hooks"])
             self.assertIn("UserPromptSubmit", data["hooks"])
-            self.assertIn("PreCompact", data["hooks"])
-            self.assertIn("PostCompact", data["hooks"])
+            # the packet rides SessionStart:compact -- compact-event stdout
+            # never reaches the model
+            self.assertNotIn("PreCompact", data["hooks"])
+            self.assertNotIn("PostCompact", data["hooks"])
+            self.assertIn("hook-compact-packet.sh claude-compact",
+                          data["hooks"]["SessionStart"][1]["hooks"][0]["command"])
+            self.assertEqual(data["hooks"]["SessionStart"][1]["matcher"], "compact")
+            # no Stop hook: it fires before the turn's tool calls, so it
+            # captures the opening line and not the answer
             self.assertNotIn("Stop", data["hooks"])
             self.assertIn("SubagentStart", data["hooks"])
             self.assertIn("SubagentStop", data["hooks"])
@@ -262,7 +269,7 @@ class GeneratedAdapterTests(unittest.TestCase):
                     root = Path(tmp)
                     self.assertEqual(
                         setup_cli.main(
-                            [provider, "--cwd", str(root), "--project", "demo"]), 0)
+                            [provider, "--cwd", str(root), "--project", "demo", "--no-db"]), 0)
                     text = (root / relative).read_text(encoding="utf-8")
                     self.assertNotIn("{hooks}", text,
                                      f"{provider} ships a literal placeholder")
@@ -278,7 +285,7 @@ class PiExtensionTests(unittest.TestCase):
     def _extension(self) -> str:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            setup_cli.main(["pi", "--cwd", str(root), "--project", "demo"])
+            setup_cli.main(["pi", "--cwd", str(root), "--project", "demo", "--no-db"])
             return (root / ".pi/extensions/arteries.ts").read_text(encoding="utf-8")
 
     def test_registers_only_events_pi_actually_emits(self):
