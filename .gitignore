@@ -218,3 +218,5 @@ __marimo__/
 .streamlit/secrets.toml
 # Arteries local runtime state
 .arteries/
+.codex/config.toml
+.claude/settings.local.json
