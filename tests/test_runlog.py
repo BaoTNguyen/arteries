@@ -16,6 +16,20 @@ from arteries.config import DB_CONFIG
 pytestmark = pytest.mark.writes_events
 
 
+def _db_reachable() -> bool:
+    try:
+        conn = psycopg2.connect(connect_timeout=2, **DB_CONFIG)
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+# Mirrors test_ledger_contracts. Two copies of an eight-line probe beat a
+# shared helper nothing else would import.
+DB_REACHABLE = _db_reachable()
+
+
 class RunlogTests(unittest.TestCase):
     def test_log_event_falls_back_to_repo_jsonl(self):
         old_cwd = Path.cwd()
@@ -108,6 +122,7 @@ class RunlogDiscardTests(unittest.TestCase):
         self.assertEqual(event["payload"]["session_id"], "sess-42")
 
 
+@unittest.skipUnless(DB_REACHABLE, "no reachable Postgres; run lifecycle is a database contract")
 class RunLifecycleTests(unittest.TestCase):
     """Runs are keyed by session and closed by a sweep.
 
