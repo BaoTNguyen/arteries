@@ -8,6 +8,7 @@ import tempfile
 import pytest
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from arteries import actionlog, runlog
 from arteries.config import DB_CONFIG
@@ -119,3 +120,62 @@ class ActionlogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIngestUnscoredEpisodes(unittest.TestCase):
+    """A null reward means nothing measured the episode. Scoring it 0.0 would
+    invent a failure; raising on it used to abort the whole ingest, which left
+    every later episode in the directory permanently unread."""
+
+    def _episodes(self, tmp: Path, records: list[dict]) -> str:
+        path = tmp / "episodes.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in records))
+        return str(path)
+
+    def test_a_null_reward_is_skipped_not_scored_zero(self):
+        logged = []
+        with tempfile.TemporaryDirectory() as d:
+            src = self._episodes(Path(d), [
+                {"episode_id": "worker-a", "outcome": "unverified",
+                 "reward": {"total": None, "components": {}}},
+                {"episode_id": "merged-b", "outcome": "pass",
+                 "reward": {"total": 0.99, "components": {"public_tests": 1.0}}},
+            ])
+            with mock.patch.object(actionlog, "log_reward",
+                                   side_effect=lambda *a, **k: logged.append((a, k))), \
+                 mock.patch.object(actionlog, "_corpus_feedback"), \
+                 mock.patch.object(actionlog, "journal_append"):
+                count = actionlog.ingest_episodes(src)
+        self.assertEqual(count, 1)                      # only the scored one
+        self.assertEqual(len(logged), 1)
+        self.assertEqual(logged[0][0][1], 0.99)         # and it kept its value
+
+    def test_one_unscored_episode_does_not_strand_the_rest(self):
+        # the null used to raise inside the loop, so everything sorted after it
+        # was never read -- permanently, because the retry hit the same record.
+        logged = []
+        with tempfile.TemporaryDirectory() as d:
+            src = self._episodes(Path(d), [
+                {"episode_id": "first", "outcome": "unverified", "reward": {"total": None}},
+                {"episode_id": "second", "outcome": "pass", "reward": {"total": 0.5}},
+                {"episode_id": "third", "outcome": "fail", "reward": {"total": 0.0}},
+            ])
+            with mock.patch.object(actionlog, "log_reward",
+                                   side_effect=lambda *a, **k: logged.append(a[1])), \
+                 mock.patch.object(actionlog, "_corpus_feedback"), \
+                 mock.patch.object(actionlog, "journal_append"):
+                count = actionlog.ingest_episodes(src)
+        self.assertEqual(count, 2)
+        self.assertEqual(logged, [0.5, 0.0])            # a real 0.0 still lands
+
+    def test_capillaries_still_hears_the_outcome_of_an_unscored_episode(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as d:
+            src = self._episodes(Path(d), [
+                {"episode_id": "worker-a", "outcome": "unverified", "reward": {"total": None}},
+            ])
+            with mock.patch.object(actionlog, "log_reward"), \
+                 mock.patch.object(actionlog, "_corpus_feedback", side_effect=seen.append), \
+                 mock.patch.object(actionlog, "journal_append"):
+                actionlog.ingest_episodes(src)
+        self.assertEqual([e["episode_id"] for e in seen], ["worker-a"])
