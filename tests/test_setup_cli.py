@@ -250,16 +250,24 @@ class GeneratedAdapterTests(unittest.TestCase):
          exec target a literal path named "{hooks}"
       2. a hook path written relative, which resolves against whatever cwd the
          host hands the hook
+
+    Rule 2 holds for files a machine generates for itself, where the host
+    invoking a hook promises nothing about its working directory. It inverts for
+    the two files the repository commits: an absolute path there is one
+    developer's home directory, which resolves for exactly that developer and is
+    broken in every clone. Those are checked by TRACKED_DOCS instead.
     """
 
     ADAPTER_FILES = {
         "pi": [".pi/extensions/arteries.ts"],
         "opencode": [".opencode/plugins/arteries.ts"],
         "cursor": [".cursor/rules/arteries.mdc"],
-        "codex": ["AGENTS.md", ".codex/config.toml"],
-        "hermes": ["HERMES.md"],
+        "codex": [".codex/config.toml"],
         "claude": [".claude/settings.local.json"],
     }
+
+    #: generated into files the repo tracks, so they must be portable
+    TRACKED_DOCS = {"codex": ["AGENTS.md"], "hermes": ["HERMES.md"]}
 
     def test_no_unsubstituted_placeholders_and_paths_are_absolute(self):
         for provider, relatives in self.ADAPTER_FILES.items():
@@ -279,6 +287,23 @@ class GeneratedAdapterTests(unittest.TestCase):
                     # hooks dir is doing it relative to an unknown cwd
                     self.assertNotIn(".arteries/hooks", text.replace(absolute, ""),
                                      f"{provider} references hooks by relative path")
+
+    def test_tracked_docs_name_the_hooks_dir_relative_to_the_repo(self):
+        """AGENTS.md is committed in every repo in this stack. It carried an
+        absolute hooks path, so `/home/<someone>` shipped to every clone."""
+        for provider, relatives in self.TRACKED_DOCS.items():
+            for relative in relatives:
+                with self.subTest(provider=provider, file=relative), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.assertEqual(
+                        setup_cli.main(
+                            [provider, "--cwd", str(root), "--project", "demo", "--no-db"]), 0)
+                    text = (root / relative).read_text(encoding="utf-8")
+                    self.assertNotIn("{hooks}", text)
+                    self.assertIn(".arteries/hooks/", text)
+                    self.assertNotIn(str(root), text,
+                                     f"{provider} wrote an absolute path into a tracked file")
 
 
 class PiExtensionTests(unittest.TestCase):
