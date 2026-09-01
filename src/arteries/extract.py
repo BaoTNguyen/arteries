@@ -182,6 +182,29 @@ def strip_assistant_response(text: str, user_turn: str = "") -> str:
     return head + _ELISION + (kept + _ELISION if kept else "") + tail
 
 
+def strip_report(text: str, user_turn: str = "") -> dict:
+    """What the stripper did, for the journal.
+
+    `stored: 0` says an assistant turn was discarded and nothing says which
+    filter discarded it. Replaying the stripper offline on 250 real turns from
+    the same transcript drops 3%; the journal says 71% were dropped in the hook.
+    Both cannot be true, and no field recorded at the time can tell them apart.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    fences = sum(1 for ln in text.splitlines() if _CODE_FENCE.match(ln))
+    return {
+        "in_chars": len(text),
+        "in_lines": len(lines),
+        "fences": fences,
+        "unbalanced_fence": bool(fences % 2),
+        "ref_chars": len(user_turn),
+        "narration_dropped": sum(1 for ln in lines if _NARRATION.match(ln)),
+        "overlap_dropped": sum(1 for ln in lines if _overlap(ln, user_turn) > 0.6),
+        "out_words": len(strip_assistant_response(text, user_turn).split()),
+        "min_words": MIN_EXTRACTABLE_WORDS,
+    }
+
+
 def store_assistant_response(text: str, user_turn: str = "") -> int:
     """Strip and store an assistant response as a single ephemeral record.
 

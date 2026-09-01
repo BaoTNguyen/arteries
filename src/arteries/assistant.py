@@ -106,12 +106,17 @@ def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = F
         # packet.py matches on this instead of counting turns backwards.
         payload["answers_preview"] = answers[:200]
     runlog.log_event("assistant.response", "arteries", payload, turn_id=turn_id)
-    runlog.log_event(
-        "memory.assistant.stored",
-        "arteries",
-        {"stored": stored, "input_chars": len(text)},
-        turn_id=turn_id,
-    )
+    report = {"stored": stored, "input_chars": len(text)}
+    if not stored:
+        # Only on a drop: the counters that say which filter did it. Costs
+        # nothing on the 29% that store, and turns the other 71% from an
+        # unexplained zero into a diagnosis.
+        from arteries.extract import strip_report
+        try:
+            report |= strip_report(text, user_turn)
+        except Exception as exc:
+            report["strip_report_failed"] = f"{type(exc).__name__}: {exc}"[:200]
+    runlog.log_event("memory.assistant.stored", "arteries", report, turn_id=turn_id)
     return stored
 
 
