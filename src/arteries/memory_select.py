@@ -30,6 +30,14 @@ class AgentContext:
     capabilities: CliCapabilities
 
 
+def _env_episode_id() -> str | None:
+    return os.getenv("ARTERIES_EPISODE_ID") or None
+
+
+def _env_task_id() -> str | None:
+    return os.getenv("ARTERIES_TASK_ID") or None
+
+
 def context_from_env() -> AgentContext:
     cli = os.getenv("ARTERIES_CLI", "generic")
     return AgentContext(
@@ -43,14 +51,46 @@ def context_from_env() -> AgentContext:
     )
 
 
+def _prior_attempt_at_this_task(row: dict) -> bool:
+    """True when a record was written by an *earlier* episode of the task now
+    being worked on.
+
+    Not "same task" -- the current episode's own notes are the whole point of
+    ephemeral, and dropping them would break memory within a run. Only earlier
+    episodes of the same task, which are the ones that may hold the answer.
+
+    Why this matters more for training retrieval than for the agent: if an
+    episode's reward is inflated by recalling its own previous solution, and the
+    retriever is trained on episode outcome, the retriever learns that fetching
+    last time's answer is the highest-value action. It scores perfectly and
+    generalises to nothing. The exclusion is what keeps the reward a measurement
+    rather than a reward hack.
+    """
+    task, episode = _env_task_id(), _env_episode_id()
+    if not task:
+        return False
+    if row.get("task_id") != task:
+        return False
+    return bool(episode) and row.get("episode_id") != episode
+
+
 def select_for_frame(
     message: str,
     context: AgentContext | None = None,
     embedding: list[float] | None = None,
+    exclude_prior_attempts: bool | None = None,
 ) -> tuple[list[dict], list[dict]]:
     context = context or context_from_env()
     ephemerals = _select_ephemeral(context)
     persistents = _select_persistent(message, context, embedding)
+    if exclude_prior_attempts is None:
+        exclude_prior_attempts = os.getenv("ARTERIES_PRIOR_ATTEMPTS", "exclude") != "keep"
+    if exclude_prior_attempts:
+        # filtered after selection, not pushed into four separate queries: the
+        # cost is a slightly shorter frame when the top hits were all prior
+        # attempts, which is the honest result anyway
+        ephemerals = [r for r in ephemerals if not _prior_attempt_at_this_task(r)]
+        persistents = [r for r in persistents if not _prior_attempt_at_this_task(r)]
     return ephemerals, persistents
 
 

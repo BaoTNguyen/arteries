@@ -47,7 +47,14 @@ except Exception:  # capillaries not installed / not importable
     EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
     QUERY_PREFIX = os.getenv("EMBED_QUERY_PREFIX", "")
 
-PROJECT_ID = os.getenv("ARTERIES_PROJECT", "default")
+# Falls back to the repo directory name, never the string "default".
+# runlog._project() already resolves that way, so an unset ARTERIES_PROJECT
+# split a single turn across two identities: agent_events under "arteries" and
+# every memory write under "default". The event log looked healthy throughout,
+# which is why it went unnoticed -- 46 ephemeral rows, 11 edges and 19
+# retrievals landed under a project nobody registered.
+PROJECT_ID = os.getenv("ARTERIES_PROJECT") or os.path.basename(
+    os.getenv("ARTERIES_REPO") or os.getcwd()) or "default"
 AGENT_PROCESS_ID = os.getenv("ARTERIES_AGENT_ID", str(os.getpid()))
 # both names accepted: cli_normalize/hooks set ARTERIES_PARENT_AGENT_ID
 PARENT_AGENT_ID = os.getenv("ARTERIES_PARENT_AGENT_ID") or os.getenv("ARTERIES_PARENT_AGENT") or None

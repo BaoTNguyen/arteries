@@ -1,4 +1,4 @@
-"""Ledger self-check: decisions/rewards with forced JSONL fallback, spool tee,
+"""Ledger self-check: decisions/rewards with forced JSONL fallback, journal tee,
 and runlog episode stamping. No Postgres required."""
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class ActionlogTests(unittest.TestCase):
             "ARTERIES_PROJECT": "actionlog-selftest",
             "ARTERIES_EPISODE_ID": "ep-selftest-1",
             "ARTERIES_TASK_ID": "task-selftest",
-            "HEART_SPOOL_DIR": str(self.root / "spool"),
+            "EVENT_JOURNAL_DIR": str(self.root / "journal"),
         })
         # force the DB path to fail so the JSONL fallback is what's under test
         self._db = dict(DB_CONFIG)
@@ -37,13 +37,13 @@ class ActionlogTests(unittest.TestCase):
         os.environ.update(self._env)
         self.tmp.cleanup()
 
-    def _spool_events(self) -> list[dict]:
+    def _journal_events(self) -> list[dict]:
         events = []
-        for path in sorted((self.root / "spool").glob("*.ndjson")):
+        for path in sorted((self.root / "journal").glob("*.ndjson")):
             events += [json.loads(line) for line in path.read_text().splitlines()]
         return events
 
-    def test_decision_fallback_and_spool(self):
+    def test_decision_fallback_and_journal(self):
         rec = actionlog.log_decision(
             "retrieval.gate",
             chosen_action="abstain",
@@ -61,15 +61,15 @@ class ActionlogTests(unittest.TestCase):
         rows = actionlog.recent_decisions(episode="ep-selftest-1")
         self.assertEqual(rows[0]["chosen_action"], "abstain")
 
-        spooled = self._spool_events()
-        gate = [e for e in spooled if e["kind"] == "decision.retrieval.gate"]
+        journaled = self._journal_events()
+        gate = [e for e in journaled if e["kind"] == "decision.retrieval.gate"]
         self.assertEqual(gate[0]["episode_id"], "ep-selftest-1")
         self.assertEqual(gate[0]["payload"]["chosen"], "abstain")
         self.assertEqual(gate[0]["payload"]["store"], "jsonl")  # DB forced down
 
-    def test_reward_fallback_and_spool(self):
+    def test_reward_fallback_and_journal(self):
         actionlog.log_reward("task_success", 0.85, components={"public_tests": 1.0}, source="heart")
-        kinds = [e["kind"] for e in self._spool_events()]
+        kinds = [e["kind"] for e in self._journal_events()]
         self.assertIn("reward.task_success", kinds)
 
     @pytest.mark.writes_events
@@ -77,7 +77,7 @@ class ActionlogTests(unittest.TestCase):
     def test_runlog_stamps_episode_and_tees(self):
         event = runlog.log_event("turn.observed", "arteries", {"message_chars": 12}, turn_id="turn-2")
         self.assertEqual(event["payload"]["episode_id"], "ep-selftest-1")
-        observed = [e for e in self._spool_events() if e["kind"] == "turn.observed"]
+        observed = [e for e in self._journal_events() if e["kind"] == "turn.observed"]
         self.assertEqual(observed[0]["episode_id"], "ep-selftest-1")
         self.assertEqual(observed[0]["payload"]["message_chars"], 12)
         self.assertEqual(observed[0]["payload"]["store"], "jsonl")
@@ -108,13 +108,13 @@ class ActionlogTests(unittest.TestCase):
         self.assertEqual(rewards[0]["components"]["outcome"], "pass")
         # env identity restored after the ingest loop
         self.assertEqual(os.environ["ARTERIES_EPISODE_ID"], "ep-selftest-1")
-        self.assertIn("reward.episode", [e["kind"] for e in self._spool_events()])
+        self.assertIn("reward.episode", [e["kind"] for e in self._journal_events()])
 
-    def test_spool_off(self):
-        os.environ["ARTERIES_SPOOL"] = "off"
+    def test_journal_off(self):
+        os.environ["ARTERIES_JOURNAL"] = "off"
         actionlog.log_decision("memory.write_policy", "write_ephemeral",
                                ["write_ephemeral", "discard_ephemeral"])
-        self.assertFalse((self.root / "spool").exists())
+        self.assertFalse((self.root / "journal").exists())
 
 
 if __name__ == "__main__":
