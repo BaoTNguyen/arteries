@@ -202,6 +202,12 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
     and the sender pipes it in; reaching into another repo's directory layout
     couples this to whichever of them happens to own the filesystem this week,
     and RL traffic is moving to marrow.
+
+    An episode whose reward total is null is skipped, not scored zero. Heart
+    writes null on purpose for `blocked`, `unverified` and `scope_denied`, and a
+    zero would assert those episodes did badly rather than that nothing measured
+    them. Each skip is journalled as `reward.unscored` and counted on stderr, so
+    a run that scores nothing says so instead of looking like a quiet success.
     """
     if source is None:
         episodes = [json.loads(line) for line in sys.stdin.read().splitlines() if line.strip()]
@@ -220,7 +226,7 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
     except Exception:
         pass  # ponytail: no dedup in jsonl-fallback mode; re-ingest after db is back
 
-    count = 0
+    count = skipped = 0
     saved = {k: os.environ.get(k) for k in ("ARTERIES_EPISODE_ID", "ARTERIES_TASK_ID")}
     try:
         for ep in episodes:
@@ -229,10 +235,30 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
             os.environ["ARTERIES_EPISODE_ID"] = ep["episode_id"]
             os.environ["ARTERIES_TASK_ID"] = ep.get("task_id") or ""
             usage = ep.get("usage") or {}
+            reward = ep.get("reward") or {}
+            total = reward.get("total")
+            if total is None:
+                # Unscored is not zero, and the difference is the whole reason
+                # heart writes null here: `blocked` means the agent declined to
+                # guess, `unverified` means nothing ran a check, `scope_denied`
+                # means the sandbox refused writes the spec allowed. Recording
+                # 0.0 for any of them teaches the model a failure that never
+                # happened -- and blaming it for a mount table drawn too tight
+                # is the worst of the three.
+                #
+                # It is also not something to swallow. `.get("total", 0.0)` used
+                # to default only on a MISSING key, so a present null reached
+                # float() and raised -- which aborted the loop, leaving every
+                # later episode in the directory permanently unread.
+                journal_append("arteries", "reward.unscored", reward_source="heart",
+                               outcome=ep.get("outcome"))
+                skipped += 1
+                _corpus_feedback(ep)  # capillaries still wants the outcome
+                continue
             log_reward(
                 "episode",
-                ep.get("reward", {}).get("total", 0.0),
-                components={**ep.get("reward", {}).get("components", {}),
+                total,
+                components={**(reward.get("components") or {}),
                             "outcome": ep.get("outcome")},
                 source="heart",
                 repo_path=repo_path,
@@ -245,6 +271,10 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
     finally:
         for k, v in saved.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    if skipped:
+        # one line, because silence here is how you fail to notice that most of
+        # a week's episodes carried no score at all
+        print(f"skipped {skipped} unscored episode(s)", file=sys.stderr)
     return count
 
 

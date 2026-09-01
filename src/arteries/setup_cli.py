@@ -227,6 +227,22 @@ def _hooks_dir(ctx: Context) -> str:
     return str(_arteries_dir(ctx) / "hooks")
 
 
+def _hooks_ref(ctx: Context) -> str:
+    """The hooks directory as it should appear in a file the repo tracks.
+
+    Hook *commands* keep the absolute path: they live in generated,
+    machine-local files (.codex/config.toml, .claude/settings.local.json) and
+    the CLI invoking them makes no promise about its working directory.
+
+    Prose in AGENTS.md and HERMES.md is the opposite case. Those files are
+    committed, so an absolute path writes one developer's home directory into
+    every clone -- five repos here already carry `/home/bao-tn` on main -- and
+    it is wrong for everyone else who reads it. Relative, anchored to the
+    repository root, is both portable and true.
+    """
+    return ".arteries/hooks"
+
+
 def _runtime_env(ctx: Context, cli_name: str) -> str:
     return f'''ARTERIES_ROOT="${{ARTERIES_ROOT:-{ctx.arteries_root}}}"
 CAPILLARIES_ROOT="${{CAPILLARIES_ROOT:-{ctx.capillaries_root}}}"
@@ -781,9 +797,11 @@ def _codex_config_path(ctx: Context) -> Path:
 
 
 def _codex_agents_section(ctx: Context) -> str:
-    hooks = _hooks_dir(ctx)
+    hooks = _hooks_ref(ctx)
     return f'''{MARKER_START}
 ## Arteries Memory
+
+Paths below are relative to the repository root; run them from there.
 
 At session start, run `PLUGIN_DATA=1 node {hooks}/arteries-activate.cjs` and include the output as session context.
 On each user prompt, pipe the prompt JSON to `PLUGIN_DATA=1 node {hooks}/arteries-observe.cjs` and use any returned `additionalContext` to guide your response.
@@ -1335,11 +1353,11 @@ def _hermes_mcp_path(ctx: Context) -> Path:
 
 
 def _hermes_section(ctx: Context) -> str:
-    hooks = _hooks_dir(ctx)
+    hooks = _hooks_ref(ctx)
     return f'''{HERMES_MARKER_START}
 # Arteries Memory
 
-This project has an explicit Hermes adapter installed. Use these commands when Hermes needs project memory or prompt retrieval:
+This project has an explicit Hermes adapter installed. Use these commands when Hermes needs project memory or prompt retrieval, run from the repository root:
 
 ```bash
 ARTERIES_CLI=hermes bash {hooks}/activate.sh
