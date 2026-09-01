@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [dev]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: arteries
+
+      # arteries imports capillaries by name (memory_types, eval), so the suite
+      # cannot collect without it. Which capillaries is the point of the matrix:
+      # a PR into main is judged against capillaries' main, work on dev against
+      # capillaries' dev — so a change that needs an unlanded capillaries change
+      # goes green on dev and red on the PR, which is when you want to hear it.
+      - uses: actions/checkout@v4
+        with:
+          repository: BaoTNguyen/capillaries
+          ref: ${{ github.base_ref == 'main' && 'main' || 'dev' }}
+          path: capillaries
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # capillaries goes in editable so its own pyproject supplies the transitive
+      # deps arteries reaches through it (httpx, frontmatter, numpy). Listing them
+      # here instead would be a second copy that drifts the first time capillaries
+      # adds one.
+      - run: pip install -e ./capillaries -e ./arteries pytest
+
+      - working-directory: arteries
+        run: python -m pytest -q

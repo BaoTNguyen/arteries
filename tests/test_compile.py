@@ -67,3 +67,55 @@ class DedupeTests(unittest.TestCase):
         )
         self.assertEqual(len(kept), 1)
         self.assertEqual(rejected, [])
+
+
+class DecodeResponseTests(unittest.TestCase):
+    """Reading a compile response that is not exactly one clean JSON object.
+
+    Three failure shapes were logged identically as `memory.compile.failed` for
+    148 passes: a connection that never happened, an object followed by more
+    text, and an object that lost its closing brackets. Only the last two are
+    the parser's business, and they are recoverable.
+    """
+
+    def test_object_followed_by_more_text(self):
+        data = compiler._decode_response(
+            '{"new_memories":[{"fact":"x"}],"superseded":[]}\n{"stray":1}')
+        self.assertEqual(data["new_memories"], [{"fact": "x"}])
+
+    def test_prose_before_the_object(self):
+        data = compiler._decode_response(
+            'Here is the result:\n{"new_memories":[],"superseded":[]}')
+        self.assertEqual(data["superseded"], [])
+
+    def test_an_object_without_the_compile_keys_is_not_a_compile_response(self):
+        with self.assertRaises(ValueError):
+            compiler._decode_response('{"unrelated":true}')
+
+    def test_lost_closing_brackets_are_repaired(self):
+        """Observed against llama.cpp: a complete object, finish_reason=stop,
+        and the final `}` never arrives. 3,600 usable chars for one byte."""
+        data = compiler._decode_response('{"new_memories":[{"fact":"a"}],"superseded":[]')
+        self.assertEqual(data["new_memories"], [{"fact": "a"}])
+
+    def test_truncation_inside_a_string_is_refused(self):
+        """Closing the quote would store half a sentence as the whole finding."""
+        self.assertIsNone(compiler._close_brackets('{"new_memories":[{"fact":"half a sen'))
+
+    def test_trailing_comma_is_refused(self):
+        """A comma means the next element was starting when generation stopped."""
+        self.assertIsNone(compiler._close_brackets('{"new_memories":[{"fact":"a"},'))
+
+    def test_a_complete_object_is_never_repaired(self):
+        self.assertIsNone(compiler._close_brackets('{"new_memories":[]}'))
+
+    def test_brackets_inside_strings_do_not_count(self):
+        data = compiler._decode_response('{"new_memories":[{"fact":"a } and a ] in prose"}]')
+        self.assertEqual(data["new_memories"][0]["fact"], "a } and a ] in prose")
+
+    def test_the_finish_reason_reaches_the_error(self):
+        """`length` and `stop` are the difference between a batch that was too
+        big and a model that is broken."""
+        with self.assertRaises(ValueError) as caught:
+            compiler._decode_response("not json at all", "length")
+        self.assertIn("finish_reason=length", str(caught.exception))

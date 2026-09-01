@@ -425,9 +425,88 @@ Existing persistent memories:
             timeout=COMPILE_TIMEOUT,
         )
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+        body = resp.json()
+        content = body["choices"][0]["message"]["content"]
+        finish = (body["choices"][0].get("finish_reason") or "").strip()
 
-    return json.loads(content)
+    return _decode_response(content, finish)
+
+
+def _decode_response(content: str, finish_reason: str = "") -> dict:
+    """Read the first JSON object out of a compile response.
+
+    `json.loads` on the whole string fails three different ways that all used to
+    surface as one `memory.compile.failed`: a connection that never happened, a
+    generation cut off mid-object, and a complete object followed by more text.
+    Only the third is recoverable, and it is recoverable exactly the way heart's
+    `_parse_decomposition` recovers it -- scan for the first decodable object
+    instead of demanding the whole string be one.
+
+    The other two are re-raised with the finish reason attached, because
+    `finish_reason == "length"` is the difference between "the model is broken"
+    and "the batch was too big", and that distinction was invisible for 148
+    failures.
+    """
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(content):
+        if ch != "{":
+            continue
+        try:
+            data, _end = decoder.raw_decode(content, i)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and ("new_memories" in data or "superseded" in data):
+            return data
+    repaired = _close_brackets(content)
+    if repaired is not None:
+        try:
+            data = json.loads(repaired)
+        except ValueError:
+            pass
+        else:
+            if isinstance(data, dict) and ("new_memories" in data or "superseded" in data):
+                return data
+    # Nothing decodable. Say why, in the message the journal will store.
+    detail = f" (finish_reason={finish_reason})" if finish_reason else ""
+    raise ValueError(f"no decodable compile object in {len(content)} chars{detail}")
+
+
+def _close_brackets(content: str) -> str | None:
+    """Close a response that lost only its trailing brackets.
+
+    Observed against llama.cpp with a json_object grammar: the model emits a
+    complete object, stops with finish_reason=stop, and the final `}` never
+    arrives -- 3,600 usable characters thrown away for one byte.
+
+    Only bracket-level truncation is repaired. Ending inside a string means a
+    fact was cut mid-sentence, and closing the quote would store half a
+    sentence as though it were the whole finding, which is worse than losing
+    the batch. Trailing commas are also refused: they mean an element was
+    starting when generation stopped.
+    """
+    stack: list[str] = []
+    in_string = escaped = False
+    for ch in content:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+    if in_string or not stack:
+        return None
+    if content.rstrip().endswith(","):
+        return None
+    return content + "".join("}" if b == "{" else "]" for b in reversed(stack))
 
 
 def _is_uuid(value: Any) -> bool:
@@ -473,8 +552,22 @@ def _write_results(conn, result: dict, claimed_ids: list,
             cur.execute(
                 """
                 INSERT INTO arteries.persistent
-                    (fact, domains, confidence, project_id, parent_ids, embedding, kind)
-                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s)
+                    (fact, domains, confidence, project_id, parent_ids, embedding,
+                     kind, episode_id, task_id)
+                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s,
+                    -- carried up from the ephemerals this was distilled from,
+                    -- but only when they agree. A fact compiled from several
+                    -- tasks is by construction not about any one of them, so
+                    -- NULL is right: it is general context, never an answer
+                    -- sheet, and the retrieval exclusion should not hide it.
+                    (SELECT CASE WHEN COUNT(DISTINCT episode_id) = 1
+                                 THEN MIN(episode_id) END
+                       FROM arteries.ephemeral
+                      WHERE id = ANY(%s::uuid[]) AND episode_id IS NOT NULL),
+                    (SELECT CASE WHEN COUNT(DISTINCT task_id) = 1
+                                 THEN MIN(task_id) END
+                       FROM arteries.ephemeral
+                      WHERE id = ANY(%s::uuid[]) AND task_id IS NOT NULL))
                 RETURNING id
                 """,
                 (
@@ -485,6 +578,8 @@ def _write_results(conn, result: dict, claimed_ids: list,
                     claimed_ids,
                     vec,
                     mem.get("kind", "fact"),
+                    claimed_ids,
+                    claimed_ids,
                 ),
             )
             claim_id = str(cur.fetchone()[0])

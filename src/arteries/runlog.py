@@ -17,9 +17,41 @@ import psycopg2
 import psycopg2.extras
 
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
-from arteries.spool import spool_emit
+from arteries.journal import journal_append
 
 RUN_ENV_KEYS = ("AGENT_RUN_ID", "ARTERIES_RUN_ID")
+
+# How long a run may sit idle before the sweep closes it.
+#
+# Two populations, two answers. Heart brackets its own work and emits
+# episode.finished, so an episode run that goes quiet for an hour has crashed
+# or been killed -- closing it is a mercy. An hour rather than thirty minutes
+# because a real episode can spend that long inside one verify-and-fix round
+# without emitting anything, and closing a live run is worse than closing a
+# dead one late.
+#
+# An interactive window is the opposite: you leave it open Friday and come back
+# Monday, and that is not a fault. 48 hours is deliberately generous, because a
+# closed run costs nothing but a join -- session_id still stitches the
+# conversation across it.
+#
+# Both are env-overridable: the tolerance is the orchestrator's judgement, not
+# arteries'. Heart already builds the child environment where it would set one.
+IDLE_EPISODE = os.getenv("ARTERIES_IDLE_EPISODE", "1 hour")
+IDLE_INTERACTIVE = os.getenv("ARTERIES_IDLE_INTERACTIVE", "48 hours")
+
+# One process resolves its run once. current_run() is called from every
+# log_event, and the session lookup is a database round trip; hook processes are
+# short-lived, so this turns one query per event into one query per hook.
+_resolved: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+# Mirrors ARTERIES_EPHEMERAL=discard. The smoke script advertised itself as a
+# dry run while writing turn.observed rows into the live store and rewriting
+# the current-run pointer, which handed a real session's turns to a run created
+# by a test. A dry run has to be dry on both sides of the ledger.
+def _discard() -> bool:
+    return os.getenv("ARTERIES_RUNLOG") == "discard"
+
 
 
 def new_turn_id() -> str:
@@ -31,18 +63,33 @@ def start_run(
     agent_id: str | None = None,
     cli: str | None = None,
     repo_path: str | Path | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
+    """Begin this session's run, or rejoin the one it already has.
+
+    Called from every CLI's session-start hook, which fires on resume as well as
+    on a fresh start -- so minting unconditionally is how one repo accumulated
+    18 Claude runs. The sweep rides here too: session start is the moment a
+    stale run could be joined by mistake, and the only moment that matters.
+    """
+    sweep_runs()
     repo = _repo(repo_path)
-    run = _run_payload(
-        str(uuid.uuid4()),
-        _project(project_id, repo),
-        _agent(agent_id),
-        _cli(cli),
-        repo,
-    )
-    _write_current_run(repo, run)
+
+    if force:
+        run = _run_payload(str(uuid.uuid4()), _project(project_id, repo), _agent(agent_id),
+                           _cli(cli), repo, metadata=_run_metadata())
+        _write_current_run(repo, run)
+        _resolved.clear()
+    else:
+        run = current_run(project_id, agent_id, cli, repo_path)
+
+    # Session start is where a run becomes real, so later processes can find it
+    # by session and resume rather than minting a fresh id every time.
+    existed = _run_exists(run["run_id"])
+    _persist_run(run)
+
     log_event(
-        "run.started",
+        "run.resumed" if existed else "run.started",
         "arteries",
         {},
         project_id=run["project_id"],
@@ -52,6 +99,23 @@ def start_run(
         repo_path=repo,
     )
     return run
+
+
+def _persist_run(run: dict[str, Any]) -> None:
+    """Insert on creation so the next process can find this run. Best-effort:
+    an unwritable run is still usable here, and log_event's JSONL fallback keeps
+    the events either way."""
+    if _discard():
+        return
+    _db(lambda cur: _write_db_run(run), None)
+
+
+def _run_exists(run_id: str) -> bool:
+    def work(cur):
+        cur.execute("SELECT 1 FROM arteries.agent_runs WHERE id = %s", (run_id,))
+        return cur.fetchone() is not None
+
+    return _db(work, False)
 
 
 def current_run(
@@ -65,15 +129,50 @@ def current_run(
     agent = _agent(agent_id)
     cli_name = _cli(cli)
 
+    # Step 1: an assigned id wins outright. Heart mints one per subagent
+    # session and hands it down, so two concurrent episodes cannot collide on
+    # any shared file -- they never reach one.
     run_id = _env_run_id()
     if run_id:
-        return _run_payload(run_id, project, agent, cli_name, repo)
+        return _run_payload(run_id, project, agent, cli_name, repo,
+                            metadata=_run_metadata())
 
+    session = os.getenv("ARTERIES_SESSION_ID") or ""
+    cache_key = (session, cli_name, str(repo))
+    if cache_key in _resolved:
+        cached = _resolved[cache_key]
+        # The cache spares the database round trip, not the pointer file. A
+        # sessionless CLI still reads that file from other processes, so a
+        # missing one is repaired here rather than only on the cold path.
+        if not session and not _current_run_path(repo, cli_name).exists():
+            _write_current_run(repo, cached)
+        return cached
+
+    # Step 2: the session's own open run. This is what "resume yesterday's
+    # session" was always meant to mean; keying by CLI could only ever say
+    # "whatever ran last", which is how one run swallowed six days of work.
+    if session:
+        found = _session_run(session, open_only=True)
+        if found:
+            run = _run_payload(str(found["id"]), project, agent, cli_name, repo,
+                               started_at=str(found["started_at"]),
+                               metadata=dict(found.get("metadata") or {}))
+            _write_current_run(repo, run)
+            _resolved[cache_key] = run
+            return run
+
+    # Step 3 is for CLIs that report no session at all. A CLI that *did* report
+    # one and found no open run of its own must fall through to a new run: the
+    # per-CLI pointer names whatever ran last, so honouring it here would hand a
+    # fresh session the previous session's run -- the exact bleed step 2 exists
+    # to stop.
+    #
     # Runs are keyed by CLI, not just by repo. A single repo is worked by several
     # CLIs, and a shared current-run file meant whoever called `runs start` last
     # owned every subsequent turn — a Claude turn landing on a Codex run, priced
     # against the wrong rate card. Each CLI now resumes its own run.
-    for candidate in (_current_run_path(repo, cli_name), repo / ".arteries" / "current-run.json"):
+    for candidate in ((_current_run_path(repo, cli_name), repo / ".arteries" / "current-run.json")
+                      if not session else ()):
         if not candidate.exists():
             continue
         try:
@@ -99,12 +198,31 @@ def current_run(
             repo,
             started_at=data.get("started_at"),
         )
+        # Step 3: the per-CLI pointer, for CLIs that report no session. Only
+        # honoured while the run is still open -- an ended run is history, and
+        # joining it is what made runs immortal.
+        if not _run_is_open(run["run_id"]):
+            continue
         if candidate.name == "current-run.json":
             _write_current_run(repo, run)  # migrate it under the per-CLI key
+        _resolved[cache_key] = run
         return run
 
-    run = _run_payload(str(uuid.uuid4()), project, agent, cli_name, repo)
+    # Step 4: a new run. A session whose previous run was swept records it, so
+    # one conversation stays walkable across the runs it spans.
+    previous = _session_run(session, open_only=False) if session else None
+    run = _run_payload(
+        str(uuid.uuid4()), project, agent, cli_name, repo,
+        metadata=_run_metadata(previous_run_id=str(previous["id"]) if previous else None),
+    )
     _write_current_run(repo, run)
+    # Deliberately not persisted here. Resolving a run must stay a read: this
+    # function is called from every log_event, and writing a row on resolution
+    # meant merely *asking* which run you were in created one -- a test that
+    # resolved without logging left rows in the live store. start_run persists
+    # at session start, and log_event's _write_db_run persists on first event,
+    # so a run nobody began and nobody wrote to correctly does not exist.
+    _resolved[cache_key] = run
     return run
 
 
@@ -134,10 +252,13 @@ def log_event(
         "created_at": _now_iso(),
     }
     # stamp episode identity (set by heart per episode) so events join the ledger
-    for key, env_key in (("episode_id", "ARTERIES_EPISODE_ID"), ("task_id", "ARTERIES_TASK_ID")):
+    for key, env_key in (("episode_id", "ARTERIES_EPISODE_ID"), ("task_id", "ARTERIES_TASK_ID"),
+                         ("session_id", "ARTERIES_SESSION_ID")):
         value = os.getenv(env_key)
         if value:
             event["payload"].setdefault(key, value)
+    if _discard():
+        return event
     store = "db"
     try:
         _write_db_run(run)
@@ -145,23 +266,24 @@ def log_event(
     except Exception:
         _write_jsonl(run, event)
         store = "jsonl"  # degradation signal: pulse health watches this
-    # spool_emit's own parameters are source/kind/turn_id, and the payload is
+    # journal_append's own parameters are source/kind/turn_id, and the payload is
     # spread into its **kwargs -- so a payload key with any of those names
     # raises "got multiple values for argument". Callers should not have to know
     # that, so the collision is resolved here by prefixing rather than dropping:
     # losing a field silently would be worse than renaming it.
     _RESERVED = {"source", "kind", "turn_id", "store", "ts",
-                 "project_id", "repo", "cli", "agent_id"}
-    spooled = {}
+                 "project_id", "repo", "cli", "agent_id", "event_id", "run_id"}
+    journaled = {}
     for k, v in event["payload"].items():
         if k in ("episode_id", "task_id"):
             continue
-        spooled[f"payload_{k}" if k in _RESERVED else k] = v
-    spool_emit(
+        journaled[f"payload_{k}" if k in _RESERVED else k] = v
+    journal_append(
         source, event_type, turn_id=turn_id, store=store,
+        event_id=event["id"], run_id=run["run_id"],
         project_id=run["project_id"], repo=run["repo_path"],
         cli=run["cli"], agent_id=run["agent_id"],
-        **spooled,
+        **journaled,
     )
     return event
 
@@ -277,6 +399,127 @@ def _env_run_id() -> str | None:
     return None
 
 
+def _run_metadata(session_id: str | None = None, previous_run_id: str | None = None) -> dict[str, Any]:
+    """What a run records about itself, decided once at creation.
+
+    `kind` is stamped rather than derived so the sweep does not have to join
+    events to know which threshold applies. A run is an episode when heart
+    assigned it -- heart is the only thing that sets ARTERIES_EPISODE_ID.
+    """
+    metadata: dict[str, Any] = {
+        "kind": "episode" if os.getenv("ARTERIES_EPISODE_ID") else "interactive",
+    }
+    session = session_id or os.getenv("ARTERIES_SESSION_ID")
+    if session:
+        metadata["session_id"] = session
+    if previous_run_id:
+        # the same session, resumed after its previous run was closed. Lets a
+        # trace walk one conversation across runs without a group-by.
+        metadata["previous_run_id"] = previous_run_id
+    return metadata
+
+
+def _db(work, default, dict_rows: bool = False):
+    """Run `work(cursor)`, returning `default` if anything at all fails.
+
+    Every run-lifecycle lookup is best-effort by contract -- telemetry must
+    never fail a turn, and log_event's JSONL fallback already catches lost
+    events. Swallowing in one place means one place to change if that ever
+    stops being true, instead of six identical bare handlers.
+    """
+    factory = {"cursor_factory": psycopg2.extras.RealDictCursor} if dict_rows else {}
+    try:
+        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(**factory) as cur:
+            return work(cur)
+    except Exception:
+        return default
+
+
+def _session_run(session_id: str, open_only: bool = True) -> dict[str, Any] | None:
+    """Newest run belonging to this session, or None. Never raises."""
+    clause = "AND ended_at IS NULL" if open_only else ""
+
+    def work(cur):
+        cur.execute(
+            f"""
+            SELECT id, project_id, repo_path, cli, agent_id, started_at, metadata
+            FROM arteries.agent_runs
+            WHERE metadata->>'session_id' = %s {clause}
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            (session_id,),
+        )
+        return cur.fetchone()
+
+    return _db(work, None, dict_rows=True)
+
+
+def _run_is_open(run_id: str) -> bool:
+    """False only when the database says so. A lookup that cannot answer must
+    not close a run the caller is legitimately still using."""
+    def work(cur):
+        cur.execute("SELECT ended_at FROM arteries.agent_runs WHERE id = %s", (run_id,))
+        row = cur.fetchone()
+        return row is None or row[0] is None
+
+    return _db(work, True)
+
+
+def end_run(run_id: str, reason: str = "explicit") -> bool:
+    """Close a run. Idempotent, and the only way a run ever ends.
+
+    Heart calls this at episode.finished and the sweep calls it for everything
+    that never announced itself -- same write, same semantics, two triggers.
+    That is the point: nothing may depend on the explicit signal arriving, so a
+    killed terminal or a crashed episode costs lateness, never correctness.
+    """
+    def work(cur):
+        cur.execute(
+            """
+            UPDATE arteries.agent_runs
+            SET ended_at = now(),
+                metadata = COALESCE(metadata, '{}'::jsonb)
+                           || jsonb_build_object('end_reason', %s)
+            WHERE id = %s AND ended_at IS NULL
+            """,
+            (reason, run_id),
+        )
+        return cur.rowcount > 0
+
+    return _db(work, False)
+
+
+def sweep_runs() -> list[str]:
+    """Close every run idle past its threshold. Returns the ids closed.
+
+    Runs at session start rather than at run resolution: current_run() is on the
+    path of every log_event, and staleness only matters when a new session is
+    about to decide what to join. A machine left off for a week sweeps clean the
+    moment any CLI opens a session.
+    """
+    def work(cur):
+        cur.execute(
+            f"""
+            UPDATE arteries.agent_runs r
+            SET ended_at = now(),
+                metadata = COALESCE(r.metadata, '{{}}'::jsonb)
+                           || jsonb_build_object('end_reason', 'idle_sweep')
+            WHERE r.ended_at IS NULL
+              AND COALESCE(
+                    (SELECT max(created_at) FROM arteries.agent_events e
+                      WHERE e.run_id = r.id),
+                    r.started_at
+                  ) < now() - (CASE WHEN r.metadata->>'kind' = 'episode'
+                                    THEN interval '{IDLE_EPISODE}'
+                                    ELSE interval '{IDLE_INTERACTIVE}' END)
+            RETURNING r.id
+            """
+        )
+        return [str(row[0]) for row in cur.fetchall()]
+
+    return _db(work, [])
+
+
 def _repo(repo_path: str | Path | None = None) -> Path:
     return Path(repo_path or os.getenv("ARTERIES_REPO") or Path.cwd()).resolve()
 
@@ -293,7 +536,9 @@ def _cli(cli: str | None) -> str:
     return cli or os.getenv("AGENT_CLI") or os.getenv("ARTERIES_CLI") or "unknown"
 
 
-def _run_payload(run_id: str, project_id: str, agent_id: str, cli: str, repo: Path, started_at: str | None = None) -> dict[str, Any]:
+def _run_payload(run_id: str, project_id: str, agent_id: str, cli: str, repo: Path,
+                 started_at: str | None = None,
+                 metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "project_id": project_id,
@@ -301,7 +546,7 @@ def _run_payload(run_id: str, project_id: str, agent_id: str, cli: str, repo: Pa
         "cli": cli,
         "agent_id": str(agent_id),
         "started_at": started_at or _now_iso(),
-        "metadata": {},
+        "metadata": metadata if metadata is not None else {},
     }
 
 
@@ -314,6 +559,8 @@ def _current_run_path(repo: Path, cli: str) -> Path:
 
 
 def _write_current_run(repo: Path, run: dict[str, Any]) -> None:
+    if _discard():
+        return
     blob = json.dumps(run, indent=2, sort_keys=True, default=str) + "\n"
     per_cli = _current_run_path(repo, run.get("cli") or "unknown")
     per_cli.parent.mkdir(parents=True, exist_ok=True)

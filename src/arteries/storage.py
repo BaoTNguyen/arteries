@@ -8,6 +8,7 @@ them to MemoryFrame types.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import psycopg2
@@ -15,6 +16,17 @@ import psycopg2.extras
 
 from arteries.config import DB_CONFIG
 from arteries.scope import SCOPE_CTE
+
+
+def _env_episode_id() -> str | None:
+    """Same two variables actionlog and journal already read. Read here rather
+    than imported from actionlog, which imports journal, which would make the
+    lowest layer depend on two above it."""
+    return os.getenv("ARTERIES_EPISODE_ID") or None
+
+
+def _env_task_id() -> str | None:
+    return os.getenv("ARTERIES_TASK_ID") or None
 
 # Confidence is read back as stored. Age-based decay lived here and was removed —
 # age alone was the wrong signal (a stale-but-still-true fact decayed like a
@@ -36,7 +48,7 @@ def get_ephemeral(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, fact, domains, source_ts, status, source
+            SELECT id, fact, domains, source_ts, status, source, episode_id, task_id
             FROM arteries.ephemeral
             WHERE project_id = %s
               AND agent_process_id = %s
@@ -58,14 +70,16 @@ def insert_ephemeral(
     parent_agent_id: str | None = None,
     embedding: list[float] | None = None,
     source: str = "user",
+    episode_id: str | None = None,
+    task_id: str | None = None,
 ) -> str:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO arteries.ephemeral
                 (fact, embedding, domains, project_id,
-                 agent_process_id, parent_agent_id, source)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
+                 agent_process_id, parent_agent_id, source, episode_id, task_id)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -76,6 +90,8 @@ def insert_ephemeral(
                 agent_process_id,
                 parent_agent_id,
                 source,
+                episode_id if episode_id is not None else _env_episode_id(),
+                task_id if task_id is not None else _env_task_id(),
             ),
         )
         conn.commit()
@@ -94,7 +110,8 @@ def get_persistent(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             SCOPE_CTE + f"""
-            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.scope, p.project_id
+            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.scope, p.project_id,
+                   p.episode_id, p.task_id
             FROM arteries.persistent p
             WHERE p.project_id IN (SELECT project_id FROM scope)
               AND p.valid_until IS NULL
@@ -118,6 +135,7 @@ def get_persistent_by_relevance(
         cur.execute(
             SCOPE_CTE + """
             SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.project_id,
+                   p.episode_id, p.task_id,
                    1 - (p.embedding <=> %(q)s::vector) AS similarity
             FROM arteries.persistent p
             WHERE p.project_id IN (SELECT project_id FROM scope)

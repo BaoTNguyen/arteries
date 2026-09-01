@@ -2,6 +2,7 @@
 
 import unittest
 
+from arteries import extract
 from arteries.extract import (
     MIN_EXTRACTABLE_WORDS,
     extract_from_message,
@@ -76,3 +77,44 @@ class AssistantCompressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StripReportTests(unittest.TestCase):
+    """Why an assistant turn was dropped, recorded at the moment it is dropped.
+
+    `stored: 0` said an assistant response was discarded and nothing said which
+    filter did it -- so 292 drops across 412 captures had no diagnosis, and
+    replaying the stripper offline disagreed with the journal by 68 points.
+    """
+
+    def test_counters_name_the_filter_that_cut_each_line(self):
+        text = "\n".join([
+            "Let me check that for you.",           # narration
+            "```",
+            "print('hidden by the fence')",
+            "```",
+            "The p50 is 1397 ms at ef_search=100.",  # the finding
+        ])
+        report = extract.strip_report(text, "what is the p50")
+        self.assertEqual(report["in_lines"], 5)
+        self.assertEqual(report["fences"], 2)
+        self.assertFalse(report["unbalanced_fence"])
+        self.assertGreaterEqual(report["narration_dropped"], 1)
+        self.assertEqual(report["min_words"], extract.MIN_EXTRACTABLE_WORDS)
+
+    def test_an_unbalanced_fence_is_flagged(self):
+        """One unclosed fence swallows every line after it."""
+        report = extract.strip_report("finding\n```\ncode that never closes")
+        self.assertTrue(report["unbalanced_fence"])
+
+    def test_out_words_matches_what_the_stripper_actually_returns(self):
+        text = "The migration moved prompts.embedding to halfvec(1024) in 1.03 s."
+        report = extract.strip_report(text, "")
+        self.assertEqual(report["out_words"],
+                         len(extract.strip_assistant_response(text, "").split()))
+
+    def test_the_reference_size_is_recorded(self):
+        """A huge reference makes the overlap filter cut almost everything, so
+        its size has to be visible next to the drop count."""
+        report = extract.strip_report("a finding about pgvector", "x" * 5000)
+        self.assertEqual(report["ref_chars"], 5000)

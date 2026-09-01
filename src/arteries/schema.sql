@@ -53,6 +53,18 @@ ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS confidence REAL NOT NULL
 CREATE INDEX IF NOT EXISTS idx_eph_domains
     ON arteries.ephemeral USING gin (domains);
 
+-- Which episode wrote this. The decisions/rewards ledger below has carried
+-- episode_id and task_id all along; memory did not, so nothing could say which
+-- run produced a given fact. Retrieval needs it to answer the one question that
+-- separates useful context from an answer sheet: was this written by an earlier
+-- attempt at the task now being scored? Without the column that question has no
+-- answer, and an RL loop trains a retriever to fetch its own previous solution.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS episode_id TEXT;
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS task_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_eph_task
+    ON arteries.ephemeral (project_id, task_id) WHERE task_id IS NOT NULL;
+
 -- Persistent: per-project, shared across agents. Compiled from ephemeral.
 CREATE TABLE IF NOT EXISTS arteries.persistent (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -82,6 +94,15 @@ ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFA
 -- Document provenance: path, line span, and digest for facts imported
 -- through the `art docs` review flow. Was evergreen.source_meta.
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS source_meta JSONB NOT NULL DEFAULT '{}';
+
+-- Carried up from the ephemeral a fact was compiled from. Tagging only
+-- ephemeral would leak: compilation promotes an episode's own notes into
+-- persistent, where an untagged copy of the answer outlives the exclusion.
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS episode_id TEXT;
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS task_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_persistent_task
+    ON arteries.persistent (project_id, task_id) WHERE task_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_per_project
     ON arteries.persistent (project_id)
