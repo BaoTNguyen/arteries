@@ -31,6 +31,29 @@ class EvaluateTests(unittest.IsolatedAsyncioTestCase):
             "explicit continuation of prior assistant result",
         )
 
+    async def test_unregistered_project_is_not_observed(self):
+        """A benchmark exporting ARTERIES_PROJECT=<throwaway> from inside a
+        registered repo wrote 42 of the 73 rows in arteries.retrievals: the
+        opt-in gate resolved the cwd and never checked the project it stamped."""
+        with patch.object(arteries_eval.scope, "is_tracked", return_value=True), \
+                patch.object(arteries_eval.scope, "scope_for", return_value=None), \
+                patch.object(arteries_eval, "extract_and_store") as extract:
+            self.assertIsNone(await arteries_eval.evaluate("run the regression suite"))
+        extract.assert_not_called()
+
+    def test_triage_skips_bare_imperative(self):
+        """"Clean up" retrieved a spreadsheet-cleaning workflow at 0.974: the
+        directive test only reads the first word, and "clean" is not in it."""
+        self.assertEqual(
+            arteries_eval._triage_skip_reason("Clean up", ["Deleted 432 rows."]),
+            "bare imperative continuing prior assistant result",
+        )
+        # nothing to continue, so the message stands on its own
+        self.assertIsNone(arteries_eval._triage_skip_reason("Clean up", []))
+        # a named object is a specification, not a reference
+        self.assertIsNone(arteries_eval._triage_skip_reason(
+            "Clean up the scope_members table", ["Deleted 432 rows."]))
+
     def test_triage_allows_unresolved_request(self):
         self.assertIsNone(arteries_eval._triage_skip_reason(
             "build a 13-week cash flow model for a SaaS startup", []
@@ -67,6 +90,7 @@ class EvaluateTests(unittest.IsolatedAsyncioTestCase):
             scope=SimpleNamespace(sibling_insights=[]),
         )
         with patch.object(arteries_eval.scope, "is_tracked", return_value=True), \
+                patch.object(arteries_eval.scope, "scope_for", return_value="harness"), \
              patch.object(arteries_eval, "embed_text_sync", return_value=[0.1] * 8), \
              patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-1"), \
              patch.object(arteries_eval.runlog, "log_event"), \
@@ -89,6 +113,7 @@ class EvaluateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch.object(arteries_eval.scope, "is_tracked", return_value=True), \
+                patch.object(arteries_eval.scope, "scope_for", return_value="harness"), \
              patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-1"), \
              patch.object(arteries_eval.runlog, "log_event") as log_event, \
              patch.object(arteries_eval, "embed_text_sync", return_value=[0.1] * 8), \
@@ -130,6 +155,7 @@ class TurnEmbeddingTests(unittest.IsolatedAsyncioTestCase):
         vec = [0.5] * 8
 
         with patch.object(arteries_eval.scope, "is_tracked", return_value=True), \
+                patch.object(arteries_eval.scope, "scope_for", return_value="harness"), \
              patch.object(arteries_eval.runlog, "new_turn_id", return_value="turn-2"), \
              patch.object(arteries_eval.runlog, "log_event"), \
              patch.object(arteries_eval, "embed_text_sync", return_value=vec) as embed, \
