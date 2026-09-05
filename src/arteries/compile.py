@@ -84,9 +84,12 @@ For each memory also record:
   {"persistent_id","rel"} where rel is supports, refines, contradicts, or
   depends_on. Use the id exactly as given; omit the field if nothing relates.
 - "decision": only when kind is decision, as {"chose","over":[...],"because"}.
+- "from": the numbers of the ephemeral records above this was distilled from,
+  as a list of integers. Name only the records that actually contributed. A
+  fact drawn from one record lists one number.
 
 Respond with compact JSON only -- no indentation, no whitespace between keys:
-{"new_memories":[{"fact":"...","domains":["..."],"confidence":0.9,"kind":"fact","entities":[{"name":"pgvector","kind":"dependency"}],"duplicate_of":null,"relations":[{"persistent_id":"uuid","rel":"refines"}]}],"superseded":[{"persistent_id":"uuid","reason":"replaced by: ...","replaced_by":0}]}
+{"new_memories":[{"fact":"...","domains":["..."],"confidence":0.9,"kind":"fact","from":[1],"entities":[{"name":"pgvector","kind":"dependency"}],"duplicate_of":null,"relations":[{"persistent_id":"uuid","rel":"refines"}]}],"superseded":[{"persistent_id":"uuid","reason":"replaced by: ...","replaced_by":0}]}
 
 Do not explain what you discarded. Compilation is generation-bound on local
 hardware, and prose about rejected records costs more time than the memories
@@ -113,13 +116,13 @@ async def compile_once() -> dict[str, Any]:
 
         try:
             result = await _llm_compile(claimed, persistent_context)
-            problems = validate_response(result)
+            problems = validate_response(result, len(claimed))
             if problems:
                 runlog.log_event("memory.compile.invalid_response", "arteries",
                                  {"problems": problems[:5], "attempt": 1},
                                  project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
                 result = await _llm_compile(claimed, persistent_context, problems=problems)
-                problems = validate_response(result)
+                problems = validate_response(result, len(claimed))
                 if problems:
                     # Two bad responses is a prompt or model problem, not a blip.
                     # Release the batch rather than writing malformed rows.
@@ -343,8 +346,11 @@ def _reject_duplicates(conn, memories: list[dict], vectors: list,
 _VALID_KINDS = {"fact", "decision", "preference", "constraint"}
 
 
-def validate_response(payload: Any) -> list[str]:
+def validate_response(payload: Any, n_records: int | None = None) -> list[str]:
     """Structural problems with a compile response. Empty means usable.
+
+    n_records bounds the "from" record numbers when the caller knows the batch
+    size; without it the field is only checked for shape.
 
     Grammar-constrained JSON is well-formed, not correct. This module already
     validated UUIDs in Python because the model invents ids; entities and
@@ -365,6 +371,12 @@ def validate_response(payload: Any) -> list[str]:
             continue
         if m.get("kind") and m["kind"] not in _VALID_KINDS:
             problems.append(f"new_memories[{i}] kind={m['kind']!r}")
+        src = m.get("from")
+        if src is not None and (
+            not isinstance(src, list) or not src
+            or not all(isinstance(x, int) and 1 <= x <= (n_records or 10**6) for x in src)
+        ):
+            problems.append(f"new_memories[{i}] from={src!r} is not record numbers")
         for e in m.get("entities") or []:
             if not isinstance(e, dict) or not str(e.get("name", "")).strip():
                 problems.append(f"new_memories[{i}] has a nameless entity")
@@ -547,8 +559,26 @@ def _write_results(conn, result: dict, claimed_ids: list,
     scope_id = scope.scope_for(project_id) or project_id
     new_ids: list[str] = []
 
+    unattributed = 0
+
     with conn.cursor() as cur:
         for mem, vec in zip(memories, vectors):
+            # Provenance the model named, as 1-based record numbers. Writing an
+            # edge to every claimed row instead -- which this did -- makes
+            # `art trace` answer "where did this come from" with the whole
+            # batch, which is fiction rather than lineage. Fall back to the old
+            # behaviour when the model says nothing, so a silent model never
+            # costs lineage that used to exist, and count it so the compliance
+            # rate is visible.
+            picks = mem.get("from")
+            if isinstance(picks, list) and picks:
+                sources = [claimed_ids[i - 1] for i in dict.fromkeys(picks)
+                           if isinstance(i, int) and 1 <= i <= len(claimed_ids)]
+            else:
+                sources = []
+            if not sources:
+                sources = list(claimed_ids)
+                unattributed += 1
             cur.execute(
                 """
                 INSERT INTO arteries.persistent
@@ -575,11 +605,11 @@ def _write_results(conn, result: dict, claimed_ids: list,
                     json.dumps(mem.get("domains", [])),
                     mem.get("confidence", 0.8),
                     project_id,
-                    claimed_ids,
+                    sources,
                     vec,
                     mem.get("kind", "fact"),
-                    claimed_ids,
-                    claimed_ids,
+                    sources,
+                    sources,
                 ),
             )
             claim_id = str(cur.fetchone()[0])
@@ -588,7 +618,7 @@ def _write_results(conn, result: dict, claimed_ids: list,
 
             # Provenance: the ephemeral rows this was distilled from. They are
             # endpoints only -- never entity-extracted, never nodes.
-            for eph_id in claimed_ids:
+            for eph_id in sources:
                 graph.add_edge(cur, project_id, "persistent", claim_id,
                                graph.DERIVED_FROM, "ephemeral", eph_id)
 
@@ -671,8 +701,14 @@ def _write_results(conn, result: dict, claimed_ids: list,
         )
         conn.commit()
 
+    if unattributed:
+        runlog.log_event("memory.compile.unattributed", "arteries",
+                         {"count": unattributed, "of": len(memories)},
+                         project_id=project_id, agent_id=AGENT_PROCESS_ID)
+
     return {"new": new_count, "superseded": superseded_count,
-            "duplicates_rejected": len(duplicates)}
+            "duplicates_rejected": len(duplicates),
+            "unattributed": unattributed}
 
 
 if __name__ == "__main__":
