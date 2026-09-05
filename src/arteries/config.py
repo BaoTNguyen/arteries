@@ -13,7 +13,7 @@ DB_CONFIG = {
 }
 
 GENERATE_URL = os.getenv("GENERATE_URL", "http://127.0.0.1:8001/v1/chat/completions")
-COMPILE_MODEL = os.getenv("ARTERIES_COMPILE_MODEL", "qwen3.6-27b")
+COMPILE_MODEL = os.getenv("ARTERIES_COMPILE_MODEL", "qwen3.6-35b-a3b")
 
 # Optional vision endpoint for describing images at ingest time. Defaults to the
 # generation server, which only answers if it was started with --mmproj; without
