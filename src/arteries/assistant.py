@@ -80,13 +80,13 @@ def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = F
     # which is what the bare handler did.
     user_turn = ""
     try:
-        from arteries.conversation import recent_turns
+        from arteries.conversation import recent_user_turns
     except ImportError:
         logger.debug("arteries.conversation absent; assistant restatement "
                      "filtering is inactive on this branch")
     else:
         try:
-            prior = recent_turns(limit=1)
+            prior = recent_user_turns(limit=1)
             user_turn = prior[-1] if prior else ""
         except Exception as exc:
             from arteries import degrade

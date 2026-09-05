@@ -12,18 +12,20 @@ TAIL_BYTES = 256 * 1024
 WINDOW_TURNS = 8
 
 
-def recent_turns(transcript: str | None = None, limit: int = WINDOW_TURNS) -> list[str]:
-    """Return recent user/assistant text when the host exposes a transcript.
-
-    Failure intentionally returns no evidence. Triage must then search rather
-    than claim the conversation already makes a retrieval unnecessary.
-    """
-    return _recent_turns(transcript, limit, {"user", "assistant"})
-
-
 def recent_assistant_turns(transcript: str | None = None, limit: int = WINDOW_TURNS) -> list[str]:
     """Return only prior assistant text, the sole triage context evidence."""
     return _recent_turns(transcript, limit, {"assistant"})
+
+
+def recent_user_turns(transcript: str | None = None, limit: int = WINDOW_TURNS) -> list[str]:
+    """Return only prior user text.
+
+    The assistant restatement filter needs the question it is answering. At
+    Stop-hook time the newest transcript entry is the assistant's own reply, so
+    `recent_turns` would hand the stripper the very text it is meant to trim
+    against and cut all of it.
+    """
+    return _recent_turns(transcript, limit, {"user"})
 
 
 def _recent_turns(transcript: str | None, limit: int, roles: set[str]) -> list[str]:
