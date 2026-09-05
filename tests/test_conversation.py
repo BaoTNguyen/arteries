@@ -3,11 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from arteries.conversation import recent_assistant_turns, recent_turns
+from arteries.conversation import recent_assistant_turns, recent_user_turns
 
 
 class ConversationTests(unittest.TestCase):
-    def test_recent_turns_reads_only_user_and_assistant_messages(self):
+    def test_role_filters_select_only_their_own_side(self):
         records = [
             {"role": "system", "content": "ignore"},
             {"role": "user", "content": "Define Tier A labels."},
@@ -18,8 +18,8 @@ class ConversationTests(unittest.TestCase):
             handle.write("\n".join(json.dumps(record) for record in records))
             path = Path(handle.name)
         try:
-            self.assertEqual(recent_turns(str(path)), [
-                "Define Tier A labels.", "Tier A is the first label set.",
+            self.assertEqual(recent_user_turns(str(path)), [
+                "Define Tier A labels.",
             ])
             self.assertEqual(recent_assistant_turns(str(path)), [
                 "Tier A is the first label set.",
