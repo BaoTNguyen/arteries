@@ -364,6 +364,12 @@ turn after the fix presents A and ¬A as equal bullets.
 among six things written, tested, and never invoked. They *are* invoked now; the output is
 discarded one function later, where a name-level reachability check cannot see it.
 
+**Confirmed by the fix, 2026-09-07.** After rank fusion, over 15 queries against the live
+store: graph rows went from 0 packet slots to 36, present on 15/15 queries. Persistent went
+47 → 46, i.e. unchanged — the ephemeral constant is a real defect in the ranking function
+but not the binding one; `MEMORY_SIMILARITY_FLOOR` empties the persistent arm outright on
+4 of 15 queries, before any fusion runs.
+
 Fix: rank graph results within their own arm and fuse by rank rather than comparing a hop
 score to a cosine floor (`planning/ingestion_redesign.md` §20.4, §23.3). Stopgap if that
 lands later: exempt `via_graph` rows from `MEMORY_SIMILARITY_FLOOR` and cap their count.
