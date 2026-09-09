@@ -50,6 +50,14 @@ ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEF
 -- it, and both run against the same database. Drop it when main has moved.
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS confidence REAL NOT NULL DEFAULT 1.0;
 
+-- When the claim was taken, so the stale sweep measures the lease and not the
+-- row's birth. Swept on coalesce(claimed_at, source_ts); see migration 002.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_ephemeral_claimed
+    ON arteries.ephemeral (claimed_at)
+    WHERE status = 'compiling';
+
 CREATE INDEX IF NOT EXISTS idx_eph_domains
     ON arteries.ephemeral USING gin (domains);
 
