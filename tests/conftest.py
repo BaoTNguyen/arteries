@@ -104,5 +104,8 @@ def test_db():
     except psycopg2.errors.InsufficientPrivilege:
         pytest.skip(f"{TEST_DB} lacks the vector extension: "
                     f"sudo -u postgres psql {TEST_DB} -c 'CREATE EXTENSION vector'")
-    migrate.baseline()
+    # Everything on disk, because setup_db just applied a schema.sql that
+    # already contains every migration's effect. This is the one case where
+    # stamping all of them is correct.
+    migrate.baseline(through=migrate.available()[-1][0])
     return DB_CONFIG

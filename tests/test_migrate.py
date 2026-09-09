@@ -70,7 +70,7 @@ class DriftTests(unittest.TestCase):
         self.assertEqual(pending, [])
 
     def test_baseline_is_idempotent(self):
-        self.assertEqual(migrate.baseline(), 0)
+        self.assertEqual(migrate.baseline(through=migrate.available()[-1][0]), 0)
 
     def test_a_destructive_migration_is_refused_without_contract(self, tmp_path=None):
         """Destructive changes wait for a contract migration, after main is on
@@ -106,3 +106,22 @@ class RefusalTests(unittest.TestCase):
             code = migrate.main(["apply"])
         self.assertEqual(code, 1)
         self.assertIn("refused: boom", err.getvalue())
+
+
+class BaselineScopeTests(unittest.TestCase):
+    """`baseline` names a cutoff because the two ways of getting it wrong are
+    not symmetric. Stamp too few and a migration re-runs, which IF NOT EXISTS
+    usually survives. Stamp too many and a migration never runs at all, and the
+    column it was going to add is missing with nothing saying so."""
+
+    def test_baseline_requires_a_cutoff(self):
+        import io
+        from contextlib import redirect_stderr
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            migrate.main(["baseline"])
+
+    def test_an_unknown_cutoff_is_refused(self):
+        with self.assertRaises(RuntimeError) as caught:
+            migrate.baseline("999_not_a_migration")
+        self.assertIn("unknown migration", str(caught.exception))
