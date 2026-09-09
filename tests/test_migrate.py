@@ -88,3 +88,21 @@ class DriftTests(unittest.TestCase):
             migrate.MIGRATIONS_DIR = original
             (staged / "999_drop.sql").unlink()
             staged.rmdir()
+
+
+class RefusalTests(unittest.TestCase):
+    """A refusal is a decision the operator has to make, so it has to be
+    readable. Both refusals used to arrive as a traceback with the sentence
+    explaining them buried in the middle."""
+
+    def test_an_edited_migration_refuses_with_a_message(self):
+        import io
+        from contextlib import redirect_stderr
+        from unittest.mock import patch
+
+        err = io.StringIO()
+        with patch.object(migrate, "apply", side_effect=RuntimeError("boom")), \
+             redirect_stderr(err):
+            code = migrate.main(["apply"])
+        self.assertEqual(code, 1)
+        self.assertIn("refused: boom", err.getvalue())
