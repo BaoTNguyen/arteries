@@ -807,7 +807,12 @@ def _write_results(conn, result: dict, claimed_ids: list,
                                  project_id=project_id, agent_id=AGENT_PROCESS_ID)
 
         cur.execute(
-            "UPDATE arteries.ephemeral SET status = 'cleared' WHERE id = ANY(%s::uuid[])",
+            # `cleared` still tells the compiler this row needs no claiming, and
+            # `doctor` still collects on it. What it no longer does is hide the
+            # row from its own session -- that is `compiled_at` plus the
+            # visibility window in storage (finding 8).
+            "UPDATE arteries.ephemeral SET status = 'cleared', compiled_at = now() "
+            "WHERE id = ANY(%s::uuid[])",
             (claimed_ids,),
         )
         conn.commit()
