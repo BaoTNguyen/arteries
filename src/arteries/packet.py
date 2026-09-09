@@ -23,6 +23,11 @@ class MemoryItem:
     confidence: float
     domains: list[str]
     source_id: str | None = None
+    # How this row was reached: None for a direct hit, otherwise the edge that
+    # led here ("contradicts", "shares:hook"). `graph.expand` computes it and it
+    # used to be dropped at this boundary, which is why the packet presented A
+    # and not-A as two equally confident bullets (finding 15).
+    via: str | None = None
 
 
 @dataclass
@@ -108,11 +113,44 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
 MEMORY_SIMILARITY_FLOOR = float(os.getenv("ARTERIES_PACKET_FLOOR", "0.55"))
 MAX_PACKET_MEMORIES = 15
 NEUTRAL_SIMILARITY = 0.5
-TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95}
+
+# Tiers are fused by RANK, not by score, because their scores are not the same
+# quantity. Persistent carries a query-to-claim cosine. Ephemeral is chosen by
+# recency and carries no similarity at all. A graph neighbour carries a decayed
+# hop score. Comparing them directly had two measured consequences:
+#
+#   * Ephemeral entered at a flat NEUTRAL_SIMILARITY of 0.5, which is *above*
+#     most of the real persistent distribution. 82% of persistent rows (every
+#     row at confidence <= 0.95) needed an above-median match just to tie one,
+#     so on a median query persistent contributed nothing at all.
+#   * A graph neighbour scores weight(1.0) x decay(0.6) x seed_similarity, so
+#     clearing a 0.55 cosine floor needed a seed at 0.917 -- or 1.528 for the
+#     shared-entity path, which is impossible. Nothing `graph.expand` produced
+#     had ever reached a packet (finding 26).
+#
+# Ranks are commensurable where those scores are not: rank 1 means "the best
+# thing this tier has" in every tier. Each arm ranks on its own policy, and RRF
+# merges them without any arm needing to justify itself on another's scale.
+RRF_K = int(os.getenv("ARTERIES_RRF_K", "60"))
+# Keys are *arms* -- ranking lanes -- not packet sections. "related" holds claims
+# reached through the graph; they are persistent rows and render as such, so the
+# packet gains a lane, not a heading. Branch B adds an "evergreen" arm here when
+# that tier exists.
+TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95, "related": 0.90}
+
+# A graph neighbour is relevant by association, never by wording, so it must not
+# crowd out direct hits. Bounded rather than floored: the floor was the wrong
+# instrument (see above), but "at most this many" is still worth saying.
+MAX_GRAPH_MEMORIES = 3
 
 
 def _score(tier: str, row: dict[str, Any]) -> float | None:
-    """Blended entry score, or None if the row fails the floor."""
+    """Admission and ordering **within the persistent arm**, or None if refused.
+
+    No longer a cross-tier comparison -- see TIER_WEIGHT. MEMORY_SIMILARITY_FLOOR
+    was calibrated on query-to-claim cosine and is applied only to rows that
+    carry one.
+    """
     similarity = row.get("similarity")
     if similarity is not None and float(similarity) < MEMORY_SIMILARITY_FLOOR:
         return None
@@ -120,22 +158,61 @@ def _score(tier: str, row: dict[str, Any]) -> float | None:
     return sim * float(row.get("confidence") or 1.0) * TIER_WEIGHT.get(tier, 1.0)
 
 
+def _arms(ephemerals: list[dict[str, Any]],
+          persistents: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Split the selection into ranked arms, each ordered by its own policy.
+
+    `select_for_frame` returns graph neighbours mixed into the persistent list,
+    tagged `via_graph`, with a hop score written into `similarity` so they could
+    be compared against direct hits. They cannot be -- that comparison is what
+    finding 26 measured -- so they are separated out here into their own arm.
+    """
+    direct, reached = [], []
+    for row in persistents:
+        (reached if row.get("via_graph") else direct).append(row)
+
+    scored_direct = [(s, r) for r in direct if (s := _score("persistent", r)) is not None]
+    scored_direct.sort(key=lambda t: t[0], reverse=True)
+
+    # Own scale, own order, no cosine floor. Bounded instead.
+    reached.sort(key=lambda r: float(r.get("similarity") or 0.0), reverse=True)
+
+    return [
+        # Already newest-first from storage.get_ephemeral; recency IS the ranking.
+        ("ephemeral", list(ephemerals)),
+        ("persistent", [r for _s, r in scored_direct]),
+        ("related", reached[:MAX_GRAPH_MEMORIES]),
+    ]
+
+
+# An arm is how a row was ranked; a tier is where it renders. Graph neighbours
+# are persistent rows reached sideways, so they belong in the Persistent section,
+# marked with the edge that led to them rather than filed under a heading of
+# their own.
+ARM_TIER = {"ephemeral": "ephemeral", "persistent": "persistent", "related": "persistent"}
+
+
+def _fuse(arms: list[tuple[str, list[dict[str, Any]]]]) -> list[tuple[str, dict[str, Any]]]:
+    """Reciprocal rank fusion across arms. Returns (arm, row), best first."""
+    fused: list[tuple[float, int, str, dict[str, Any]]] = []
+    for arm_index, (arm, rows) in enumerate(arms):
+        weight = TIER_WEIGHT.get(arm, 1.0)
+        for rank, row in enumerate(rows, start=1):
+            # arm_index breaks ties deterministically, so an empty tier can
+            # never reorder the others and the result is stable run to run.
+            fused.append((weight / (RRF_K + rank), arm_index, arm, row))
+    fused.sort(key=lambda t: (-t[0], t[1]))
+    return [(arm, row) for _s, _i, arm, row in fused]
+
+
 def _load_memories(message: str, event: dict[str, Any] | None = None) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
         msg_vec = embed_text_sync(message, is_query=True) if message else None
         ephemerals, persistents = memory_select.select_for_frame(message, embedding=msg_vec)
-        scored: list[tuple[float, str, dict[str, Any]]] = []
-        for tier, rows in (("ephemeral", ephemerals),
-                           ("persistent", persistents)):
-            for row in rows:
-                score = _score(tier, row)
-                if score is not None:
-                    scored.append((score, tier, row))
-        scored.sort(key=lambda t: t[0], reverse=True)
 
-        for _score_value, tier, row in scored[:MAX_PACKET_MEMORIES]:
-            items.extend(_rows(tier, [row]))
+        for arm, row in _fuse(_arms(ephemerals, persistents))[:MAX_PACKET_MEMORIES]:
+            items.extend(_rows(ARM_TIER[arm], [row]))
     except Exception as exc:
         items.append(MemoryItem(
             tier="status",
@@ -187,6 +264,7 @@ def _rows(tier: str, rows: list[dict[str, Any]]) -> list[MemoryItem]:
             confidence=float(row.get("confidence") or 1.0),
             domains=list(row.get("domains") or []),
             source_id=str(row.get("id")) if row.get("id") else None,
+            via=str(row["via"]) if row.get("via") else None,
         )
         for row in rows
         if str(row.get("fact") or "").strip()
@@ -335,7 +413,10 @@ def _format_items(items: list[MemoryItem], tier: str) -> list[str]:
         if item.domains:
             meta.append("/".join(item.domains[:3]))
         meta.append(f"conf={item.confidence:.2f}")
-        lines.append(f"- {item.text} ({', '.join(meta)})")
+        # Finding 15: without this, a claim and the claim contradicting it render
+        # as two identical bullets and the reader cannot tell which is disputed.
+        prefix = f"[{item.via}] " if item.via else ""
+        lines.append(f"- {prefix}{item.text} ({', '.join(meta)})")
     return lines
 
 
