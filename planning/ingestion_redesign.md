@@ -1754,6 +1754,33 @@ meant as a tie-breaker and is behaving as a gate. Finding 4 already argued confi
 should be an annotation rather than a gate; this is the same defect in the ranking
 function.
 
+**Measured 2026-09-07, and it corrects the diagnosis above.** Fifteen queries against
+the live store with a full 20-row ephemeral buffer, counting arm composition of the 15
+packet slots:
+
+|  | ephemeral | persistent | graph |
+|---|---|---|---|
+| before | 178 | 47 | 0 |
+| after (rank fusion) | 143 | 46 | 36 |
+
+**Persistent barely moves.** The arithmetic above is correct — a persistent row does need
+0.585 at the modal confidence of 0.90 to tie a flat ephemeral row — but it is not the
+binding constraint. `MEMORY_SIMILARITY_FLOOR` is. On 4 of the 15 queries the persistent arm
+is *empty before fusion runs*, because the best direct hit scores 0.52–0.54 against a floor
+of 0.55. Rank fusion cannot promote rows that were never admitted.
+
+So the ephemeral constant is a real defect in the ranking function and a small one in
+practice. The large, confirmed win is graph results going from absent on every query to
+present on every query. Finding 26 was the load-bearing half of §20.2 all along.
+
+**What this opens instead.** Those four queries — "why is the build failing", "how do I run
+the tests", "what changed yesterday", "what does doctor report" — are generic, and refusing
+them may be the floor working exactly as designed: saying nothing beats saying something
+confidently irrelevant. Whether 0.55 is right for *within-scope* queries is a separate
+question with its own measurement. `packet.py:238` predicts within-project paraphrases
+score 0.6–0.8; these score 0.52–0.54, which is evidence against that prediction and worth
+a dedicated look after the baseline exists (§24, step 3).
+
 **The right fix is §20.4, not similarity scoring.** Scoring ephemeral by cosine trades one
 arbitrary comparison for another and still strips continuity when the topic shifts. Per-tier
 slots remove the need to compare an ephemeral score against a persistent score at all,
