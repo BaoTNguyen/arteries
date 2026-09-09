@@ -28,6 +28,17 @@ def _env_episode_id() -> str | None:
 def _env_task_id() -> str | None:
     return os.getenv("ARTERIES_TASK_ID") or None
 
+
+def _env_session_id() -> str | None:
+    """The session this turn belongs to.
+
+    `cli_normalize.apply_event_env` has exported this all along; nothing in the
+    memory tiers read it. It is the key `agent_process_id` should have been:
+    stable across a session's turns, and still meaningful once the process that
+    wrote the row is gone.
+    """
+    return os.getenv("ARTERIES_SESSION_ID") or None
+
 # Confidence is read back as stored. Age-based decay lived here and was removed —
 # age alone was the wrong signal (a stale-but-still-true fact decayed like a
 # wrong one, and a re-confirmed fact didn't recover). A usefulness-driven method
@@ -44,20 +55,34 @@ def get_ephemeral(
     project_id: str,
     agent_process_id: str,
     limit: int = 50,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    """This session's working set, falling back to this process's.
+
+    Keyed on the session where one is known. `agent_process_id` defaults to the
+    pid, so a row written by a process that has since exited was reachable by
+    nothing -- 84 rows in the live store, 83 distinct ids, one row each. Matching
+    on the session recovers them, because the session outlives the turn.
+
+    The process clause stays as an OR rather than being replaced: rows written
+    before this column existed have a NULL session_id, and `main` writes NULL
+    for as long as it runs. Dropping the fallback would hide them.
+    """
+    session_id = session_id if session_id is not None else _env_session_id()
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
             SELECT id, fact, domains, source_ts, status, source, episode_id, task_id
             FROM arteries.ephemeral
             WHERE project_id = %s
-              AND agent_process_id = %s
+              AND (agent_process_id = %s
+                   OR (%s::text IS NOT NULL AND session_id = %s))
               AND status = 'uncompiled'
               AND valid_until IS NULL
             ORDER BY source_ts DESC
             LIMIT %s
             """,
-            (project_id, agent_process_id, limit),
+            (project_id, agent_process_id, session_id, session_id, limit),
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -72,14 +97,16 @@ def insert_ephemeral(
     source: str = "user",
     episode_id: str | None = None,
     task_id: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO arteries.ephemeral
                 (fact, embedding, domains, project_id,
-                 agent_process_id, parent_agent_id, source, episode_id, task_id)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
+                 agent_process_id, parent_agent_id, source, episode_id, task_id,
+                 session_id)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -92,6 +119,7 @@ def insert_ephemeral(
                 source,
                 episode_id if episode_id is not None else _env_episode_id(),
                 task_id if task_id is not None else _env_task_id(),
+                session_id if session_id is not None else _env_session_id(),
             ),
         )
         conn.commit()

@@ -28,7 +28,8 @@ import psycopg2
 import psycopg2.extras
 
 from arteries import graph, runlog, scope
-from arteries.config import AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL, PROJECT_ID
+from arteries.config import (AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL,
+                             PROJECT_ID, SESSION_ID)
 from arteries.scope import SCOPE_CTE
 
 MAX_EPHEMERAL_BATCH = 10
@@ -57,6 +58,13 @@ COMPILE_TIMEOUT = float(os.getenv("ARTERIES_COMPILE_TIMEOUT", "60"))
 # `art doctor` reports them, and they are the record of what could not be
 # compiled rather than something to hide.
 MAX_COMPILE_ATTEMPTS = int(os.getenv("ARTERIES_MAX_COMPILE_ATTEMPTS", "3"))
+
+# After this long, an uncompiled row is nobody's: whichever process wrote it is
+# not coming back for it. Without this, a row written under a bare pid is
+# claimable only by that pid, and 84 rows in the live store -- 83 distinct pids,
+# one row each -- were stranded permanently. An hour is far longer than any
+# real compile cycle and far shorter than the tier's own expiry.
+ABANDONED_AFTER_MINUTES = int(os.getenv("ARTERIES_ABANDONED_AFTER_MINUTES", "60"))
 
 # Finding 25: with llama-server down, every turn claimed rows, waited out the
 # connection error, released them, and wrote two queue events. Measured at a 44%
@@ -236,8 +244,14 @@ def _release_stale_claims(conn) -> int:
 def _claim_ephemeral(conn) -> list[dict]:
     """Atomically claim uncompiled ephemeral records for this compilation pass.
 
-    Claims both the parent's own records AND any subagent records that
-    tagged this agent as their parent_agent_id.
+    Claims this agent's own records, any subagent records that tagged this agent
+    as their parent, anything else from the same session, and anything in this
+    project old enough that nobody is coming back for it. The last clause is the
+    only one that can reach a row written under a pid that has since exited --
+    which is how 84 rows became permanently uncompilable (finding 9).
+
+    Own records first, then oldest, so a busy agent still drains its own queue
+    before doing anyone else's housekeeping.
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -247,7 +261,15 @@ def _claim_ephemeral(conn) -> list[dict]:
             WHERE id IN (
                 SELECT id FROM arteries.ephemeral
                 WHERE project_id = %s
-                  AND (agent_process_id = %s OR parent_agent_id = %s)
+                  AND (agent_process_id = %s
+                       OR parent_agent_id = %s
+                       -- Same session, different process: a turn's hook exits
+                       -- and the next turn's should still be able to finish
+                       -- what it started.
+                       OR (%s::text IS NOT NULL AND session_id = %s)
+                       -- Nobody's any more. This is the only clause that can
+                       -- reach a row written under a pid that no longer exists.
+                       OR source_ts < now() - (%s || ' minutes')::interval)
                   AND status = 'uncompiled'
                   AND quarantined_at IS NULL
                 ORDER BY (agent_process_id = %s) DESC, source_ts ASC
@@ -256,7 +278,9 @@ def _claim_ephemeral(conn) -> list[dict]:
             )
             RETURNING id, fact, domains, source_ts, parent_agent_id, source
             """,
-            (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
+            (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID,
+             SESSION_ID, SESSION_ID, ABANDONED_AFTER_MINUTES,
+             AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
         )
         conn.commit()
         return [dict(r) for r in cur.fetchall()]
