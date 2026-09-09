@@ -33,7 +33,12 @@ from arteries.scope import SCOPE_CTE
 
 MAX_EPHEMERAL_BATCH = 10
 MAX_PERSISTENT_CONTEXT = 15
-STALE_CLAIM_MINUTES = 2
+# Three, not two, and it is a multiple of COMPILE_TIMEOUT rather than a number.
+# At 2 the lease was 120s against a 60s generation ceiling, so a pass that
+# queued behind llama-server's other slot could be swept while it was still
+# holding -- the timeout grazed the threshold it was supposed to sit under
+# (finding 11). At 3 the lease is 180s, three times the ceiling.
+STALE_CLAIM_MINUTES = 3
 
 # Compilation is generation-bound, not prompt-bound: a 20-record batch measured
 # 0.43s to prefill 5.7k tokens and ~40s to generate 1.3k. The old 30s ceiling
@@ -174,10 +179,15 @@ def _release_stale_claims(conn) -> int:
         cur.execute(
             """
             UPDATE arteries.ephemeral
-            SET status = 'uncompiled'
+            SET status = 'uncompiled', claimed_at = NULL
             WHERE project_id = %s
               AND status = 'compiling'
-              AND source_ts < now() - (%s || ' minutes')::interval
+              -- claimed_at, not source_ts: the lease starts when the claim is
+              -- taken, not when the row was written. COALESCE covers rows
+              -- claimed before this column existed -- any of those still in
+              -- 'compiling' is stranded by definition, so falling back to their
+              -- birth time releases them, which is what should happen.
+              AND coalesce(claimed_at, source_ts) < now() - (%s || ' minutes')::interval
             """,
             (PROJECT_ID, STALE_CLAIM_MINUTES),
         )
@@ -196,7 +206,7 @@ def _claim_ephemeral(conn) -> list[dict]:
         cur.execute(
             """
             UPDATE arteries.ephemeral
-            SET status = 'compiling'
+            SET status = 'compiling', claimed_at = now()
             WHERE id IN (
                 SELECT id FROM arteries.ephemeral
                 WHERE project_id = %s
@@ -220,7 +230,8 @@ def _release_claimed(conn, ids: list) -> None:
         return
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE arteries.ephemeral SET status = 'uncompiled' WHERE id = ANY(%s::uuid[])",
+            "UPDATE arteries.ephemeral SET status = 'uncompiled', claimed_at = NULL "
+            "WHERE id = ANY(%s::uuid[])",
             (ids,),
         )
         conn.commit()
