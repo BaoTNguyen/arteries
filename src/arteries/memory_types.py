@@ -47,13 +47,12 @@ class PersistentMemory:
 
 
 @dataclass
-class ScopeMemory:
-    """Context from the other repos in this project's scope.
+class EvergreenMemory:
+    """The knowledge graph: durable facts for this project's whole scope group.
 
-    Was EvergreenMemory. The three tiers never described permanence -- they
-    describe how far out context reaches: ephemeral is this process, persistent
-    is this project, and this is wider than this project. Scope groups give that
-    slot a live source; the evergreen table it used to read never held a row.
+    Briefly named ScopeMemory, while evergreen was being removed. Evergreen is
+    back and is the graph, so the name follows the tier again. Scope is still
+    what it reaches across -- one graph per scope group, not per repo.
 
     `last_retrieval_ts` and `retrieval_confidence` are retrieval state rather
     than memory and are in the wrong dataclass. Left alone for now -- moving
@@ -71,14 +70,14 @@ class ScopeMemory:
 class MemoryFrame:
     ephemeral: EphemeralMemory = field(default_factory=EphemeralMemory)
     persistent: PersistentMemory = field(default_factory=PersistentMemory)
-    scope: ScopeMemory = field(default_factory=ScopeMemory)
+    scope: EvergreenMemory = field(default_factory=EvergreenMemory)
 
 
 __all__ = [
     "CachedRetrieval",
     "EphemeralMemory",
+    "EvergreenMemory",
     "Insight",
     "MemoryFrame",
     "PersistentMemory",
-    "ScopeMemory",
 ]
