@@ -1,7 +1,8 @@
 # Arteries audit — open findings
 
 Compiled 2026-09-04 from a live audit against the `capillaries` Postgres and
-the installed CLIs. Every item marked **measured** has a query or code path
+the installed CLIs. Finding 26 added 2026-09-07, found while tracing the
+retrieval path for the ingestion redesign. Every item marked **measured** has a query or code path
 behind it; **read** means found by reading code but not exercised against data.
 
 Nothing here has been fixed. Severity is about damage to memory correctness,
@@ -318,6 +319,55 @@ Structurally, supersedes chains are sound: 17 winner-live/loser-dead, 3
 both-dead, 0 inconsistent.
 
 ---
+
+### 26. Graph expansion cannot clear the packet floor — its output is always discarded
+`memory_select.py:136`, `graph.py:110`, `packet.py:258` — **measured** (arithmetic against
+live constants, 2026-09-07)
+
+`graph.expand` writes its decayed hop score back onto each neighbour as `similarity`, so
+the neighbour is judged by `_score` on the same axis as a direct cosine hit. It cannot
+survive that comparison. With the live constants — `decay = 0.6`, edge `weight = 1.0`,
+`MEMORY_SIMILARITY_FLOOR = 0.55`:
+
+```
+direct edge:    1.0 × 0.6 × seed_similarity  =  0.60 × seed_sim
+shared entity:  0.6 × 0.6 × seed_similarity  =  0.36 × seed_sim
+```
+
+| path | seed similarity needed to clear 0.55 |
+|---|---|
+| direct claim-to-claim edge | **0.917** |
+| shared entity — the common path, 210 pairs vs 33 direct | **1.528**, impossible |
+
+Measured maximum top-hit similarity across 237 plexus queries is **0.78**
+(`packet.py:238`). No expanded neighbour has entered a packet, and none can.
+
+The two gates also fight. `route.choose` (`route.py:51`) triggers expansion *only* when
+fewer than five seeds reach `STRONG_SIMILARITY = 0.65` — that is, only when seed
+similarity is low, which is precisely when `0.60 × seed_sim` is furthest from the floor.
+The condition that starts the walk guarantees the walk is wasted.
+
+Cost: one extra database round trip and a connection open/close per weak query, for
+nothing. `_expand` opens its own `psycopg2.connect` rather than reusing a connection.
+
+Cause: the floor was derived from *query-to-claim cosine* (`packet.py:238`). A decayed hop
+score is a different quantity on a different scale. Comparing them is the same category
+error as scoring ephemeral with a `NEUTRAL_SIMILARITY` constant and then ranking it
+against real cosines.
+
+**Interaction with finding 15.** Finding 15 says `contradicts` co-retrieves both sides of
+a conflict into the packet. That harm is currently *latent* — nothing from `expand`
+reaches the packet at all. Fixing 26 makes 15 live. They must ship together, or the first
+turn after the fix presents A and ¬A as equal bullets.
+
+`doctor.unreached` (`doctor.py:156`) already lists `graph.expand` and "the expansion gate"
+among six things written, tested, and never invoked. They *are* invoked now; the output is
+discarded one function later, where a name-level reachability check cannot see it.
+
+Fix: rank graph results within their own arm and fuse by rank rather than comparing a hop
+score to a cosine floor (`planning/ingestion_redesign.md` §20.4, §23.3). Stopgap if that
+lands later: exempt `via_graph` rows from `MEMORY_SIMILARITY_FLOOR` and cap their count.
+
 
 ## P5 — packet builder
 
