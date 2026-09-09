@@ -191,7 +191,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"baselined {baseline()} migration(s) against {DB_CONFIG.get('dbname')}")
         return 0
 
-    ran = apply(dry_run=args.dry_run, contract=args.contract)
+    try:
+        ran = apply(dry_run=args.dry_run, contract=args.contract)
+    except RuntimeError as refused:
+        # A refusal is a message, not a stack trace. Both cases -- an edited
+        # migration and an unflagged destructive one -- are things the operator
+        # has to decide about, and a traceback buries the sentence that says so.
+        print(f"refused: {refused}", file=sys.stderr)
+        return 1
     verb = "would apply" if args.dry_run else "applied"
     print(f"{verb} {len(ran)}: {', '.join(ran) or 'nothing pending'}")
     return 0
