@@ -51,6 +51,22 @@ def _conn():
 
 # -- Ephemeral ----------------------------------------------------------------
 
+# How long a row stays in the working set. Not a compile status: a promoted fact
+# is still the thing this session was just talking about, and hiding it the
+# instant it reaches persistent is what made in-session recall work only while
+# the compiler was broken (finding 8).
+#
+# 48h rather than 24: a session gets returned to across a couple of days. Beyond
+# that the context is stale on any clock, and persistent has it anyway.
+EPHEMERAL_VISIBLE_HOURS = int(os.getenv("ARTERIES_EPHEMERAL_VISIBLE_HOURS", "48"))
+
+# One rule, used by every read of the tier. Two rules is how the coverage gate
+# and the frame ended up disagreeing about what "in the working set" means.
+_VISIBLE = """
+    valid_until IS NULL
+    AND source_ts > now() - (%(visible_hours)s || ' hours')::interval
+"""
+
 def get_ephemeral(
     project_id: str,
     agent_process_id: str,
@@ -72,17 +88,18 @@ def get_ephemeral(
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, fact, domains, source_ts, status, source, episode_id, task_id
+            SELECT id, fact, domains, source_ts, status, source, episode_id,
+                   task_id, compiled_at
             FROM arteries.ephemeral
-            WHERE project_id = %s
-              AND (agent_process_id = %s
-                   OR (%s::text IS NOT NULL AND session_id = %s))
-              AND status = 'uncompiled'
-              AND valid_until IS NULL
+            WHERE project_id = %(project)s
+              AND (agent_process_id = %(agent)s
+                   OR (%(session)s::text IS NOT NULL AND session_id = %(session)s))
+              AND """ + _VISIBLE + """
             ORDER BY source_ts DESC
-            LIMIT %s
+            LIMIT %(limit)s
             """,
-            (project_id, agent_process_id, session_id, session_id, limit),
+            {"project": project_id, "agent": agent_process_id, "session": session_id,
+             "limit": limit, "visible_hours": EPHEMERAL_VISIBLE_HOURS},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -295,14 +312,15 @@ def max_ephemeral_similarity(
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT coalesce(max(1 - (embedding <=> %s::vector)), 0.0)
+            SELECT coalesce(max(1 - (embedding <=> %(q)s::vector)), 0.0)
             FROM arteries.ephemeral
-            WHERE project_id = %s
-              AND agent_process_id = %s
+            WHERE project_id = %(project)s
+              AND agent_process_id = %(agent)s
               AND embedding IS NOT NULL
-              AND status <> 'cleared'
+              AND """ + _VISIBLE + """
             """,
-            (query_embedding, project_id, agent_process_id),
+            {"q": query_embedding, "project": project_id, "agent": agent_process_id,
+             "visible_hours": EPHEMERAL_VISIBLE_HOURS},
         )
         return float(cur.fetchone()[0])
 

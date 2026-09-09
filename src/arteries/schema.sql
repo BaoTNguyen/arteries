@@ -50,6 +50,11 @@ ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEF
 -- it, and both run against the same database. Drop it when main has moved.
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS confidence REAL NOT NULL DEFAULT 1.0;
 
+-- When this row was promoted, recorded instead of hiding the row. Visibility is
+-- a time window now; `status` only tells the compiler what still needs
+-- claiming. See migration 005.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS compiled_at TIMESTAMPTZ;
+
 -- Which session wrote this. `agent_process_id` defaults to the pid, so it dies
 -- with the process and strands the row; a session id outlives the turn. See
 -- migration 004.
