@@ -1,4 +1,5 @@
 import os
+import sys
 
 import pytest
 
@@ -54,3 +55,54 @@ def _no_live_events(request, monkeypatch):
 
     monkeypatch.setattr("arteries.runlog.log_event", _blocked)
     return real
+
+
+# --- Test database ------------------------------------------------------------
+#
+# The suite used to point at the live database, which is how test_degrade wrote
+# 30 fabricated internal.bug_swallowed rows into the one channel whose value
+# depends on every entry being real. `_no_live_events` patches that symptom.
+# This is the cure: a database of its own.
+#
+# DB_NAME is the whole switch (config.DB_CONFIG reads it), so a test that wants
+# real Postgres asks for `test_db` and gets arteries_test or a skip. It never
+# gets the live one.
+#
+# Setting it up is two commands, one of which needs a superuser because
+# `CREATE EXTENSION vector` does:
+#
+#     createdb arteries_test
+#     sudo -u postgres psql arteries_test -c 'CREATE EXTENSION vector'
+#
+# Without them the Postgres-backed tests skip and say why. That matters more
+# than it sounds: a suite that cannot run on a laptop with no database stops
+# being run.
+
+TEST_DB = "arteries_test"
+
+
+@pytest.fixture(scope="session")
+def test_db():
+    """arteries_test with schema applied and migrations stamped, or skip."""
+    import psycopg2
+
+    os.environ["DB_NAME"] = TEST_DB
+    for module in ("arteries.config", "arteries.setup_db", "arteries.migrate"):
+        sys.modules.pop(module, None)
+
+    from arteries.config import DB_CONFIG
+
+    try:
+        psycopg2.connect(**DB_CONFIG).close()
+    except psycopg2.OperationalError as exc:
+        pytest.skip(f"no {TEST_DB} database: {exc.args[0].strip().splitlines()[0]}")
+
+    from arteries import migrate, setup_db
+
+    try:
+        setup_db.setup()
+    except psycopg2.errors.InsufficientPrivilege:
+        pytest.skip(f"{TEST_DB} lacks the vector extension: "
+                    f"sudo -u postgres psql {TEST_DB} -c 'CREATE EXTENSION vector'")
+    migrate.baseline()
+    return DB_CONFIG
