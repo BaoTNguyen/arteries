@@ -50,6 +50,20 @@ STALE_CLAIM_MINUTES = 3
 # or a smaller batch -- not a bigger number.
 COMPILE_TIMEOUT = float(os.getenv("ARTERIES_COMPILE_TIMEOUT", "60"))
 
+# A batch the model cannot produce valid output for fails identically every
+# pass, so without a ceiling it is retried until someone notices. Three is
+# enough to ride out a restart and short enough that a poison batch stops
+# costing a generation slot per turn. Quarantined rows stay in the table --
+# `art doctor` reports them, and they are the record of what could not be
+# compiled rather than something to hide.
+MAX_COMPILE_ATTEMPTS = int(os.getenv("ARTERIES_MAX_COMPILE_ATTEMPTS", "3"))
+
+# Finding 25: with llama-server down, every turn claimed rows, waited out the
+# connection error, released them, and wrote two queue events. Measured at a 44%
+# failure rate, that is most of a turn's memory budget spent discovering the
+# same outage. One cheap probe answers it before anything is claimed.
+HEALTH_TIMEOUT = float(os.getenv("ARTERIES_HEALTH_TIMEOUT", "1.0"))
+
 COMPILE_SYSTEM = """You are a memory compiler. You receive raw conversation extracts (ephemeral memories) and existing long-term memories (persistent). Your job:
 
 1. Distill the ephemeral records into concise, factual statements worth remembering long-term.
@@ -103,6 +117,23 @@ themselves.
 Keep facts that would be useful in a future conversation about this project. Skip greetings, acknowledgements, and anything too vague to act on — but a concrete change, measurement, defect, or decision is worth keeping even when it resembles something already stored. Returning an empty list for a batch that contains any of those is wrong."""
 
 
+def _generator_reachable() -> bool:
+    """Cheap liveness check before claiming anything.
+
+    Claiming first and discovering the outage afterwards is what made an outage
+    expensive: rows churn through 'compiling' and back, and the queue fills with
+    events describing the same dead socket. `/health` is llama-server's own
+    endpoint and answers in milliseconds when it answers at all.
+    """
+    import httpx
+
+    base = GENERATE_URL.split("/v1/")[0]
+    try:
+        return httpx.get(f"{base}/health", timeout=HEALTH_TIMEOUT).status_code == 200
+    except Exception:
+        return False
+
+
 async def compile_once() -> dict[str, Any]:
     """
     Run one compilation pass. Returns stats about what happened.
@@ -110,6 +141,12 @@ async def compile_once() -> dict[str, Any]:
     Safe to call concurrently — uses SELECT FOR UPDATE SKIP LOCKED
     to claim ephemeral records, so parallel agents won't double-compile.
     """
+    if not _generator_reachable():
+        # Before the connection, not after: an unreachable generator means there
+        # is no work this pass can finish, and saying so costs one HTTP timeout
+        # instead of a claim, a release, and two queue writes.
+        return {"status": "generator_unreachable", "claimed": 0}
+
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         _release_stale_claims(conn)
@@ -212,6 +249,7 @@ def _claim_ephemeral(conn) -> list[dict]:
                 WHERE project_id = %s
                   AND (agent_process_id = %s OR parent_agent_id = %s)
                   AND status = 'uncompiled'
+                  AND quarantined_at IS NULL
                 ORDER BY (agent_process_id = %s) DESC, source_ts ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
@@ -225,15 +263,35 @@ def _claim_ephemeral(conn) -> list[dict]:
 
 
 def _release_claimed(conn, ids: list) -> None:
-    """Roll back claimed records to uncompiled on failure."""
+    """Roll back claimed records to uncompiled, counting the failed attempt.
+
+    The count is what makes failure bounded. A batch the model cannot produce
+    valid output for fails the same way every pass, so without it the same rows
+    are claimed, failed and released for as long as nobody looks. After
+    MAX_COMPILE_ATTEMPTS the rows are quarantined: still in the table, still
+    reported by `art doctor`, but no longer claimed.
+    """
     if not ids:
         return
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE arteries.ephemeral SET status = 'uncompiled', claimed_at = NULL "
-            "WHERE id = ANY(%s::uuid[])",
-            (ids,),
+            """
+            UPDATE arteries.ephemeral
+            SET status = 'uncompiled',
+                claimed_at = NULL,
+                attempts = attempts + 1,
+                quarantined_at = CASE WHEN attempts + 1 >= %s THEN now() END
+            WHERE id = ANY(%s::uuid[])
+            RETURNING id, quarantined_at
+            """,
+            (MAX_COMPILE_ATTEMPTS, ids),
         )
+        given_up = [str(r[0]) for r in cur.fetchall() if r[1] is not None]
+    if given_up:
+        runlog.log_event("memory.compile.quarantined", "arteries",
+                         {"count": len(given_up), "ids": given_up[:5],
+                          "after_attempts": MAX_COMPILE_ATTEMPTS},
+                         project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
         conn.commit()
 
 
@@ -269,6 +327,24 @@ def _load_persistent_context(conn, batch: list[dict] | None = None,
     so a contradiction of something learned months ago is still visible. Falls
     back to recency when the batch cannot be embedded.
     """
+    # Finding 12: on a cold store there is nothing to compare against, so
+    # embedding the batch buys a network round trip and an empty list. Ask the
+    # cheap question first -- one indexed EXISTS against a query that is about
+    # to run anyway.
+    with conn.cursor() as cur:
+        cur.execute(
+            SCOPE_CTE + """
+            SELECT EXISTS(
+                SELECT 1 FROM arteries.persistent
+                WHERE project_id IN (SELECT project_id FROM scope)
+                  AND valid_until IS NULL
+            )
+            """,
+            {"project": project_id or PROJECT_ID},
+        )
+        if not cur.fetchone()[0]:
+            return []
+
     vec = None
     if batch:
         from arteries.embed import embed_text_sync

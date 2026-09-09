@@ -50,6 +50,16 @@ ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEF
 -- it, and both run against the same database. Drop it when main has moved.
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS confidence REAL NOT NULL DEFAULT 1.0;
 
+-- How many compile passes have failed on this row, and when it was given up on.
+-- Without a count, a batch the model cannot parse is retried forever; see
+-- migration 003.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_ephemeral_attempts
+    ON arteries.ephemeral (project_id, attempts)
+    WHERE status = 'uncompiled' AND quarantined_at IS NULL;
+
 -- When the claim was taken, so the stale sweep measures the lease and not the
 -- row's birth. Swept on coalesce(claimed_at, source_ts); see migration 002.
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
