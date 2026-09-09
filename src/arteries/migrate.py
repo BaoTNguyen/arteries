@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"refused: {refused}", file=sys.stderr)
             return 1
         print(f"baselined {stamped} migration(s) through {args.through} "
-              f"against {DB_CONFIG.get('dbname')}")
+              f"against {DB_CONFIG.get('database')}")
         return 0
 
     try:
