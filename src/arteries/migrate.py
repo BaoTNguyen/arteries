@@ -11,11 +11,16 @@ on the new code.
     art migrate baseline               stamp existing schema as applied
     art migrate apply [--dry-run]      run pending migrations
 
-`baseline` is the step that makes this safe to introduce on a database that
-already has a schema. Live already has every column schema.sql declares, but
-`schema_migrations` there is empty, so a first `apply` would re-run the whole
-history against real data. `IF NOT EXISTS` covers most of that and covers no
-backfill at all. Baseline stamps without executing. Run it once, ever.
+`baseline --through NNN` is the step that makes this safe to introduce on a
+database that already has a schema. A database with an empty
+`schema_migrations` would otherwise re-run the whole history against real data;
+`IF NOT EXISTS` covers most of that and covers no backfill at all. Baseline
+stamps without executing.
+
+`--through` is required. The operator knows which migrations the target already
+satisfies and the code does not, and guessing in either direction is bad: stamp
+too few and a migration re-runs, stamp too many and one silently never runs at
+all. Run it once per database, ever.
 
 Migration files are `migrations/NNN_name.sql`, applied in filename order. Two
 things a file may say, on the first line:
@@ -104,14 +109,30 @@ def status() -> list[tuple[str, str]]:
     return out
 
 
-def baseline() -> int:
-    """Stamp every migration on disk as applied, without running any of it."""
+def baseline(through: str) -> int:
+    """Stamp migrations up to `through` as applied, without running any of them.
+
+    `through` is required and there is no default, because the only safe default
+    is the one the operator knows and the code does not: which migrations the
+    target database already satisfies. Stamping everything is right for a
+    database that just had schema.sql applied and catastrophic for one that has
+    not -- it marks unapplied migrations as done, and they never run. A column
+    that silently never gets created is worse than a migration that fails.
+
+    So: name the last version this database already contains.
+    """
+    versions = [v for v, _sql in available()]
+    if through not in versions:
+        raise RuntimeError(
+            f"unknown migration {through!r}. On disk: {', '.join(versions) or 'none'}")
+    cutoff = versions.index(through)
+
     with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
         cur.execute(_TABLE)
         done = _applied(cur)
         stamped = 0
-        for version, sql in available():
-            if version in done:
+        for index, (version, sql) in enumerate(available()):
+            if index > cutoff or version in done:
                 continue
             cur.execute(
                 "INSERT INTO arteries.schema_migrations (version, checksum, baselined) "
@@ -172,7 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="art migrate")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
-    sub.add_parser("baseline")
+    baseline_p = sub.add_parser("baseline")
+    baseline_p.add_argument(
+        "--through", required=True,
+        help="last migration this database already satisfies, e.g. 001_baseline")
     apply_p = sub.add_parser("apply")
     apply_p.add_argument("--dry-run", action="store_true")
     apply_p.add_argument("--contract", action="store_true",
@@ -188,7 +212,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if any(s == "CHANGED" for _v, s in rows) else 0
 
     if args.command == "baseline":
-        print(f"baselined {baseline()} migration(s) against {DB_CONFIG.get('dbname')}")
+        try:
+            stamped = baseline(args.through)
+        except RuntimeError as refused:
+            print(f"refused: {refused}", file=sys.stderr)
+            return 1
+        print(f"baselined {stamped} migration(s) through {args.through} "
+              f"against {DB_CONFIG.get('dbname')}")
         return 0
 
     try:
