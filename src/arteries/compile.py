@@ -26,8 +26,9 @@ from typing import Any
 import httpx
 import psycopg2
 import psycopg2.extras
+from collections import Counter
 
-from arteries import graph, runlog, scope
+from arteries import graph, promote, runlog, scope
 from arteries.config import (AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL,
                              PROJECT_ID, SESSION_ID)
 from arteries.scope import SCOPE_CTE
@@ -77,8 +78,15 @@ COMPILE_SYSTEM = """You are a memory compiler. You receive raw conversation extr
 1. Distill the ephemeral records into concise, factual statements worth remembering long-term.
 2. Tag each with relevant domains from this list: technical, AI, business, strategy, product, finance, career, learning, personal, writing.
 3. If a new fact contradicts an existing persistent memory, mark the old one as superseded. Set "replaced_by" to the 0-based index of the entry in new_memories that replaces it, and give the reason.
-4. The existing memories shown to you are the ones most *similar* to this batch — they are selected that way so you can spot contradictions and refinements. Do not skip a new fact merely because something similar exists. Exact restatements are filtered mechanically after you answer; your job is to say how the new fact relates, not to suppress it.
-5. Assign confidence 0.0-1.0 based on how certain the fact is (corrections and explicit statements = high, inferred context = lower).
+4. The existing memories shown to you are the ones most *similar* to this batch — they are selected that way so you can spot contradictions and refinements. Do not skip a new fact merely because something similar exists; say how it relates instead. This is not permission to include everything: nothing downstream judges whether a fact was worth keeping.
+
+5. Do NOT record any of the following. They are true when written and useless a week later, and 16% of the store is currently made of them:
+- What the conversation is about to do. "User intends to...", "User is considering...", "User plans to...", "Next we will...". Record what was decided or discovered, not what was proposed.
+- Anything about the session itself: what is being verified, tested, or checked right now.
+- Anything derivable by reading the repo. File X imports Y, function Z takes two arguments, the test suite passes.
+- Restatements of the user's request back at them.
+A standing preference IS worth recording ("prefers tabs over spaces") — that describes the person, not the turn.
+6. Assign confidence 0.0-1.0 based on how certain the fact is (corrections and explicit statements = high, inferred context = lower).
 
 Records marked [SUBAGENT] came from an automated subagent, not directly from the user. Apply a higher bar:
 - Only keep subagent records that state verifiable facts about the codebase or project.
@@ -660,6 +668,22 @@ def _write_results(conn, result: dict, claimed_ids: list,
     # held row locks across ~264ms of network I/O for a typical batch. One
     # batched call is 45ms and happens while holding nothing.
     memories = result.get("new_memories", [])
+
+    # Before embedding, not after: a fact that will not be stored should not cost
+    # an embedding call either. The model is asked not to produce these
+    # (COMPILE_SYSTEM rule 5) and produces them anyway often enough to be 16% of
+    # the live store -- a prompt is a request, and a permanent row is forever.
+    judged = [(m, promote.worth_keeping(m.get("fact", ""))) for m in memories]
+    refused = [(m, why) for m, why in judged if why is not None]
+    if refused:
+        runlog.log_event(
+            "memory.compile.rejected_low_value", "arteries",
+            {"count": len(refused),
+             "by_rule": dict(Counter(why for _m, why in refused)),
+             "rejected": [m.get("fact", "")[:120] for m, _why in refused[:5]]},
+            project_id=project_id, agent_id=AGENT_PROCESS_ID)
+    memories = [m for m, why in judged if why is None]
+
     vectors = embed_texts_sync([m["fact"] for m in memories])
     memories, vectors, duplicates = _reject_duplicates(conn, memories, vectors, project_id)
     if duplicates:
