@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from arteries import actionlog, degrade, route, storage
+from arteries import actionlog, degrade, rank, route, storage
 from arteries.cli_caps import CliCapabilities, get_capabilities
 from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PERSISTENT_READ, PROJECT_ID, RELEVANCE_THRESHOLD
 from arteries.embed import embed_text_sync
@@ -138,6 +138,33 @@ def _should_include_parent_ephemeral(context: AgentContext) -> bool:
 # count-based gate never fires -- which is exactly what happened when this was
 # first wired: expansion was reachable in tests and dead in practice. Count how
 # many seeds clear a real bar instead.
+# Off by default, because it was measured and it lost.
+#
+# Against the saved 40-query baseline, truncated to the same window as the cosine
+# arm so both are the same length:
+#
+#     window 10   cosine 37/40 mrr 0.67   hybrid 36/40 mrr 0.54
+#     held out    cosine 12/14 mrr 0.68   hybrid 12/14 mrr 0.53
+#
+# No recall gain and a clear ranking loss, and weighting does not rescue it: at
+# 0.9/0.1 the hybrid arm still drops to mrr 0.58. RRF adds a term per channel, so
+# a row at dense rank 5 that is also lexical rank 1 outscores dense rank 1 at any
+# weighting -- which is RRF working correctly and wrong for this corpus.
+#
+# Why it loses here is the thing worth keeping. BM25 needs term frequency to work
+# with and these documents are one sentence each; capillaries' chunks are
+# paragraphs. And the benchmark's queries are paraphrases written to *avoid* the
+# claim's vocabulary, which is precisely the case a lexical channel cannot serve.
+#
+# What the benchmark does not contain is the case this was built for: a query
+# naming an identifier. `get_persistent_by_text("why does UndefinedColumn happen
+# with claimed_at")` returns five relevant rows today. So the code and the index
+# stay, and the switch stays off until there is a query set with identifier
+# queries in it to turn it on against.
+DENSE_WEIGHT = float(os.getenv("ARTERIES_DENSE_WEIGHT", "0.5"))
+LEXICAL_WEIGHT = float(os.getenv("ARTERIES_LEXICAL_WEIGHT", "0.5"))
+HYBRID_RETRIEVAL = os.getenv("ARTERIES_HYBRID", "off").lower() == "on"
+
 STRONG_SIMILARITY = 0.65
 EXPAND_WHEN_STRONG_FEWER_THAN = 5
 EXPAND_HOPS = 1
@@ -184,6 +211,46 @@ def _expand(seeds: list[dict], context: AgentContext, limit: int) -> list[dict]:
     return added
 
 
+def _hybrid(project_id: str, message: str, dense: list[dict]) -> list[dict]:
+    """Fuse the cosine channel with the lexical one, by rank.
+
+    Two channels, one query. Dense finds a claim worded differently from the
+    question; sparse finds the claim containing `UndefinedColumn` when the
+    question contains `UndefinedColumn`, which an embedding cannot, because it
+    compresses every identifier into the same technical-prose band.
+
+    Fused by rank rather than by score because `ts_rank_cd` and cosine are not
+    the same quantity and never will be. A row found by only one channel keeps
+    its place -- that is the whole point, since the rows sparse finds are exactly
+    the ones dense missed.
+
+    Sparse failing is not retrieval failing. An unparseable query, a missing
+    column on an older database, anything: the dense list stands on its own.
+    """
+    if not HYBRID_RETRIEVAL:
+        return dense
+    try:
+        lexical = storage.get_persistent_by_text(project_id, message, limit=20)
+    except Exception as exc:
+        degrade.note(exc, "lexical retrieval")
+        return dense
+    if not lexical:
+        return dense
+
+    fused = rank.fuse(
+        [("dense", dense, DENSE_WEIGHT), ("lexical", lexical, LEXICAL_WEIGHT)],
+        key=lambda row: str(row["id"]),
+    )
+    out = []
+    for channel, row in fused:
+        row = dict(row)
+        # A lexical-only row has no cosine, and inventing one would be a lie the
+        # packet floor then acts on. `via` says how it was found instead.
+        row.setdefault("via", "exact match" if channel == "lexical" else None)
+        out.append(row)
+    return out
+
+
 def _select_persistent(
     message: str,
     context: AgentContext,
@@ -195,12 +262,13 @@ def _select_persistent(
         query_emb = embedding or embed_text_sync(message, is_query=True)
         has_emb = bool(query_emb) and storage.has_embeddings(context.project_id)
         if query_emb and has_emb:
-            seeds = storage.get_persistent_by_relevance(
+            dense = storage.get_persistent_by_relevance(
                 context.project_id,
                 query_emb,
                 limit=20,
                 threshold=RELEVANCE_THRESHOLD,
             )
+            seeds = _hybrid(context.project_id, message, dense)
             plan = route.choose(seeds)
             actionlog.log_decision(
                 "retrieval.route",

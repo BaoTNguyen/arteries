@@ -143,7 +143,7 @@ def run(cases: list[dict], project: str, window: int) -> dict:
         parent_agent_id=env_ctx.parent_agent_id, agent_role=env_ctx.agent_role,
         event=env_ctx.event, capabilities=env_ctx.capabilities,
     )
-    arms: dict[str, list] = {"cosine": [], "expansion": [], "routed": []}
+    arms: dict[str, list] = {"cosine": [], "hybrid": [], "expansion": [], "routed": []}
     recovered, lost, added_counts = [], [], []
     strategies: dict[str, int] = {}
 
@@ -158,7 +158,17 @@ def run(cases: list[dict], project: str, window: int) -> dict:
         strategies[plan.strategy] = strategies.get(plan.strategy, 0) + 1
         routed = seeds if plan.strategy == "cosine" else seeds + forced
 
+        # The lexical channel measured against the same queries as the cosine
+        # one. Fused, not routed: capillaries measured routing and fusion beat
+        # the best routed configuration on both query populations.
+        # Truncated to the same window as the cosine arm. Without this the
+        # lexical channel contributes up to 20 candidates whatever `window` is,
+        # so "37/40 at window 1" compares a list of 21 against a list of 1 --
+        # which measures the length of the list, not the quality of retrieval.
+        hybrid = memory_select._hybrid(project, case["query"], seeds)[:window]
+
         r = {"cosine": _rank(case["id"], seeds),
+             "hybrid": _rank(case["id"], hybrid),
              "expansion": _rank(case["id"], seeds + forced),
              "routed": _rank(case["id"], routed)}
         for k, v in r.items():
@@ -180,6 +190,7 @@ def run(cases: list[dict], project: str, window: int) -> dict:
     return {
         "window": window, "n": len(cases),
         "cosine": score(arms["cosine"]),
+        "hybrid": score(arms["hybrid"]),
         "expansion": score(arms["expansion"]),
         "routed": score(arms["routed"]),
         "recovered": recovered, "displaced": lost,
@@ -239,14 +250,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(f"\n{len(cases)} queries, target claim known\n")
-    print(f"  {'window':>6} {'cosine':>13} {'+expansion':>13} {'routed':>13}"
-          f" {'added':>7} {'useful':>7}")
+    print(f"  {'window':>6} {'cosine':>13} {'hybrid':>13} {'+expansion':>13}"
+          f" {'routed':>13}")
     for r in results:
-        c, e, t = r["cosine"], r["expansion"], r["routed"]
+        c, h, e, t = r["cosine"], r["hybrid"], r["expansion"], r["routed"]
         print(f"  {r['window']:>6} {c['found']:>4}/{r['n']} ({c['mrr']:.2f})"
+              f" {h['found']:>4}/{r['n']} ({h['mrr']:.2f})"
               f" {e['found']:>4}/{r['n']} ({e['mrr']:.2f})"
-              f" {t['found']:>4}/{r['n']} ({t['mrr']:.2f})"
-              f" {r['claims_added']:>7} {r['useful_added']:>7}")
+              f" {t['found']:>4}/{r['n']} ({t['mrr']:.2f})")
 
     mean_overlap = sum(c["overlap"] for c in cases) / (len(cases) or 1)
     print(f"\n  query/claim token overlap: mean {mean_overlap:.2f}, "
@@ -257,10 +268,12 @@ def main(argv: list[str] | None = None) -> int:
               "  This is the honest number. The rest reuse the claim's own\n"
               "  vocabulary, which tests string matching rather than retrieval\n"
               "  and will flatter any lexical channel added later.\n")
-        print(f"  {'window':>6} {'cosine':>13} {'+expansion':>13} {'routed':>13}")
+        print(f"  {'window':>6} {'cosine':>13} {'hybrid':>13} {'+expansion':>13}"
+              f" {'routed':>13}")
         for r in held_out_results:
-            c, e, t = r["cosine"], r["expansion"], r["routed"]
+            c, h, e, t = r["cosine"], r["hybrid"], r["expansion"], r["routed"]
             print(f"  {r['window']:>6} {c['found']:>4}/{r['n']} ({c['mrr']:.2f})"
+                  f" {h['found']:>4}/{r['n']} ({h['mrr']:.2f})"
                   f" {e['found']:>4}/{r['n']} ({e['mrr']:.2f})"
                   f" {t['found']:>4}/{r['n']} ({t['mrr']:.2f})")
     else:

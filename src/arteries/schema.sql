@@ -144,6 +144,15 @@ ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS source_meta JSONB NOT N
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS episode_id TEXT;
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS task_id TEXT;
 
+-- Lexical half of hybrid retrieval. Generated, so it cannot drift from `fact`
+-- and there is no trigger to forget on a fresh database. See migration 011.
+ALTER TABLE arteries.persistent
+    ADD COLUMN IF NOT EXISTS search_tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector('english', coalesce(fact, ''))) STORED;
+
+CREATE INDEX IF NOT EXISTS idx_persistent_search
+    ON arteries.persistent USING gin (search_tsv);
+
 CREATE INDEX IF NOT EXISTS idx_persistent_task
     ON arteries.persistent (project_id, task_id) WHERE task_id IS NOT NULL;
 
