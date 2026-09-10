@@ -9,9 +9,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import actionlog, degrade, memory_select, runlog, storage
+from arteries import actionlog, degrade, memory_select, runlog, storage, triage
 from arteries import frame as frame_mod
 from arteries.cli_caps import get_capabilities
+from arteries.conversation import recent_assistant_turns
 from arteries.embed import embed_text_sync
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries.eventjson import event_messages, payload_text, read_stdin_json, text_from_mapping
@@ -268,8 +269,17 @@ def _load_memories(message: str, event: dict[str, Any] | None = None,
                    provenance: list[dict[str, Any]] | None = None) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
-        msg_vec = embed_text_sync(message, is_query=True) if message else None
-        ephemerals, persistents = memory_select.select_for_frame(message, embedding=msg_vec)
+        # Ask before embedding: a message with no object to search for should
+        # not cost an embed call, and the rows it would return are ranked
+        # results of searching for nothing.
+        no_query = triage.skip_reason(message, recent_assistant_turns()) if message else None
+        msg_vec = embed_text_sync(message, is_query=True) if message and not no_query else None
+        ephemerals, persistents = memory_select.select_for_frame(
+            message, embedding=msg_vec, similarity_search=not no_query)
+        if no_query:
+            runlog.log_event("memory.retrieval.skipped", "arteries",
+                             {"reason": no_query}, project_id=PROJECT_ID,
+                             agent_id=AGENT_PROCESS_ID)
         scored: list[tuple[float, str, dict[str, Any]]] = []
         for tier, rows in (("ephemeral", ephemerals),
                            ("persistent", persistents)):
