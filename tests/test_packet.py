@@ -344,3 +344,133 @@ class FloorCalibrationTests(unittest.TestCase):
         """Ephemeral is selected by session and recency, not by distance, so it
         has no similarity to be measured against this floor."""
         self.assertIsNotNone(packet._score("ephemeral", {"confidence": 1.0}))
+
+
+class RankFusionTests(unittest.TestCase):
+    """Tiers are fused by rank because their scores are not the same quantity.
+
+    Before this, `_score` compared a persistent cosine against ephemeral's flat
+    NEUTRAL_SIMILARITY and a graph neighbour's decayed hop score. Both
+    comparisons were arithmetically lost before they started -- see TIER_WEIGHT.
+    """
+
+    @staticmethod
+    def _eph(n):
+        return [{"id": f"e{i}", "fact": f"eph {i}", "confidence": 1.0} for i in range(n)]
+
+    @staticmethod
+    def _per(n, top=0.75):
+        return [{"id": f"p{i}", "fact": f"per {i}", "confidence": 0.9,
+                 "similarity": top - 0.01 * i} for i in range(n)]
+
+    def _packet_arms(self, eph, per):
+        return [arm for arm, _row in
+                packet._fuse(packet._arms(eph, per))[:packet.MAX_PACKET_MEMORIES]]
+
+    def test_persistent_reaches_the_packet_when_ephemeral_is_full(self):
+        """The regression this commit exists for.
+
+        20 ephemeral candidates for 15 slots, and persistent at the *measured*
+        median top hit of 0.55. Under score comparison a 0.90-confidence row
+        needed 0.585 to tie a flat 0.5 ephemeral row, so persistent contributed
+        nothing at all on a median query.
+        """
+        arms = self._packet_arms(self._eph(20), self._per(20, top=0.55))
+        self.assertGreater(arms.count("persistent"), 0)
+
+    def test_a_tier_with_nothing_relevant_takes_no_slots(self):
+        """No preassigned allocation: the mix follows what each arm has."""
+        arms = self._packet_arms(self._eph(20), [])
+        self.assertEqual(set(arms), {"ephemeral"})
+
+    def test_graph_rows_are_not_judged_by_the_cosine_floor(self):
+        """Finding 26. A neighbour scores decay x seed_similarity -- at most
+        0.6 x 0.78 = 0.47 with the measured ceiling, so a 0.55 cosine floor
+        refused every one of them, always."""
+        reached = {"id": "g0", "fact": "reached", "confidence": 0.9,
+                   "similarity": 0.31, "via_graph": True, "via": "contradicts"}
+        arms = dict(packet._arms([], [reached]))
+        self.assertEqual([r["id"] for r in arms["related"]], ["g0"])
+
+    def test_graph_rows_are_bounded_instead(self):
+        reached = [{"id": f"g{i}", "fact": f"g{i}", "confidence": 0.9,
+                    "similarity": 0.3, "via_graph": True} for i in range(9)]
+        arms = dict(packet._arms([], reached))
+        self.assertEqual(len(arms["related"]), packet.MAX_GRAPH_MEMORIES)
+
+    def test_fusion_is_stable(self):
+        eph, per = self._eph(6), self._per(6)
+        first = [r["id"] for _a, r in packet._fuse(packet._arms(eph, per))]
+        second = [r["id"] for _a, r in packet._fuse(packet._arms(eph, per))]
+        self.assertEqual(first, second)
+
+
+class ContradictionLabellingTests(unittest.TestCase):
+    """Finding 15: `graph.expand` computes `via`, `_rows` used to drop it, and
+    the packet presented a claim and its contradiction as identical bullets."""
+
+    def test_via_survives_into_the_memory_item(self):
+        item = packet._rows("persistent", [
+            {"id": "g0", "fact": "the opposite is true", "confidence": 0.9,
+             "via": "contradicts"}])[0]
+        self.assertEqual(item.via, "contradicts")
+
+    def test_a_contradiction_renders_marked(self):
+        items = packet._rows("persistent", [
+            {"id": "p0", "fact": "the build is green", "confidence": 0.9},
+            {"id": "g0", "fact": "the build is red", "confidence": 0.9,
+             "via": "contradicts"}])
+        lines = packet._format_items(items, "persistent")
+        self.assertNotIn("[", lines[0])
+        self.assertTrue(lines[1].startswith("- [contradicts] "))
+
+    def test_a_direct_hit_is_not_marked(self):
+        item = packet._rows("persistent", [
+            {"id": "p0", "fact": "plain", "confidence": 0.9}])[0]
+        self.assertIsNone(item.via)
+
+
+class ProvenanceTests(unittest.TestCase):
+    """What went into the packet, so an episode outcome can be attributed to it.
+
+    After rank fusion the number a row carries is not comparable across runs --
+    RRF scores depend on how many rows each arm happened to return -- so the
+    record is the row's position, not its score.
+    """
+
+    def _prov(self, ephemerals, persistents, message="a real question"):
+        from unittest.mock import patch
+
+        prov = []
+        with patch.object(packet, "recent_assistant_turns", return_value=[]), \
+             patch.object(packet, "embed_text_sync", return_value=[0.0] * 8), \
+             patch.object(packet.memory_select, "select_for_frame",
+                          return_value=(ephemerals, persistents)):
+            packet._load_memories(message, provenance=prov)
+        return prov
+
+    def test_provenance_records_rank_and_arm(self):
+        prov = self._prov([], [{"id": "p1", "fact": "a fact", "similarity": 0.8,
+                                "confidence": 1.0}])
+        self.assertEqual(prov[0]["tier"], "persistent")
+        self.assertEqual(prov[0]["rank"], 1)
+
+    def test_a_graph_row_is_recorded_under_its_own_arm(self):
+        """It renders in the Persistent section but was ranked as `related`;
+        attribution needs the arm, not the heading."""
+        prov = self._prov([], [{"id": "g1", "fact": "reached", "similarity": 0.3,
+                                "confidence": 1.0, "via_graph": True}])
+        self.assertEqual(prov[0]["tier"], "related")
+
+    def test_episode_and_task_ids_survive(self):
+        prov = self._prov([], [{"id": "p1", "fact": "a fact", "similarity": 0.8,
+                                "confidence": 1.0, "episode_id": "e9", "task_id": "t9"}])
+        self.assertEqual((prov[0]["episode_id"], prov[0]["task_id"]), ("e9", "t9"))
+
+    def test_a_skipped_turn_still_records_its_ephemeral(self):
+        """A triage skip invalidates similarity, not recency -- so a
+        continuation turn still has a working set, and attribution still needs
+        to know what it saw."""
+        prov = self._prov([{"id": "e1", "fact": "recent", "confidence": 1.0}], [],
+                          message="yes")
+        self.assertEqual([(p["tier"], p["rank"]) for p in prov], [("ephemeral", 1)])
