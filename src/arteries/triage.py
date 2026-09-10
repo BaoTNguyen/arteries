@@ -23,13 +23,11 @@ from __future__ import annotations
 
 import re
 
-ACKNOWLEDGEMENTS = frozenset({
-    "yes", "no", "yeah", "yep", "nope", "nah", "ok", "okay", "sure",
-    "thanks", "thank you", "thx", "got it", "makes sense", "sounds good",
-    "looks good", "perfect", "great", "nice", "cool", "awesome", "do it",
-    "go ahead", "proceed", "continue", "agreed", "correct", "right",
-    "exactly", "nevermind", "never mind", "nvm", "cancel",
-})
+from arteries import normalize
+
+# One definition, in the lower layer -- `normalize` needs it for trailing
+# fragments and this needs it for whole messages.
+ACKNOWLEDGEMENTS = normalize.ACKNOWLEDGEMENTS
 
 DIRECTIVE = re.compile(
     r"^\s*(?:set\s+up|add|change|fix|implement|update|create|build|run|use|"

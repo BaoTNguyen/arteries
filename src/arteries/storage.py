@@ -15,6 +15,7 @@ import psycopg2
 import psycopg2.extras
 
 from arteries.config import DB_CONFIG
+from arteries import normalize
 from arteries.scope import SCOPE_CTE
 
 
@@ -122,8 +123,16 @@ def insert_ephemeral(
             INSERT INTO arteries.ephemeral
                 (fact, embedding, domains, project_id,
                  agent_process_id, parent_agent_id, source, episode_id, task_id,
-                 session_id)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
+                 session_id, fact_hash, last_seen)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            -- The dedupe. Two sessions racing the same sentence resolve inside
+            -- idx_eph_dedupe: no lock, no read-then-write, and the loser gets a
+            -- counter bump rather than a second row. The predicate has to repeat
+            -- the index's own, or Postgres cannot tell which index arbitrates.
+            ON CONFLICT (project_id, coalesce(session_id, ''), fact_hash)
+                WHERE valid_until IS NULL AND fact_hash IS NOT NULL
+            DO UPDATE SET seen_count = arteries.ephemeral.seen_count + 1,
+                          last_seen  = now()
             RETURNING id
             """,
             (
@@ -137,6 +146,7 @@ def insert_ephemeral(
                 episode_id if episode_id is not None else _env_episode_id(),
                 task_id if task_id is not None else _env_task_id(),
                 session_id if session_id is not None else _env_session_id(),
+                normalize.fact_hash(fact),
             ),
         )
         conn.commit()

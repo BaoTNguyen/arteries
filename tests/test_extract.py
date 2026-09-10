@@ -11,16 +11,25 @@ from arteries.extract import (
 
 
 class ExtractFromMessageTests(unittest.TestCase):
-    def test_a_turn_is_stored_whole(self):
-        """No truncation. The old fallback cut every message at 500 characters,
-        which was 87% of the corpus losing its tail."""
-        message = "we use pgvector. " * 60          # ~1020 chars
-        (extraction,) = extract_from_message(message)
-        self.assertEqual(extraction.fact, message)
-        self.assertGreater(len(extraction.fact), 500)
+    def test_nothing_is_truncated(self):
+        """The invariant the old one-row-per-turn rule existed to protect. The
+        fallback before it cut every message at 500 characters, which was 87% of
+        the corpus losing its tail. Rows are per claim now; the content is still
+        all there."""
+        message = "The sweep reads claimed_at. " * 40      # ~1120 chars
+        out = extract_from_message(message)
+        self.assertGreater(len(" ".join(e.fact for e in out)), 1000)
 
-    def test_one_record_per_turn(self):
-        out = extract_from_message("I prefer stdlib. We use Postgres. No, actually pgvector.")
+    def test_a_turn_becomes_one_record_per_claim(self):
+        out = extract_from_message(
+            "The sweep now reads claimed_at instead. "
+            "The health probe runs before anything is claimed.")
+        self.assertEqual(len(out), 2)
+
+    def test_a_turn_with_no_standalone_claim_is_kept_whole(self):
+        """Under-splitting is the cheaper failure: a fragment that fails the word
+        gate would vanish, so ambiguity joins rather than splits."""
+        out = extract_from_message("I prefer stdlib. We use Postgres. Not pgvector.")
         self.assertEqual(len(out), 1)
 
     def test_short_turns_are_skipped(self):

@@ -50,6 +50,17 @@ ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEF
 -- it, and both run against the same database. Drop it when main has moved.
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS confidence REAL NOT NULL DEFAULT 1.0;
 
+-- Dedupe key and its counters. `fact_hash` is normalize.fact_hash of the claim;
+-- the unique index below is what makes two sessions saying the same sentence one
+-- row rather than two. See migrations 006 and 007.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS fact_hash TEXT;
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS seen_count INT NOT NULL DEFAULT 1;
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_eph_dedupe
+    ON arteries.ephemeral (project_id, coalesce(session_id, ''), fact_hash)
+    WHERE valid_until IS NULL AND fact_hash IS NOT NULL;
+
 -- When this row was promoted, recorded instead of hiding the row. Visibility is
 -- a time window now; `status` only tells the compiler what still needs
 -- claiming. See migration 005.
