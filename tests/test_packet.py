@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
@@ -291,19 +292,34 @@ class PacketTests(unittest.TestCase):
 
         self.assertNotIn("answer to turn zero", text)
 
-    def test_recent_section_keeps_all_ten_pairs_at_full_length(self):
+    @staticmethod
+    def _ten_long_pairs():
         long = "x" * 600
-        event = {"messages": [
+        return {"messages": [
             item for idx in range(10)
             for item in ({"role": "user", "content": f"question {idx} {long}"},
                          {"role": "assistant", "content": f"answer {idx} {long}"})
         ]}
 
-        with patch.object(packet.memory_select, "select_for_frame", return_value=([], [])):
-            text = packet.build_packet("auto compact", event=event)
+    def test_recent_section_keeps_all_ten_pairs_when_it_is_the_compaction(self):
+        """`pi` replaces the host's compaction output, so these turns are the
+        only record of the conversation and truncating them loses the thing
+        being compacted."""
+        with patch.dict(os.environ, {"ARTERIES_CLI": "pi"}), \
+             patch.object(packet.memory_select, "select_for_frame", return_value=([], [])):
+            text = packet.build_packet("auto compact", event=self._ten_long_pairs())
 
         self.assertNotIn("[Section truncated to fit budget.]", text)
         self.assertEqual(text.count("Q: question"), 10)
+
+    def test_the_injection_path_does_not_re_send_the_conversation(self):
+        """Finding 18. `claude` keeps its own transcript, so spending 55% of the
+        packet repeating it back was 55% not spent on memory."""
+        with patch.dict(os.environ, {"ARTERIES_CLI": "claude"}), \
+             patch.object(packet.memory_select, "select_for_frame", return_value=([], [])):
+            text = packet.build_packet("auto compact", event=self._ten_long_pairs())
+
+        self.assertLess(text.count("Q: question"), 10)
 
     def test_pi_json_format_wraps_summary(self):
         out = io.StringIO()
@@ -474,3 +490,59 @@ class ProvenanceTests(unittest.TestCase):
         prov = self._prov([{"id": "e1", "fact": "recent", "confidence": 1.0}], [],
                           message="yes")
         self.assertEqual([(p["tier"], p["rank"]) for p in prov], [("ephemeral", 1)])
+
+
+class ConfidenceIsAnAnnotationTests(unittest.TestCase):
+    """Finding 4. 448 of 527 live rows sit at 0.9 or above, so multiplying
+    relevance by confidence was a constant for 85% of the store and a silent
+    demotion for the rest."""
+
+    def test_ordering_does_not_depend_on_confidence(self):
+        sure = {"id": "a", "similarity": 0.70, "confidence": 1.0}
+        unsure = {"id": "b", "similarity": 0.72, "confidence": 0.7}
+        arms = dict(packet._arms([], [sure, unsure]))
+        self.assertEqual([r["id"] for r in arms["persistent"]], ["b", "a"],
+                         "the more relevant row should win regardless of certainty")
+
+    def test_the_floor_still_applies(self):
+        arms = dict(packet._arms([], [{"id": "x", "similarity": 0.4, "confidence": 1.0}]))
+        self.assertEqual(arms["persistent"], [])
+
+    def test_confidence_still_reaches_the_reader(self):
+        """Stored and rendered, so a 0.7 claim can be discounted by whoever
+        reads it rather than by the ranker."""
+        items = packet._rows("persistent", [
+            {"id": "p", "fact": "a shaky claim", "confidence": 0.7}])
+        self.assertIn("conf=0.70", packet._format_items(items, "persistent")[0])
+
+
+class BudgetTests(unittest.TestCase):
+    """Finding 18: `Recent Conversation` took 55% of the budget on every path,
+    and it is the one section every host CLI keeps verbatim."""
+
+    def _caps(self, **kw):
+        from arteries.cli_caps import CliCapabilities
+
+        return CliCapabilities(name="test", **kw)
+
+    def test_injecting_spends_the_budget_on_memory(self):
+        a = packet._allocations(20000, self._caps())
+        self.assertGreater(a["memory"] * 2, a["recent"])
+
+    def test_replacing_compaction_keeps_the_conversation(self):
+        """When the packet *is* the compaction output, the turns are the only
+        record of what happened."""
+        a = packet._allocations(20000, self._caps(can_replace_compaction=True))
+        self.assertGreater(a["recent"], a["memory"] * 2)
+
+    def test_shares_stay_under_the_hard_limit(self):
+        """Over-allocating hands the decision back to truncation, which is what
+        ranking exists to take away from it. The old shares summed to 1.08."""
+        for caps in (self._caps(), self._caps(can_replace_compaction=True)):
+            a = packet._allocations(20000, caps)
+            total = a["context"] + a["recent"] + a["memory"] * 2 + a["suggestion"] + a["rules"]
+            self.assertLessEqual(total, 20000)
+
+    def test_a_tiny_budget_does_not_go_negative(self):
+        a = packet._allocations(1, self._caps())
+        self.assertTrue(all(v >= 0 for v in a.values()))
