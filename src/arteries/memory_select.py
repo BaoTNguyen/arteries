@@ -79,10 +79,20 @@ def select_for_frame(
     context: AgentContext | None = None,
     embedding: list[float] | None = None,
     exclude_prior_attempts: bool | None = None,
+    similarity_search: bool = True,
 ) -> tuple[list[dict], list[dict]]:
+    """Ephemeral and persistent for this turn.
+
+    `similarity_search=False` when the message names nothing to search for --
+    "yes", "continue", "clean up". Ephemeral still comes back, because recency
+    does not need a query and is exactly the right context for a continuation.
+    Persistent does not, because a nearest-neighbour search always returns a
+    nearest neighbour even when the query is a centroid of nothing.
+    """
     context = context or context_from_env()
     ephemerals = _select_ephemeral(context)
-    persistents = _select_persistent(message, context, embedding)
+    persistents = (_select_persistent(message, context, embedding)
+                   if similarity_search else [])
     if exclude_prior_attempts is None:
         exclude_prior_attempts = os.getenv("ARTERIES_PRIOR_ATTEMPTS", "exclude") != "keep"
     if exclude_prior_attempts:
