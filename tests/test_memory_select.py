@@ -76,3 +76,39 @@ class MemorySelectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HybridRetrievalTests(unittest.TestCase):
+    """Built, measured, and switched off. The measurement is the point."""
+
+    def test_hybrid_is_off_by_default(self):
+        """Against the saved baseline it gained no recall and lost ranking:
+        window 10 cosine 37/40 mrr 0.67 against hybrid 36/40 mrr 0.54."""
+        self.assertFalse(memory_select.HYBRID_RETRIEVAL)
+
+    def test_disabled_hybrid_returns_the_dense_list_untouched(self):
+        dense = [{"id": "a"}, {"id": "b"}]
+        with patch.object(memory_select, "HYBRID_RETRIEVAL", False), \
+             patch.object(memory_select.storage, "get_persistent_by_text",
+                          side_effect=AssertionError("queried while disabled")):
+            self.assertEqual(memory_select._hybrid("p", "a query", dense), dense)
+
+    def test_a_lexical_only_row_is_marked_rather_than_given_a_cosine(self):
+        """Inventing a similarity for a row that matched exactly would be a lie
+        the packet floor then acts on."""
+        dense = [{"id": "a", "similarity": 0.8}]
+        lexical = [{"id": "z", "lexical_rank": 0.4}]
+        with patch.object(memory_select, "HYBRID_RETRIEVAL", True), \
+             patch.object(memory_select.storage, "get_persistent_by_text",
+                          return_value=lexical):
+            out = memory_select._hybrid("p", "a query", dense)
+        found = {r["id"]: r for r in out}
+        self.assertEqual(found["z"].get("via"), "exact match")
+        self.assertIsNone(found["z"].get("similarity"))
+
+    def test_lexical_failure_leaves_dense_standing(self):
+        dense = [{"id": "a", "similarity": 0.8}]
+        with patch.object(memory_select, "HYBRID_RETRIEVAL", True), \
+             patch.object(memory_select.storage, "get_persistent_by_text",
+                          side_effect=RuntimeError("tsquery exploded")):
+            self.assertEqual(memory_select._hybrid("p", "a query", dense), dense)

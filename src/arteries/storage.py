@@ -206,6 +206,67 @@ def get_persistent_by_relevance(
         return [dict(r) for r in cur.fetchall()]
 
 
+def _or_tsquery(cur, query: str) -> str:
+    """Turn a message into a tsquery, quoting every token.
+
+    Ported from capillaries, which learned it the hard way: an unquoted token
+    carrying punctuation -- `textkit/__init__.py`, `slugify('')`, a bare `&` --
+    is read as tsquery *syntax*, and the whole search dies with "syntax error in
+    tsquery". Agent prompts are made of such tokens, so that is the common case
+    rather than an edge one.
+
+    Pure-punctuation tokens are dropped: quoted, they produce empty lexemes and
+    Postgres rejects those too. An empty result means "skip sparse", and dense
+    retrieval still stands on its own.
+    """
+    cur.execute(
+        "SELECT array_to_string("
+        "  array_agg(DISTINCT quote_literal(token)), ' | '"
+        ") FROM ts_parse('default', %s) "
+        "WHERE tokid != 12 "              # whitespace
+        "  AND token ~ '[[:alnum:]]'",    # anything with no lexeme in it
+        [query],
+    )
+    return cur.fetchone()[0] or ""
+
+
+def get_persistent_by_text(project_id: str, query: str,
+                           limit: int = 20) -> list[dict[str, Any]]:
+    """Lexical retrieval over the same rows the cosine query reads.
+
+    The channel dense retrieval cannot provide: an exact identifier. A query
+    naming `UndefinedColumn` or `EMBED_DIM` matches the row containing it, where
+    an embedding puts both into the same technical-prose band as everything else.
+    """
+    with _conn() as conn:
+        # A plain cursor to build the tsquery. `_or_tsquery` reads column 0, and
+        # a RealDictCursor returns a dict, so sharing one cursor between the two
+        # raised KeyError: 0 on every query -- caught by `degrade` as a BUG
+        # rather than an outage, which is the distinction that module is for.
+        with conn.cursor() as plain:
+            terms = _or_tsquery(plain, query)
+        if not terms:
+            return []
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                SCOPE_CTE + """
+                SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts,
+                       p.project_id, p.episode_id, p.task_id,
+                       ts_rank_cd(p.search_tsv,
+                                  to_tsquery('english', %(terms)s), 1|4|32)
+                           AS lexical_rank
+                FROM arteries.persistent p
+                WHERE p.project_id IN (SELECT project_id FROM scope)
+                  AND p.valid_until IS NULL
+                  AND p.search_tsv @@ to_tsquery('english', %(terms)s)
+                ORDER BY lexical_rank DESC
+                LIMIT %(limit)s
+                """,
+                {"terms": terms, "project": project_id, "limit": limit},
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
 def has_embeddings(project_id: str) -> bool:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
