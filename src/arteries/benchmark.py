@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 
 import httpx
 import psycopg2
@@ -78,9 +79,36 @@ def build_queries(claims: list[dict]) -> list[dict]:
     resp.raise_for_status()
     questions = json.loads(resp.json()["choices"][0]["message"]["content"])["questions"]
     return [
-        {"id": str(claims[int(i)]["id"]), "fact": claims[int(i)]["fact"], "query": q}
+        {"id": str(claims[int(i)]["id"]), "fact": claims[int(i)]["fact"], "query": q,
+         "overlap": round(token_overlap(q, claims[int(i)]["fact"]), 3)}
         for i, q in questions.items() if int(i) < len(claims)
     ]
+
+
+# A query that reuses the claim's own words is not a test of retrieval, it is a
+# test of string matching. capillaries learned this the expensive way: two of its
+# three benchmarks shared vocabulary with their targets, both flattered BM25, and
+# the conclusions drawn from them had to be thrown out. QUERY_PROMPT asks the
+# model for different vocabulary and the model complies about half the time --
+# measured over 40 queries, mean overlap 0.505, and 14 of them shared more than
+# half their tokens with the target.
+#
+# So the overlap is recorded per query and the report splits on it. The low
+# overlap subset is the honest number, and it is the one to watch when a lexical
+# channel is added, because the high-overlap half will flatter it.
+HELD_OUT_OVERLAP = 0.34
+
+_WORD = re.compile(r"[a-z0-9_./]+")
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in _WORD.findall(text.lower()) if len(w) > 3}
+
+
+def token_overlap(query: str, fact: str) -> float:
+    """Fraction of the query's content words that appear in the claim."""
+    words = _content_words(query)
+    return len(words & _content_words(fact)) / len(words) if words else 0.0
 
 
 def _rank(target: str, rows: list[dict]) -> int | None:
@@ -195,7 +223,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("  (no --save: these queries are one-off, so this run is not"
                   " comparable to another)")
+    # Backfill overlap for query sets saved before it was recorded, so an old
+    # baseline is still comparable to a new run rather than silently missing the
+    # split.
+    for case in cases:
+        case.setdefault("overlap", round(token_overlap(case["query"], case["fact"]), 3))
+
+    held_out = [c for c in cases if c["overlap"] <= HELD_OUT_OVERLAP]
     results = [run(cases, project, w) for w in args.window]
+    held_out_results = ([run(held_out, project, w) for w in args.window]
+                        if len(held_out) >= 5 else [])
 
     if args.as_json:
         print(json.dumps(results, indent=2))
@@ -210,6 +247,25 @@ def main(argv: list[str] | None = None) -> int:
               f" {e['found']:>4}/{r['n']} ({e['mrr']:.2f})"
               f" {t['found']:>4}/{r['n']} ({t['mrr']:.2f})"
               f" {r['claims_added']:>7} {r['useful_added']:>7}")
+
+    mean_overlap = sum(c["overlap"] for c in cases) / (len(cases) or 1)
+    print(f"\n  query/claim token overlap: mean {mean_overlap:.2f}, "
+          f"{sum(1 for c in cases if c['overlap'] > 0.5)}/{len(cases)} above 0.5")
+    if held_out_results:
+        print(f"\n  held out -- the {len(held_out)} queries that share at most "
+              f"{HELD_OUT_OVERLAP:.0%} of their words with the claim.\n"
+              "  This is the honest number. The rest reuse the claim's own\n"
+              "  vocabulary, which tests string matching rather than retrieval\n"
+              "  and will flatter any lexical channel added later.\n")
+        print(f"  {'window':>6} {'cosine':>13} {'+expansion':>13} {'routed':>13}")
+        for r in held_out_results:
+            c, e, t = r["cosine"], r["expansion"], r["routed"]
+            print(f"  {r['window']:>6} {c['found']:>4}/{r['n']} ({c['mrr']:.2f})"
+                  f" {e['found']:>4}/{r['n']} ({e['mrr']:.2f})"
+                  f" {t['found']:>4}/{r['n']} ({t['mrr']:.2f})")
+    else:
+        print(f"  too few low-overlap queries ({len(held_out)}) for a held-out"
+              " split; treat the numbers above as an upper bound")
 
     widest = max(results, key=lambda r: r["window"])
     print()
