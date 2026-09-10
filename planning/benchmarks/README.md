@@ -54,3 +54,40 @@ compare the **held-out** rows, or the sparse arm will look better than it is.
   15 rows reach the model.
 - Ephemeral, which is recency-ranked and has no target to find.
 - The evergreen tier, which does not exist yet.
+
+## Hybrid retrieval: built, measured, off
+
+Measured 2026-09-10 against this baseline, with the hybrid arm truncated to the
+same window as the cosine arm so both lists are the same length:
+
+```
+  window        cosine        hybrid
+      10   37/40 (0.67)   36/40 (0.54)
+  held out  12/14 (0.68)   12/14 (0.53)
+```
+
+No recall gain, a clear ranking loss. Weighting does not rescue it -- at
+0.9 dense / 0.1 lexical the hybrid arm still falls to mrr 0.58, because RRF adds
+a term per channel and a row at dense rank 5 that is also lexical rank 1
+outscores dense rank 1 at any weighting. That is RRF behaving correctly and being
+wrong for this corpus.
+
+**Why**, which is the part worth keeping: BM25 needs term frequency and these
+documents are one sentence each, where capillaries' chunks are paragraphs. And
+every query in this set is a paraphrase written to *avoid* the claim's
+vocabulary -- exactly the case a lexical channel cannot serve.
+
+**What this did not measure** is the case the channel was built for: a query
+naming an identifier. `get_persistent_by_text("why does UndefinedColumn happen
+with claimed_at")` returns five relevant rows today, and nothing in these 40
+queries looks like that.
+
+So `ARTERIES_HYBRID=off` is the default, the code and the GIN index stay, and the
+evidence that would flip it is a query set containing identifier queries. Adding
+one is the next benchmark job, not a tuning pass on this one.
+
+An honest first measurement of the truncation bug is worth recording too: before
+the hybrid arm was cut to `window`, it read 37/40 at window 1 against cosine's
+21/40. That was a list of 21 being compared against a list of 1 -- the lexical
+channel contributes 20 candidates whatever the window is. It measured the length
+of the list, not the quality of retrieval.

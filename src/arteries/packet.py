@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import actionlog, degrade, memory_select, runlog, storage, triage
+from arteries import actionlog, degrade, memory_select, rank, runlog, storage, triage
 from arteries import frame as frame_mod
 from arteries.cli_caps import get_capabilities
 from arteries.conversation import recent_assistant_turns
@@ -276,7 +276,6 @@ NEUTRAL_SIMILARITY = 0.5
 # Ranks are commensurable where those scores are not: rank 1 means "the best
 # thing this tier has" in every tier. Each arm ranks on its own policy, and RRF
 # merges them without any arm needing to justify itself on another's scale.
-RRF_K = int(os.getenv("ARTERIES_RRF_K", "60"))
 # Keys are *arms* -- ranking lanes -- not packet sections. "related" holds claims
 # reached through the graph; they are persistent rows and render as such, so the
 # packet gains a lane, not a heading. Branch B adds an "evergreen" arm here when
@@ -348,15 +347,10 @@ ARM_TIER = {"ephemeral": "ephemeral", "persistent": "persistent", "related": "pe
 
 def _fuse(arms: list[tuple[str, list[dict[str, Any]]]]) -> list[tuple[str, dict[str, Any]]]:
     """Reciprocal rank fusion across arms. Returns (arm, row), best first."""
-    fused: list[tuple[float, int, str, dict[str, Any]]] = []
-    for arm_index, (arm, rows) in enumerate(arms):
-        weight = TIER_WEIGHT.get(arm, 1.0)
-        for rank, row in enumerate(rows, start=1):
-            # arm_index breaks ties deterministically, so an empty tier can
-            # never reorder the others and the result is stable run to run.
-            fused.append((weight / (RRF_K + rank), arm_index, arm, row))
-    fused.sort(key=lambda t: (-t[0], t[1]))
-    return [(arm, row) for _s, _i, arm, row in fused]
+    return rank.fuse(
+        [(arm, rows, TIER_WEIGHT.get(arm, 1.0)) for arm, rows in arms],
+        key=lambda row: str(row.get("id") or id(row)),
+    )
 
 
 def _load_memories(message: str, event: dict[str, Any] | None = None,
