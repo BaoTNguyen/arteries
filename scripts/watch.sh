@@ -36,8 +36,8 @@ import json
 from arteries import storage
 eph = storage.get_ephemeral('$project', '$project-hook', limit=50)
 per = storage.get_persistent('$project', limit=50)
-evg = storage.get_evergreen(limit=50)
-print(f'  ephemeral: {len(eph)}  persistent: {len(per)}  evergreen: {len(evg)}')
+evg = storage.get_evergreen_count('$project')
+print(f'  ephemeral: {len(eph)}  persistent: {len(per)}  evergreen: {evg}')
 if per:
     for m in per[-3:]:
         print(f'    • {m[\"fact\"][:80]}')
