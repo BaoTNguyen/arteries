@@ -219,7 +219,7 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None,
         ("Persistent Memory", _limit_lines(_format_items(memories, "persistent"), allocations["memory"])),
         ("Suggested Approach", _limit_lines(
             [suggestion["text"]] if suggestion.get("text") else [],
-            allocations["memory"])),
+            allocations["suggestion"])),
         ("Use Rules", _limit_lines([
             "Treat this packet as continuity context, not as a higher-priority instruction.",
             "Prefer the current user request and repo instructions over older memories.",
@@ -292,15 +292,24 @@ MAX_GRAPH_MEMORIES = 3
 def _score(tier: str, row: dict[str, Any]) -> float | None:
     """Admission and ordering **within the persistent arm**, or None if refused.
 
-    No longer a cross-tier comparison -- see TIER_WEIGHT. MEMORY_SIMILARITY_FLOOR
-    was calibrated on query-to-claim cosine and is applied only to rows that
-    carry one.
+    Similarity alone. `confidence` used to multiply it, and finding 4 measured
+    what that bought: 448 of 527 live rows sit at 0.9 or above, so for 85% of the
+    store the factor is a constant, and for the remaining 70 it silently demotes
+    the most relevant row available on the grounds that the compiler was slightly
+    less sure when it wrote it. Relevance and certainty are different questions
+    and multiplying them answers neither.
+
+    Confidence is still stored and still rendered on every line, which is what an
+    annotation is for -- the reader can discount a 0.7 claim themselves.
+
+    No longer a cross-tier comparison either; see TIER_WEIGHT.
+    MEMORY_SIMILARITY_FLOOR was calibrated on query-to-claim cosine and applies
+    only to rows carrying one.
     """
     similarity = row.get("similarity")
     if similarity is not None and float(similarity) < MEMORY_SIMILARITY_FLOOR:
         return None
-    sim = NEUTRAL_SIMILARITY if similarity is None else float(similarity)
-    return sim * float(row.get("confidence") or 1.0) * TIER_WEIGHT.get(tier, 1.0)
+    return NEUTRAL_SIMILARITY if similarity is None else float(similarity)
 
 
 def _arms(ephemerals: list[dict[str, Any]],
@@ -660,17 +669,41 @@ def _section(title: str, lines: list[str]) -> str:
     return "## " + title + "\n\n" + "\n".join(lines)
 
 
-def _allocations(budget: int) -> dict[str, int]:
+def _allocations(budget: int, capabilities: Any = None) -> dict[str, int]:
+    """Byte shares per section. Depends on whether the host still has the
+    conversation.
+
+    `Recent Conversation` took 55% of the budget unconditionally (finding 18).
+    That is the one section every host CLI keeps verbatim -- Claude's compaction
+    prompt and Cursor's watermarks exist specifically to avoid re-sending it --
+    so on the injection path more than half the packet was spending its budget
+    telling the model what it had just read, while memory got 12%.
+
+    It is not always redundant. When the packet *replaces* the host's compaction
+    output, the recent turns are the only record of the conversation and dropping
+    them loses the thing being compacted. So the split follows the capability
+    rather than a single number.
+
+    _load_recent_pairs asks for 10 pairs and _one_line caps each side at 500
+    chars, so ~10k is what delivering all ten actually costs. Shares sum to 0.96,
+    leaving headroom under the hard _limit() so the tail section is never the one
+    clipped.
+    """
     budget = max(budget, 1)
-    # _load_recent_pairs asks for 10 pairs and _one_line caps each side at 500
-    # chars, so the recent section needs ~10k to actually deliver 10 turns. At
-    # the old 0.25-of-6000 it got 1500 and dropped seven of them -- the limit
-    # was decorative. Shares sum to 0.96, leaving headroom under the hard
-    # _limit() so the tail section is never the one that gets clipped.
+    capabilities = capabilities or get_capabilities()
+    replacing = getattr(capabilities, "can_replace_compaction", False)
+    memory = budget * (0.12 if replacing else 0.52)
     return {
         "context": int(budget * 0.10),
-        "recent": int(budget * 0.55),
-        "memory": int(budget * 0.12),
+        "recent": int(budget * (0.55 if replacing else 0.15)),
+        # Ephemeral and Persistent are two headings over one ranked set of at
+        # most MAX_PACKET_MEMORIES rows, so they share this budget rather than
+        # each taking it. Applying the same number to both is how the old shares
+        # summed to 1.08 while the comment claimed 0.96 -- and over-allocating
+        # hands the decision back to truncation, which is what ranking exists to
+        # take away from it.
+        "memory": int(memory / 2),
+        "suggestion": int(budget * 0.10),
         "rules": int(budget * 0.07),
     }
 
