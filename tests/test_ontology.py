@@ -106,3 +106,62 @@ class LoadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PredicateBindingTests(unittest.TestCase):
+    """Finding 16: `ontology_valid` was false on all 3219 live edges because
+    nothing ever set it -- the column read as "no edge is grounded" when it meant
+    "nobody checked"."""
+
+    def test_provenance_relations_are_bound(self):
+        self.assertEqual(ontology.predicate_uri("derived_from"),
+                         "http://www.w3.org/ns/prov#wasDerivedFrom")
+        self.assertEqual(ontology.predicate_uri("supersedes"),
+                         "http://www.w3.org/ns/prov#wasRevisionOf")
+
+    def test_invented_relations_stay_unbound(self):
+        """`supports` and `contradicts` have no faithful standard predicate.
+        skos:related asserts far less and would be a false grounding, which is
+        worse than a missing one -- the flag exists to tell those apart."""
+        self.assertIsNone(ontology.predicate_uri("supports"))
+        self.assertIsNone(ontology.predicate_uri("contradicts"))
+
+    def test_lookup_is_case_and_whitespace_insensitive(self):
+        self.assertIsNotNone(ontology.predicate_uri("  Derived_From "))
+
+    def test_an_unknown_relation_is_not_an_error(self):
+        self.assertIsNone(ontology.predicate_uri("invented_yesterday"))
+        self.assertIsNone(ontology.predicate_uri(""))
+
+
+class ScopedVocabularyTests(unittest.TestCase):
+    """One flat `ontology_terms` table meant a vocabulary loaded for one domain
+    grounded names in every other -- load finance and "position" inside a coding
+    scope resolves to a securities holding."""
+
+    def setUp(self):
+        ontology.reset_cache()
+
+    def tearDown(self):
+        ontology.reset_cache()
+
+    def test_the_cache_is_keyed_by_scope(self):
+        """A single cache would serve whichever scope asked first to both."""
+        self.assertIsInstance(ontology._cache, dict)
+
+    def test_resolve_accepts_a_scope(self):
+        import inspect
+
+        self.assertIn("scope_id", inspect.signature(ontology.resolve).parameters)
+
+    def test_an_unbound_scope_reads_everything(self):
+        """Inert until someone binds a scope, so this changes nothing today."""
+        source = inspect_source(ontology._lookup)
+        self.assertIn("if sources:", source)
+        self.assertIn("FROM arteries.ontology_terms\"", source)
+
+
+def inspect_source(fn):
+    import inspect
+
+    return inspect.getsource(fn)
