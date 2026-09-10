@@ -335,6 +335,26 @@ def max_ephemeral_similarity(
         return float(cur.fetchone()[0])
 
 
+def get_evergreen_count(project_id: str) -> int:
+    """How many live evergreen rows this project's scope can see.
+
+    `scripts/watch.sh` has called `storage.get_evergreen` since before the tier
+    existed; the call sat behind a `2>/dev/null || echo "(db unavailable)"` and
+    so reported a missing function as a missing database for months. A count is
+    what the watch actually wanted.
+    """
+    from arteries import scope as scope_mod
+
+    scope_id = scope_mod.scope_for(project_id) or project_id
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM arteries.evergreen "
+            "WHERE scope_id = %s AND valid_until IS NULL",
+            (scope_id,),
+        )
+        return int(cur.fetchone()[0])
+
+
 def touch_persistent(ids: list[str]) -> None:
     """Bump access_count for claims surfaced into a frame.
 

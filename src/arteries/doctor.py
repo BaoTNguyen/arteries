@@ -165,6 +165,12 @@ def unreached(root: Path | None = None) -> list[str]:
 
     root = root or Path(__file__).resolve().parent
     sources = {p: p.read_text() for p in sorted(root.glob("*.py"))}
+    # Shell entry points count as callers. `scripts/watch.sh` has called into
+    # storage for months; a Python-only scan reports that as unreached and the
+    # fix would be to delete a function something uses.
+    scripts = root.parent.parent / "scripts"
+    if scripts.is_dir():
+        sources.update({p: p.read_text() for p in sorted(scripts.glob("*.sh"))})
     orphans = []
     for path, text in sources.items():
         for match in re.finditer(r"^def ([a-z][a-z0-9_]*)\(", text, re.M):
