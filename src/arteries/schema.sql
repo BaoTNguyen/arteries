@@ -316,6 +316,15 @@ CREATE INDEX IF NOT EXISTS idx_onto_parent ON arteries.ontology_terms (parent_ur
 ALTER TABLE arteries.ontology_terms
     ADD COLUMN IF NOT EXISTS aliases TEXT[] NOT NULL DEFAULT '{}';
 
+-- Which vocabularies a scope may ground against. Empty means unrestricted, so
+-- an unbound scope behaves exactly as before. See migration 008.
+CREATE TABLE IF NOT EXISTS arteries.ontology_bindings (
+    scope_id    TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (scope_id, source)
+);
+
 CREATE INDEX IF NOT EXISTS idx_onto_aliases ON arteries.ontology_terms USING gin (aliases);
 
 -- Entities: the canonical names a claim can be about. The UNIQUE constraint is
