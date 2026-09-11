@@ -546,3 +546,78 @@ class BudgetTests(unittest.TestCase):
     def test_a_tiny_budget_does_not_go_negative(self):
         a = packet._allocations(1, self._caps())
         self.assertTrue(all(v >= 0 for v in a.values()))
+
+
+class SummaryDedupeTests(unittest.TestCase):
+    """Finding 21: dedupe was substring containment on normalized text, which
+    over-merges on prefixes and under-merges on any rewording at all."""
+
+    def _item(self, text):
+        return packet.MemoryItem(tier="persistent", text=text, confidence=1.0,
+                                 domains=[])
+
+    def test_a_claim_the_summary_already_states_is_dropped(self):
+        summary = ("The stale claim sweep now measures claimed_at rather than "
+                   "source_ts, which was the original bug.")
+        out = packet._dedupe_memories(
+            [self._item("The stale claim sweep measures claimed_at not source_ts")],
+            summary)
+        self.assertEqual(out, [])
+
+    def test_a_prefix_of_a_summary_sentence_is_not_dropped_blindly(self):
+        """Containment dropped anything that happened to be a prefix, even when
+        the claim said something the summary did not."""
+        summary = "We discussed the migration runner and its advisory lock today."
+        out = packet._dedupe_memories(
+            [self._item("The migration runner refuses destructive changes "
+                        "without an explicit contract flag")], summary)
+        self.assertEqual(len(out), 1)
+
+    def test_rewording_no_longer_defeats_it_entirely(self):
+        """One changed character used to break containment completely."""
+        summary = "Ephemeral rows are keyed on session_id rather than process id."
+        out = packet._dedupe_memories(
+            [self._item("Ephemeral rows are keyed on session_id rather than the "
+                        "process id")], summary)
+        self.assertEqual(out, [])
+
+    def test_no_summary_drops_nothing(self):
+        items = [self._item("a claim about something")]
+        self.assertEqual(len(packet._dedupe_memories(items, "")), 1)
+
+    def test_status_lines_survive_everything(self):
+        status = packet.MemoryItem(tier="status", text="Memory unavailable",
+                                   confidence=1.0, domains=[])
+        self.assertEqual(packet._dedupe_memories([status], "Memory unavailable"),
+                         [status])
+
+
+class PacketChainingTests(unittest.TestCase):
+    """Finding 19: nothing chained. No record of which rows entered which packet,
+    so the same claims were re-sent every turn they kept matching."""
+
+    def test_a_previously_shown_row_is_demoted_not_dropped(self):
+        """A claim shown last turn that is still the best answer should still
+        appear -- it just should not outrank something new. Dropping it would
+        make a packet worse the longer a session ran."""
+        rows = [{"id": "old", "similarity": 0.9, "confidence": 1.0},
+                {"id": "new", "similarity": 0.7, "confidence": 1.0}]
+        arms = dict(packet._arms([], rows, [], already_shown={"old"}))
+        self.assertEqual([r["id"] for r in arms["persistent"]], ["new", "old"])
+
+    def test_with_no_history_order_is_untouched(self):
+        rows = [{"id": "a", "similarity": 0.9, "confidence": 1.0},
+                {"id": "b", "similarity": 0.7, "confidence": 1.0}]
+        arms = dict(packet._arms([], rows, [], already_shown=set()))
+        self.assertEqual([r["id"] for r in arms["persistent"]], ["a", "b"])
+
+    def test_the_evergreen_arm_has_its_own_lane_and_heading(self):
+        self.assertIn("evergreen", packet.TIER_WEIGHT)
+        self.assertEqual(packet.ARM_TIER["evergreen"], "evergreen")
+
+    def test_evergreen_sits_between_persistent_and_graph(self):
+        """Broader than a project claim, more specific than a hop away."""
+        self.assertLess(packet.TIER_WEIGHT["evergreen"],
+                        packet.TIER_WEIGHT["persistent"])
+        self.assertGreater(packet.TIER_WEIGHT["evergreen"],
+                           packet.TIER_WEIGHT["related"])

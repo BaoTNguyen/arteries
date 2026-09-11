@@ -402,6 +402,20 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding
     ON arteries.chunks USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
+-- Which memories went into which packet, so a packet can be incremental rather
+-- than re-sending the same claims every turn. See migration 012.
+CREATE TABLE IF NOT EXISTS arteries.packets (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id  TEXT NOT NULL,
+    session_id  TEXT,
+    agent_process_id TEXT,
+    member_ids  TEXT[] NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_packets_session
+    ON arteries.packets (project_id, session_id, created_at DESC);
+
 -- Typed edges over every node kind above. src/dst ids are TEXT because the
 -- things being linked have heterogeneous key types: UUID for memories and
 -- entities, TEXT for episodes and prompt ids.
