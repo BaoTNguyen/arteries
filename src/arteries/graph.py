@@ -227,9 +227,30 @@ def main(argv: list[str] | None = None) -> int:
     p_why = sub.add_parser("why", help="edges touching one memory, by id prefix")
     p_why.add_argument("memory_id")
 
+    p_exp = sub.add_parser("export", help="write GEXF for Gephi")
+    p_exp.add_argument("--out", default="graph.gexf")
+    p_exp.add_argument("--seed", help="centre on one memory id; omit for the scope")
+    p_exp.add_argument("--hops", type=int, default=2,
+                       help="how far from the seed (default 2)")
+    p_exp.add_argument("--limit", type=int, default=2000,
+                       help="edge ceiling, so one command cannot draw everything")
+
     args = parser.parse_args(argv)
 
     project = scope.current_project()
+
+    if args.cmd == "export":
+        from arteries import gexf
+
+        nodes, edges = gexf.collect(project, seed=args.seed, hops=args.hops,
+                                    limit=args.limit)
+        if not nodes:
+            print("nothing to export -- no live edges in this scope"
+                  + (f" within {args.hops} hops of {args.seed}" if args.seed else ""))
+            return 0
+        written = gexf.write(nodes, edges, args.out)
+        print(f"{args.out}: {written} nodes, {len(edges)} edges")
+        return 0
 
     if args.cmd == "stats":
         st = stats(project)
