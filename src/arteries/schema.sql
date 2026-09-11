@@ -121,17 +121,14 @@ CREATE TABLE IF NOT EXISTS arteries.persistent (
     source_project_id TEXT,
     parent_ids      UUID[] DEFAULT '{}',   -- lineage: ephemeral records compiled from
     child_ids       UUID[] DEFAULT '{}',   -- lineage: evergreen records compiled into
-    scope           TEXT,             -- NULL = compiled | 'user' = art remember | 'reviewed' = art docs
+    -- Provenance lives in source_meta->>'origin' (compiled | user | reviewed).
+    -- It used to be a `scope` column, which collided with scope *groups* --
+    -- what evergreen is keyed on. Dropped in migration 016.
     source_meta     JSONB NOT NULL DEFAULT '{}',
     valid_from      TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_until     TIMESTAMPTZ
 );
 
--- Named `scope` for provenance (compiled | user | reviewed), which unhappily
--- collides with scope *groups*. Renaming it was attempted and reverted: the
--- main checkout reads this column against the same database, so a rename from
--- a feature branch breaks whatever branch is actually running.
-ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS scope TEXT;
 -- fact | decision | preference | constraint
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'fact';
 -- Document provenance: path, line span, and digest for facts imported
