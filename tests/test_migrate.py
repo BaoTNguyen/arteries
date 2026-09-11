@@ -5,6 +5,7 @@ migration tested in production, which is how `persistent.scope` got renamed out
 from under the live checkout (reverted in d40ff8e).
 """
 
+import re
 import unittest
 from pathlib import Path
 
@@ -183,3 +184,39 @@ class ContractMigrationTests(unittest.TestCase):
         read the new location. The file has to say so."""
         by_version = dict(migrate.available())
         self.assertIn("main", by_version["016_drop_persistent_scope"])
+
+
+class DroppedColumnTests(unittest.TestCase):
+    """Nothing may name a column a contract migration has dropped.
+
+    016 dropped `persistent.scope` while `storage.get_persistent` still read
+    `coalesce(source_meta->>'origin', p.scope)`. That reads the new location and
+    names the old one, so it raised UndefinedColumn on every persistent read the
+    moment the migration ran -- on the live database. The migration's own
+    checklist asked whether main *could* read the new location, which was the
+    wrong question.
+    """
+
+    DROPPED = ("scope",)
+
+    def test_no_source_file_names_a_dropped_column(self):
+        src = Path(migrate.__file__).parent
+        offenders = []
+        for path in sorted(src.glob("*.py")):
+            text = path.read_text()
+            for column in self.DROPPED:
+                # `p.scope` is how every query in storage.py aliases the table,
+                # and it is the form that actually raised. A broader search would
+                # hit `scope_id`, `SCOPE_CTE` and the scope module, none of which
+                # are this column.
+                if re.search(rf"\bp\.{column}\b", text):
+                    offenders.append(f"{path.name}:{column}")
+        self.assertEqual(offenders, [])
+
+    def test_schema_sql_does_not_recreate_it(self):
+        """schema.sql recreated `scope`, so `art setup` put the column back and
+        `baseline` then stamped the drop as applied without running it -- the
+        suite passed against a database in the wrong state."""
+        schema = (Path(migrate.__file__).parent / "schema.sql").read_text()
+        self.assertNotIn("ADD COLUMN IF NOT EXISTS scope", schema)
+        self.assertNotRegex(schema, r"\n    scope\s+TEXT")

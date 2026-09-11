@@ -2456,3 +2456,49 @@ That is the part worth keeping.
   `persistent.scope` drop, and llama-server under systemd.
 - **A benchmark query set containing identifier queries**, which is what would
   turn hybrid retrieval back on.
+
+---
+
+## 28. The contract migration, and the checklist that was wrong
+
+`016_drop_persistent_scope` was applied on 2026-09-11 and broke every persistent
+read on the live database. `art remember list` and the packet's persistent arm
+both raised `UndefinedColumn: column p.scope does not exist`.
+
+The migration's own header carried a checklist, and it asked the wrong question:
+
+    1. dev is merged to main
+    2. the main checkout has been restarted
+    3. `art remember list` works from the main checkout
+
+All three were true. The code read `coalesce(source_meta->>'origin', p.scope)` --
+it reads the new location **and still names the old one**, so it kept working
+right up until the column disappeared and then failed on every row.
+
+**The correct precondition is that no code NAMES the column**, which is not the
+same as "no code depends on its value":
+
+    grep -rn "p\.scope" src/
+
+A dual-read release has to become a read-new-only release *before* the contract
+migration, not as part of it. Expand, migrate, **stop reading the old thing**,
+contract. The third step is the one this skipped, and it is the one the whole
+pattern exists for -- this is d40ff8e's failure reproduced, by me, using the
+machinery built to prevent it.
+
+Two further things it exposed:
+
+* **`schema.sql` still declared the column.** So `art setup` recreated it on any
+  fresh database, and `baseline` then stamped 016 as applied without running it.
+  The test suite passed against a database in a state live was not in. That is
+  the schema/migration drift the drift tests exist for, and they did not catch
+  it because they check that migrations *apply* cleanly, not that schema.sql
+  agrees with what the migrations have done.
+* **A comment-only edit to an applied migration still trips the checksum guard.**
+  Correcting the checklist in place made `art migrate status` report CHANGED.
+  The guard cannot tell a comment from a statement and should not try, so the
+  correction lives here and in a test instead.
+
+`tests/test_migrate.py::DroppedColumnTests` now asserts that no source file names
+a dropped column and that `schema.sql` does not recreate one. Both would have
+failed before the drop.
