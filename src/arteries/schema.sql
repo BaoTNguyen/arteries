@@ -402,6 +402,15 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding
     ON arteries.chunks USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
+-- How strongly a claim is known: user > observed > stated > inferred. Distinct
+-- from which door it came through. See migration 014.
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS evidence TEXT NOT NULL DEFAULT 'stated';
+ALTER TABLE arteries.evergreen ADD COLUMN IF NOT EXISTS evidence TEXT NOT NULL DEFAULT 'stated';
+
+CREATE INDEX IF NOT EXISTS idx_persistent_evidence
+    ON arteries.persistent (project_id, evidence)
+    WHERE valid_until IS NULL;
+
 -- Days this project was actually worked on. Retention counts these rather than
 -- calendar days, so time away does not age out a working set. See migration 013.
 CREATE TABLE IF NOT EXISTS arteries.project_activity (
