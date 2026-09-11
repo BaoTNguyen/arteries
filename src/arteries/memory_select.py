@@ -74,6 +74,20 @@ def _prior_attempt_at_this_task(row: dict) -> bool:
     return bool(episode) and row.get("episode_id") != episode
 
 
+def select_evergreen(message: str, context: AgentContext,
+                     embedding: list[float] | None = None) -> list[dict]:
+    """The scope-wide arm. Empty until the tier has rows, which is correct --
+    a new project has no accumulated structure and should not pretend to."""
+    if not embedding:
+        return []
+    try:
+        return storage.get_evergreen_by_relevance(context.project_id, embedding,
+                                                  limit=10)
+    except Exception as exc:
+        degrade.note(exc, "evergreen retrieval")
+        return []
+
+
 def select_for_frame(
     message: str,
     context: AgentContext | None = None,

@@ -217,6 +217,7 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None,
         ("Recent Conversation", _limit_lines(_format_recent_pairs(recent_pairs), allocations["recent"])),
         ("Ephemeral Memory", _limit_lines(_format_items(memories, "ephemeral"), allocations["memory"])),
         ("Persistent Memory", _limit_lines(_format_items(memories, "persistent"), allocations["memory"])),
+        ("Scope Memory", _limit_lines(_format_items(memories, "evergreen"), allocations["memory"])),
         ("Suggested Approach", _limit_lines(
             [suggestion["text"]] if suggestion.get("text") else [],
             allocations["suggestion"])),
@@ -280,7 +281,8 @@ NEUTRAL_SIMILARITY = 0.5
 # reached through the graph; they are persistent rows and render as such, so the
 # packet gains a lane, not a heading. Branch B adds an "evergreen" arm here when
 # that tier exists.
-TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95, "related": 0.90}
+TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95, "evergreen": 0.92,
+               "related": 0.90}
 
 # A graph neighbour is relevant by association, never by wording, so it must not
 # crowd out direct hits. Bounded rather than floored: the floor was the wrong
@@ -312,7 +314,9 @@ def _score(tier: str, row: dict[str, Any]) -> float | None:
 
 
 def _arms(ephemerals: list[dict[str, Any]],
-          persistents: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+          persistents: list[dict[str, Any]],
+          evergreens: list[dict[str, Any]] | None = None,
+          already_shown: set[str] | None = None) -> list[tuple[str, list[dict[str, Any]]]]:
     """Split the selection into ranked arms, each ordered by its own policy.
 
     `select_for_frame` returns graph neighbours mixed into the persistent list,
@@ -330,10 +334,19 @@ def _arms(ephemerals: list[dict[str, Any]],
     # Own scale, own order, no cosine floor. Bounded instead.
     reached.sort(key=lambda r: float(r.get("similarity") or 0.0), reverse=True)
 
+    # Demoted, not dropped. A claim shown last turn that is still the best answer
+    # should still appear; it just should not outrank something new. Dropping it
+    # outright would make a packet worse the longer a session ran.
+    shown = already_shown or set()
+
+    def _rank_within(rows):
+        return sorted(rows, key=lambda r: str(r.get("id") or "") in shown)
+
     return [
         # Already newest-first from storage.get_ephemeral; recency IS the ranking.
-        ("ephemeral", list(ephemerals)),
-        ("persistent", [r for _s, r in scored_direct]),
+        ("ephemeral", _rank_within(ephemerals)),
+        ("persistent", _rank_within([r for _s, r in scored_direct])),
+        ("evergreen", _rank_within(list(evergreens or []))),
         ("related", reached[:MAX_GRAPH_MEMORIES]),
     ]
 
@@ -342,7 +355,8 @@ def _arms(ephemerals: list[dict[str, Any]],
 # are persistent rows reached sideways, so they belong in the Persistent section,
 # marked with the edge that led to them rather than filed under a heading of
 # their own.
-ARM_TIER = {"ephemeral": "ephemeral", "persistent": "persistent", "related": "persistent"}
+ARM_TIER = {"ephemeral": "ephemeral", "persistent": "persistent",
+            "evergreen": "evergreen", "related": "persistent"}
 
 
 def _fuse(arms: list[tuple[str, list[dict[str, Any]]]]) -> list[tuple[str, dict[str, Any]]]:
@@ -364,13 +378,25 @@ def _load_memories(message: str, event: dict[str, Any] | None = None,
         msg_vec = embed_text_sync(message, is_query=True) if message and not no_query else None
         ephemerals, persistents = memory_select.select_for_frame(
             message, embedding=msg_vec, similarity_search=not no_query)
+        evergreens = (memory_select.select_evergreen(
+            message, memory_select.context_from_env(), msg_vec)
+            if not no_query else [])
+
+        # Finding 19. What the last couple of packets already showed, so this one
+        # can differ from them instead of re-sending the same claims every turn.
+        already_shown = storage.recent_packet_members(PROJECT_ID)
         if no_query:
             runlog.log_event("memory.retrieval.skipped", "arteries",
                              {"reason": no_query}, project_id=PROJECT_ID,
                              agent_id=AGENT_PROCESS_ID)
 
+        members: list[str] = []
         for rank, (arm, row) in enumerate(
-                _fuse(_arms(ephemerals, persistents))[:MAX_PACKET_MEMORIES], start=1):
+                _fuse(_arms(ephemerals, persistents, evergreens,
+                            already_shown))[:MAX_PACKET_MEMORIES],
+                start=1):
+            if row.get("id"):
+                members.append(str(row["id"]))
             items.extend(_rows(ARM_TIER[arm], [row]))
             if provenance is not None and row.get("id"):
                 provenance.append({
@@ -386,6 +412,8 @@ def _load_memories(message: str, event: dict[str, Any] | None = None,
                     "task_id": row.get("task_id"),
                     "episode_id": row.get("episode_id"),
                 })
+        storage.record_packet(PROJECT_ID, members,
+                              agent_process_id=AGENT_PROCESS_ID)
     except Exception as exc:
         items.append(MemoryItem(
             tier="status",
@@ -415,6 +443,7 @@ def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[Mem
     dropped."""
     seen: set[str] = set()
     out: list[MemoryItem] = []
+    summary_words = _content_words(previous_summary)
     for item in items:
         if item.tier == "status":
             out.append(item)
@@ -422,11 +451,43 @@ def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[Mem
         key = _norm(item.text)
         if not key or key in seen:
             continue
-        if previous_summary and key in previous_summary:
+        if _already_covered(item.text, summary_words):
             continue
         seen.add(key)
         out.append(item)
     return out
+
+
+# Finding 21: dedupe was `key in previous_summary` -- substring containment on
+# normalized text. That over-merges, because a claim that happens to be a prefix
+# of a longer sentence in the summary is dropped even when it says something the
+# summary does not, and it under-merges on any rewording at all, because one
+# changed character breaks containment entirely.
+#
+# Word overlap instead: what fraction of this claim's content words the summary
+# already contains. Still shallow -- paraphrase with different vocabulary is the
+# compiler's job -- but it degrades sensibly instead of flipping.
+SUMMARY_OVERLAP = float(os.getenv("ARTERIES_SUMMARY_OVERLAP", "0.8"))
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9_./]+", (text or "").lower()) if len(w) > 3}
+
+
+def _already_covered(text: str, summary_words: set[str]) -> bool:
+    """Compared on raw text, not on `_norm`ed text.
+
+    `_norm` strips punctuation, so `claimed_at` becomes "claimed at" while the
+    untouched summary still holds `claimed_at` -- identical tokens that never
+    match. Both sides go through the same tokenizer now, which is the only way
+    an overlap number means anything.
+    """
+    if not summary_words:
+        return False
+    words = _content_words(text)
+    if not words:
+        return False
+    return len(words & summary_words) / len(words) >= SUMMARY_OVERLAP
 
 
 def _rows(tier: str, rows: list[dict[str, Any]]) -> list[MemoryItem]:
