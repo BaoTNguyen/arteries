@@ -94,16 +94,32 @@ def add_edge(cur, project_id: str, src_kind: str, src_id: str, rel: str,
 
     project_id records which repo asserted the edge. Scope is resolved from the
     claim at read time, so no scope column lives here.
+
+    `ontology_valid` records whether this relation is one a standard vocabulary
+    already has a predicate for. It was false on all 3219 live edges because
+    nothing ever set it, which made the column read as "no edge is grounded"
+    when it meant "nobody checked". Partial by design -- `supports` and
+    `contradicts` stay false because no standard predicate means what they mean,
+    and a false grounding is worse than a missing one.
     """
+    # Local, matching upsert_entity: `ontology` pulls in difflib and a database
+    # connection, and this module is imported by paths that never touch either.
+    from arteries import ontology
+
+    uri = ontology.predicate_uri(rel)
+    edge_metadata = dict(metadata or {})
+    if uri:
+        edge_metadata.setdefault("predicate", uri)
     cur.execute(
         """
         INSERT INTO arteries.memory_edges
-            (project_id, src_kind, src_id, dst_kind, dst_id, rel, weight, metadata)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            (project_id, src_kind, src_id, dst_kind, dst_id, rel, weight,
+             metadata, ontology_valid)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
         ON CONFLICT DO NOTHING
         """,
         (project_id, src_kind, str(src_id), dst_kind, str(dst_id), rel, weight,
-         psycopg2.extras.Json(metadata or {})),
+         psycopg2.extras.Json(edge_metadata), uri is not None),
     )
 
 
@@ -211,9 +227,30 @@ def main(argv: list[str] | None = None) -> int:
     p_why = sub.add_parser("why", help="edges touching one memory, by id prefix")
     p_why.add_argument("memory_id")
 
+    p_exp = sub.add_parser("export", help="write GEXF for Gephi")
+    p_exp.add_argument("--out", default="graph.gexf")
+    p_exp.add_argument("--seed", help="centre on one memory id; omit for the scope")
+    p_exp.add_argument("--hops", type=int, default=2,
+                       help="how far from the seed (default 2)")
+    p_exp.add_argument("--limit", type=int, default=2000,
+                       help="edge ceiling, so one command cannot draw everything")
+
     args = parser.parse_args(argv)
 
     project = scope.current_project()
+
+    if args.cmd == "export":
+        from arteries import gexf
+
+        nodes, edges = gexf.collect(project, seed=args.seed, hops=args.hops,
+                                    limit=args.limit)
+        if not nodes:
+            print("nothing to export -- no live edges in this scope"
+                  + (f" within {args.hops} hops of {args.seed}" if args.seed else ""))
+            return 0
+        written = gexf.write(nodes, edges, args.out)
+        print(f"{args.out}: {written} nodes, {len(edges)} edges")
+        return 0
 
     if args.cmd == "stats":
         st = stats(project)

@@ -81,7 +81,7 @@ class IngestRoundTripDedupTests(unittest.TestCase):
         os.environ.update({
             "ARTERIES_REPO": str(self.root / "repo"),
             "ARTERIES_PROJECT": "ledger-contract-test",
-            "HEART_SPOOL_DIR": str(self.root / "spool"),
+            "EVENT_JOURNAL_DIR": str(self.root / "journal"),
         })
         for k in ("ARTERIES_EPISODE_ID", "ARTERIES_TASK_ID"):
             os.environ.pop(k, None)
@@ -231,7 +231,7 @@ class DegradationDrillTests(unittest.TestCase):
             "ARTERIES_PROJECT": "ledger-degradation-test",
             "ARTERIES_EPISODE_ID": "contract-test-degradation-1",
             "ARTERIES_TASK_ID": "contract-test-task",
-            "HEART_SPOOL_DIR": str(self.root / "spool"),
+            "EVENT_JOURNAL_DIR": str(self.root / "journal"),
             # Documented for operators, but DB_CONFIG is a module-level dict
             # already resolved from env at import time (see arteries/config.py)
             # -- setting env here alone would be a no-op for a live process.
@@ -250,13 +250,13 @@ class DegradationDrillTests(unittest.TestCase):
         os.environ.update(self._env)
         self.tmp.cleanup()
 
-    def _spool_events(self) -> list[dict]:
+    def _journal_events(self) -> list[dict]:
         events = []
-        for path in sorted((self.root / "spool").glob("*.ndjson")):
+        for path in sorted((self.root / "journal").glob("*.ndjson")):
             events += [json.loads(line) for line in path.read_text().splitlines()]
         return events
 
-    def test_dead_db_degrades_to_jsonl_and_spool_records_store(self):
+    def test_dead_db_degrades_to_jsonl_and_journal_records_store(self):
         try:
             rec = actionlog.log_decision(
                 "contract.degradation",
@@ -276,8 +276,8 @@ class DegradationDrillTests(unittest.TestCase):
         matching = [r for r in jsonl_records if r.get("id") == rec["id"]]
         self.assertEqual(len(matching), 1)
 
-        spooled = self._spool_events()
-        gate = [e for e in spooled if e["kind"] == "decision.contract.degradation"]
+        journaled = self._journal_events()
+        gate = [e for e in journaled if e["kind"] == "decision.contract.degradation"]
         self.assertEqual(len(gate), 1)
         # Pin reality: with a dead DB but a writable tempdir, the jsonl write
         # succeeds, so the emitted store flag is "jsonl" (not "lost"). "lost"

@@ -9,8 +9,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import degrade, memory_select, runlog
+from arteries import actionlog, degrade, memory_select, rank, runlog, storage, triage
+from arteries import frame as frame_mod
 from arteries.cli_caps import get_capabilities
+from arteries.conversation import recent_assistant_turns
 from arteries.embed import embed_text_sync
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries.eventjson import event_messages, payload_text, read_stdin_json, text_from_mapping
@@ -38,16 +40,31 @@ class RecentPair:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build an Arteries continuity packet.")
-    parser.add_argument("--format", choices=("markdown", "pi-compaction-json"), default="markdown")
+    parser.add_argument("--format",
+                        choices=("markdown", "pi-compaction-json", "provenance-json"),
+                        default="markdown")
     parser.add_argument("--message", default="", help="current user message or compaction reason")
-    parser.add_argument("--budget", type=int, default=6000, help="approximate character budget")
+    parser.add_argument("--budget", type=int, default=20000, help="approximate character budget")
     parser.add_argument("--stdin-json", action="store_true", help="read CLI event JSON from stdin")
     args = parser.parse_args(argv)
 
     event = read_stdin_json() if args.stdin_json else {}
     message = args.message or _event_message(event)
-    packet = build_packet(message=message, event=event, budget=args.budget)
+    provenance: list[dict[str, Any]] = []
+    gate: dict[str, Any] = {}
+    packet = build_packet(message=message, event=event, budget=args.budget,
+                          provenance=provenance, gate_out=gate)
     capabilities = get_capabilities()
+
+    if args.format == "provenance-json":
+        # the packet, what went into it, and the frame itself. The frame is
+        # here because capillaries' `cap find --context` takes exactly this
+        # shape and arteries owns the type -- serialising it anywhere else
+        # would make a second place that has to track the contract.
+        print(json.dumps({"packet": packet, "memories": provenance,
+                          "corpus": gate,
+                          "project": PROJECT_ID, "agent_id": AGENT_PROCESS_ID}))
+        return 0
 
     if args.format == "pi-compaction-json":
         print(json.dumps({
@@ -65,9 +82,190 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def build_packet(message: str = "", event: dict[str, Any] | None = None, budget: int = 6000) -> str:
+#: Coverage above which the gate abstains: the situation is already answered by
+#: this session's memory, so a corpus lookup is wasted work. Deliberately high
+#: and configurable -- eval.py measures this distribution precisely because the
+#: threshold has not been chosen from data yet, and a gate that abstains too
+#: eagerly is invisible: the agent just works without a prompt it should have
+#: had. Erring toward searching keeps that failure out of the default.
+GATE_COVERAGE_ABSTAIN = float(os.getenv("ARTERIES_GATE_COVERAGE", "0.92"))
+
+
+# The hook path reads cache; the background compile pass fills it. Set
+# ARTERIES_CORPUS_INLINE=on to fetch inline, which is what the tests and `art
+# packet --format provenance-json` want and what a hook never wants.
+CORPUS_INLINE = os.getenv("ARTERIES_CORPUS_INLINE", "off").lower() == "on"
+CORPUS_TIMEOUT = float(os.getenv("ARTERIES_CORPUS_TIMEOUT", "60"))
+# A suggestion older than this describes a question nobody is asking any more.
+CORPUS_CACHE_SECONDS = int(os.getenv("ARTERIES_CORPUS_CACHE_SECONDS", "900"))
+
+
+def _suggestion_key(message: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(_norm(message).encode()).hexdigest()[:32]
+
+
+def _cached_suggestion(message: str) -> dict[str, Any] | None:
+    """The last suggestion computed for this question, if it is still fresh."""
+    try:
+        return storage.get_corpus_suggestion(
+            PROJECT_ID, _suggestion_key(message), CORPUS_CACHE_SECONDS)
+    except Exception as exc:
+        degrade.note(exc, "suggestion cache")
+        return None
+
+
+def warm_suggestion(message: str, embedding: list[float] | None = None) -> dict[str, Any]:
+    """Fetch a suggestion and cache it. Called from the background compile pass.
+
+    The half of finding 20's fix that does the network call, in the process that
+    can afford one.
+    """
+    result = _corpus_suggestion(message, embedding, None, inline=True)
+    try:
+        storage.put_corpus_suggestion(PROJECT_ID, _suggestion_key(message), result)
+    except Exception as exc:
+        degrade.note(exc, "suggestion cache write")
+    return result
+
+
+def _corpus_suggestion(message: str, embedding: list[float] | None,
+                       provenance: list[dict[str, Any]] | None,
+                       inline: bool = False) -> dict[str, Any]:
+    """Consult capillaries, if the gate says this turn needs it.
+
+    The gate lives here because arteries owns it: capillaries "does not own a
+    second retrieval path or a pre-retrieval gate" by its own account, and heart
+    is downstream of both. Heart asking capillaries directly would call it every
+    turn -- which is the work this exists to skip -- and would reach around the
+    layer that feeds it.
+
+    Best-effort in both directions: no capillaries installed, or a corpus that
+    is down, leaves the packet exactly as it was.
+    """
+    try:
+        coverage = storage.max_ephemeral_similarity(
+            PROJECT_ID, AGENT_PROCESS_ID, embedding) if embedding else 0.0
+    except Exception:
+        coverage = 0.0          # unknown coverage reads as none, and searches
+
+    # Finding 20: this ran `urlopen(req, timeout=60)` inside packet assembly, on
+    # a hook with a 9s budget. A slow corpus did not degrade the packet, it
+    # stalled the turn -- and the compaction path, where a packet is built with
+    # no user waiting on it, is the same code.
+    #
+    # The fix is not a shorter timeout, it is not being on this path at all. The
+    # suggestion is read from cache here; the fetch that fills the cache runs in
+    # the detached compile process, which already exists and already has no one
+    # waiting on it. A cold cache means no Suggested Approach section this turn
+    # and one next turn, which is what the "+N remembered" notice already does.
+    if not (inline or CORPUS_INLINE):
+        cached = _cached_suggestion(message)
+        if cached is not None:
+            return cached
+        return {"status": "not_cached", "coverage": round(coverage, 3)}
+
+    if coverage >= GATE_COVERAGE_ABSTAIN:
+        actionlog.log_decision(
+            "retrieval.gate", chosen_action="abstain",
+            available_actions=["abstain", "search"],
+            observation={"reason": "already covered by session memory",
+                         "coverage": round(coverage, 3)})
+        return {"status": "abstained", "coverage": round(coverage, 3)}
+
+    actionlog.log_decision(
+        "retrieval.gate", chosen_action="search",
+        available_actions=["abstain", "search"],
+        observation={"reason": "not covered by session memory",
+                     "coverage": round(coverage, 3)})
+    # The daemon, not find_sync in-process. find() mints no trace_id -- that is
+    # the HTTP router's doing -- and without one the outcome reported after the
+    # episode has nothing to attach to, so the feedback half of the loop cannot
+    # exist. `source` is deliberately unset: it is an eligibility filter, and
+    # naming the caller there filtered all 1033 prompts out.
+    import dataclasses
+    import urllib.request
+
+    try:
+        frame = frame_mod.get_current_frame(message, embedding)
+        body = json.dumps({"situation": message,
+                           "memory_context": dataclasses.asdict(frame)}).encode()
+        url = os.getenv("CAPILLARIES_URL", "http://127.0.0.1:8000") + "/agent/route"
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=CORPUS_TIMEOUT) as resp:
+            found = json.load(resp)
+    except Exception as exc:
+        return {"status": "unavailable", "reason": str(exc)[:160]}
+
+    confidence = float(found.get("confidence") or 0.0)
+    mode = found.get("mode") or "none"
+    # mode is the whole check. capillaries applies its own floor first --
+    # config/paths.py clears_floor, CAPILLARIES_MIN_CONFIDENCE, currently 0.8 --
+    # and returns mode="none" carrying the rejected score, so anything served
+    # here has already cleared a bar far above any second one worth writing.
+    # A 0.3 used to sit here, copied from capillaries' CLI docs; it could never
+    # fire, and read like a tuning knob that did nothing. The same borrowed
+    # constant is documented going stale once already at config.py's
+    # RELEVANCE_THRESHOLD. The real knob is CAPILLARIES_MIN_CONFIDENCE.
+    if mode == "none":
+        return {"status": "no_match", "confidence": round(confidence, 3),
+                "coverage": round(coverage, 3)}
+    # /agent/route nests the payload one level down; find_sync returns it flat.
+    # Reading only the flat shape got a trace_id and an empty prompt.
+    rec = found.get("recommendation") or found
+    title = rec.get("title")
+    if provenance is not None:
+        provenance.append({"tier": "corpus", "id": found.get("trace_id") or "",
+                           "score": round(confidence, 4), "title": title})
+    return {"status": "ok", "mode": mode, "title": title,
+            "confidence": round(confidence, 3), "coverage": round(coverage, 3),
+            "trace_id": found.get("trace_id"),
+            "text": rec.get("prompt_text") or ""}
+
+
+def _query_embedding(message: str) -> list[float] | None:
+    try:
+        return embed_text_sync(message, is_query=True) if message else None
+    except Exception:
+        return None
+
+
+def _frame_dict(message: str) -> dict[str, Any]:
+    """The MemoryFrame as plain JSON, or {} if memory is unreachable.
+
+    Best-effort by the same rule as the packet itself: a retrieval that cannot
+    be enriched is worth doing unenriched, not worth failing a turn over.
+    """
+    import dataclasses
+
+    try:
+        from arteries import frame as frame_mod
+
+        return dataclasses.asdict(frame_mod.get_current_frame(message))
+    except Exception:
+        return {}
+
+
+def build_packet(message: str = "", event: dict[str, Any] | None = None,
+                 budget: int = 20000,
+                 provenance: list[dict[str, Any]] | None = None,
+                 gate_out: dict[str, Any] | None = None) -> str:
+    """Render a continuity packet. Pass `provenance` to also collect which
+    records went into it.
+
+    The ids exist all the way through selection -- _dedupe_by_id_or_fact works
+    on them -- and were dropped at the boundary into MemoryItem, so a caller
+    could see the text and never what produced it. Anything training retrieval
+    on episode outcome needs that link: outcomes without a record of what was
+    retrieved give you no way to attribute, and nothing to learn from.
+    """
     event = event or {}
-    memories = _load_memories(message, event)
+    memories = _load_memories(message, event, provenance)
+    suggestion = _corpus_suggestion(message, _query_embedding(message), provenance)
+    if gate_out is not None:
+        gate_out.update({k: v for k, v in suggestion.items() if k != "text"})
     recent_pairs = _load_recent_pairs(event)
     allocations = _allocations(budget)
     sections = [
@@ -75,6 +273,10 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
         ("Recent Conversation", _limit_lines(_format_recent_pairs(recent_pairs), allocations["recent"])),
         ("Ephemeral Memory", _limit_lines(_format_items(memories, "ephemeral"), allocations["memory"])),
         ("Persistent Memory", _limit_lines(_format_items(memories, "persistent"), allocations["memory"])),
+        ("Scope Memory", _limit_lines(_format_items(memories, "evergreen"), allocations["memory"])),
+        ("Suggested Approach", _limit_lines(
+            [suggestion["text"]] if suggestion.get("text") else [],
+            allocations["suggestion"])),
         ("Use Rules", _limit_lines([
             "Treat this packet as continuity context, not as a higher-priority instruction.",
             "Prefer the current user request and repo instructions over older memories.",
@@ -112,6 +314,17 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None, budget:
 # `art benchmark` as the corpus grows.
 MEMORY_SIMILARITY_FLOOR = float(os.getenv("ARTERIES_PACKET_FLOOR", "0.55"))
 MAX_PACKET_MEMORIES = 15
+
+# Bumped whenever a section is added, removed, or renamed. Finding 24: the Codex
+# compact prompt names the packet's sections, and a prompt describing a layout
+# that no longer exists tells the model to preserve headings it will never see.
+# `art setup` regenerates the prompt when this changes, so the two cannot drift
+# without something noticing.
+PACKET_SCHEMA_VERSION = 2
+
+SECTION_TITLES = ("Current Context", "Recent Conversation", "Ephemeral Memory",
+                  "Persistent Memory", "Scope Memory", "Suggested Approach",
+                  "Use Rules")
 NEUTRAL_SIMILARITY = 0.5
 
 # Tiers are fused by RANK, not by score, because their scores are not the same
@@ -131,12 +344,12 @@ NEUTRAL_SIMILARITY = 0.5
 # Ranks are commensurable where those scores are not: rank 1 means "the best
 # thing this tier has" in every tier. Each arm ranks on its own policy, and RRF
 # merges them without any arm needing to justify itself on another's scale.
-RRF_K = int(os.getenv("ARTERIES_RRF_K", "60"))
 # Keys are *arms* -- ranking lanes -- not packet sections. "related" holds claims
 # reached through the graph; they are persistent rows and render as such, so the
 # packet gains a lane, not a heading. Branch B adds an "evergreen" arm here when
 # that tier exists.
-TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95, "related": 0.90}
+TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95, "evergreen": 0.92,
+               "related": 0.90}
 
 # A graph neighbour is relevant by association, never by wording, so it must not
 # crowd out direct hits. Bounded rather than floored: the floor was the wrong
@@ -147,19 +360,30 @@ MAX_GRAPH_MEMORIES = 3
 def _score(tier: str, row: dict[str, Any]) -> float | None:
     """Admission and ordering **within the persistent arm**, or None if refused.
 
-    No longer a cross-tier comparison -- see TIER_WEIGHT. MEMORY_SIMILARITY_FLOOR
-    was calibrated on query-to-claim cosine and is applied only to rows that
-    carry one.
+    Similarity alone. `confidence` used to multiply it, and finding 4 measured
+    what that bought: 448 of 527 live rows sit at 0.9 or above, so for 85% of the
+    store the factor is a constant, and for the remaining 70 it silently demotes
+    the most relevant row available on the grounds that the compiler was slightly
+    less sure when it wrote it. Relevance and certainty are different questions
+    and multiplying them answers neither.
+
+    Confidence is still stored and still rendered on every line, which is what an
+    annotation is for -- the reader can discount a 0.7 claim themselves.
+
+    No longer a cross-tier comparison either; see TIER_WEIGHT.
+    MEMORY_SIMILARITY_FLOOR was calibrated on query-to-claim cosine and applies
+    only to rows carrying one.
     """
     similarity = row.get("similarity")
     if similarity is not None and float(similarity) < MEMORY_SIMILARITY_FLOOR:
         return None
-    sim = NEUTRAL_SIMILARITY if similarity is None else float(similarity)
-    return sim * float(row.get("confidence") or 1.0) * TIER_WEIGHT.get(tier, 1.0)
+    return NEUTRAL_SIMILARITY if similarity is None else float(similarity)
 
 
 def _arms(ephemerals: list[dict[str, Any]],
-          persistents: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+          persistents: list[dict[str, Any]],
+          evergreens: list[dict[str, Any]] | None = None,
+          already_shown: set[str] | None = None) -> list[tuple[str, list[dict[str, Any]]]]:
     """Split the selection into ranked arms, each ordered by its own policy.
 
     `select_for_frame` returns graph neighbours mixed into the persistent list,
@@ -177,10 +401,19 @@ def _arms(ephemerals: list[dict[str, Any]],
     # Own scale, own order, no cosine floor. Bounded instead.
     reached.sort(key=lambda r: float(r.get("similarity") or 0.0), reverse=True)
 
+    # Demoted, not dropped. A claim shown last turn that is still the best answer
+    # should still appear; it just should not outrank something new. Dropping it
+    # outright would make a packet worse the longer a session ran.
+    shown = already_shown or set()
+
+    def _rank_within(rows):
+        return sorted(rows, key=lambda r: str(r.get("id") or "") in shown)
+
     return [
         # Already newest-first from storage.get_ephemeral; recency IS the ranking.
-        ("ephemeral", list(ephemerals)),
-        ("persistent", [r for _s, r in scored_direct]),
+        ("ephemeral", _rank_within(ephemerals)),
+        ("persistent", _rank_within([r for _s, r in scored_direct])),
+        ("evergreen", _rank_within(list(evergreens or []))),
         ("related", reached[:MAX_GRAPH_MEMORIES]),
     ]
 
@@ -189,30 +422,65 @@ def _arms(ephemerals: list[dict[str, Any]],
 # are persistent rows reached sideways, so they belong in the Persistent section,
 # marked with the edge that led to them rather than filed under a heading of
 # their own.
-ARM_TIER = {"ephemeral": "ephemeral", "persistent": "persistent", "related": "persistent"}
+ARM_TIER = {"ephemeral": "ephemeral", "persistent": "persistent",
+            "evergreen": "evergreen", "related": "persistent"}
 
 
 def _fuse(arms: list[tuple[str, list[dict[str, Any]]]]) -> list[tuple[str, dict[str, Any]]]:
     """Reciprocal rank fusion across arms. Returns (arm, row), best first."""
-    fused: list[tuple[float, int, str, dict[str, Any]]] = []
-    for arm_index, (arm, rows) in enumerate(arms):
-        weight = TIER_WEIGHT.get(arm, 1.0)
-        for rank, row in enumerate(rows, start=1):
-            # arm_index breaks ties deterministically, so an empty tier can
-            # never reorder the others and the result is stable run to run.
-            fused.append((weight / (RRF_K + rank), arm_index, arm, row))
-    fused.sort(key=lambda t: (-t[0], t[1]))
-    return [(arm, row) for _s, _i, arm, row in fused]
+    return rank.fuse(
+        [(arm, rows, TIER_WEIGHT.get(arm, 1.0)) for arm, rows in arms],
+        key=lambda row: str(row.get("id") or id(row)),
+    )
 
 
-def _load_memories(message: str, event: dict[str, Any] | None = None) -> list[MemoryItem]:
+def _load_memories(message: str, event: dict[str, Any] | None = None,
+                   provenance: list[dict[str, Any]] | None = None) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
-        msg_vec = embed_text_sync(message, is_query=True) if message else None
-        ephemerals, persistents = memory_select.select_for_frame(message, embedding=msg_vec)
+        # Ask before embedding: a message with no object to search for should
+        # not cost an embed call, and the rows it would return are ranked
+        # results of searching for nothing.
+        no_query = triage.skip_reason(message, recent_assistant_turns()) if message else None
+        msg_vec = embed_text_sync(message, is_query=True) if message and not no_query else None
+        ephemerals, persistents = memory_select.select_for_frame(
+            message, embedding=msg_vec, similarity_search=not no_query)
+        evergreens = (memory_select.select_evergreen(
+            message, memory_select.context_from_env(), msg_vec)
+            if not no_query else [])
 
-        for arm, row in _fuse(_arms(ephemerals, persistents))[:MAX_PACKET_MEMORIES]:
+        # Finding 19. What the last couple of packets already showed, so this one
+        # can differ from them instead of re-sending the same claims every turn.
+        already_shown = storage.recent_packet_members(PROJECT_ID)
+        if no_query:
+            runlog.log_event("memory.retrieval.skipped", "arteries",
+                             {"reason": no_query}, project_id=PROJECT_ID,
+                             agent_id=AGENT_PROCESS_ID)
+
+        members: list[str] = []
+        for rank, (arm, row) in enumerate(
+                _fuse(_arms(ephemerals, persistents, evergreens,
+                            already_shown))[:MAX_PACKET_MEMORIES],
+                start=1):
+            if row.get("id"):
+                members.append(str(row["id"]))
             items.extend(_rows(ARM_TIER[arm], [row]))
+            if provenance is not None and row.get("id"):
+                provenance.append({
+                    # `arm` rather than the rendered tier: what is being recorded
+                    # is how the row was ranked, which is what training on
+                    # retrieval outcome needs to attribute.
+                    "tier": arm,
+                    "id": str(row["id"]),
+                    # Fused rank, not a score. After RRF the number a row carries
+                    # is not comparable across runs with different arm sizes;
+                    # its position is.
+                    "rank": rank,
+                    "task_id": row.get("task_id"),
+                    "episode_id": row.get("episode_id"),
+                })
+        storage.record_packet(PROJECT_ID, members,
+                              agent_process_id=AGENT_PROCESS_ID)
     except Exception as exc:
         items.append(MemoryItem(
             tier="status",
@@ -242,6 +510,7 @@ def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[Mem
     dropped."""
     seen: set[str] = set()
     out: list[MemoryItem] = []
+    summary_words = _content_words(previous_summary)
     for item in items:
         if item.tier == "status":
             out.append(item)
@@ -249,11 +518,43 @@ def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[Mem
         key = _norm(item.text)
         if not key or key in seen:
             continue
-        if previous_summary and key in previous_summary:
+        if _already_covered(item.text, summary_words):
             continue
         seen.add(key)
         out.append(item)
     return out
+
+
+# Finding 21: dedupe was `key in previous_summary` -- substring containment on
+# normalized text. That over-merges, because a claim that happens to be a prefix
+# of a longer sentence in the summary is dropped even when it says something the
+# summary does not, and it under-merges on any rewording at all, because one
+# changed character breaks containment entirely.
+#
+# Word overlap instead: what fraction of this claim's content words the summary
+# already contains. Still shallow -- paraphrase with different vocabulary is the
+# compiler's job -- but it degrades sensibly instead of flipping.
+SUMMARY_OVERLAP = float(os.getenv("ARTERIES_SUMMARY_OVERLAP", "0.8"))
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9_./]+", (text or "").lower()) if len(w) > 3}
+
+
+def _already_covered(text: str, summary_words: set[str]) -> bool:
+    """Compared on raw text, not on `_norm`ed text.
+
+    `_norm` strips punctuation, so `claimed_at` becomes "claimed at" while the
+    untouched summary still holds `claimed_at` -- identical tokens that never
+    match. Both sides go through the same tokenizer now, which is the only way
+    an overlap number means anything.
+    """
+    if not summary_words:
+        return False
+    words = _content_words(text)
+    if not words:
+        return False
+    return len(words & summary_words) / len(words) >= SUMMARY_OVERLAP
 
 
 def _rows(tier: str, rows: list[dict[str, Any]]) -> list[MemoryItem]:
@@ -335,23 +636,25 @@ def _pairs_from_runlog(limit: int) -> list[RecentPair]:
     except Exception:
         return []
 
-    pairs_by_turn: dict[str, RecentPair] = {}
     ordered: list[RecentPair] = []
-    pending: RecentPair | None = None
+    index_by_turn: dict[str, int] = {}
+    responses: list[tuple[str | None, bool, str, str]] = []
+    session = os.getenv("ARTERIES_SESSION_ID") or ""
+
     for event in reversed(events):
         event_type = str(event.get("event_type") or "")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         turn_id = str(event.get("turn_id") or "") or None
+        if _other_session(payload, session):
+            continue
 
         if event_type == "turn.observed":
             user = payload_text(payload, "message_preview", "message", "prompt", "user")
             if not user:
                 continue
-            pair = RecentPair(user=user)
-            ordered.append(pair)
-            pending = pair
             if turn_id:
-                pairs_by_turn[turn_id] = pair
+                index_by_turn[turn_id] = len(ordered)
+            ordered.append(RecentPair(user=user))
             continue
 
         if event_type in {"turn.assistant", "assistant.response", "message.assistant", "turn.completed"}:
@@ -364,21 +667,85 @@ def _pairs_from_runlog(limit: int) -> list[RecentPair]:
                 "response",
                 "text",
             )
-            if not assistant:
-                continue
-            pair = pairs_by_turn.get(turn_id or "") if turn_id else pending
-            if payload.get("prior_turn"):
-                # transcript capture runs at the start of turn N and describes
-                # turn N-1, so attach to the pair before the one sharing turn_id
-                anchor = pairs_by_turn.get(turn_id or "")
-                if anchor is not None and anchor in ordered and ordered.index(anchor) > 0:
-                    pair = ordered[ordered.index(anchor) - 1]
-                else:
-                    pair = next((p for p in reversed(ordered) if not p.assistant), None)
-            if pair and not pair.assistant:
-                pair.assistant = assistant
+            # An edited/resubmitted prompt fires the capture again, so the same
+            # assistant text arrives twice under two turn_ids. Printing it under
+            # two different questions is always wrong; one of them is a ghost.
+            answers = payload_text(payload, "answers_preview")
+            # An edited/resubmitted prompt fires the capture again, so the same
+            # assistant text arrives twice under two turn_ids. Printing it under
+            # two different questions is always wrong; one of them is a ghost.
+            if assistant and (not responses or responses[-1][3] != assistant):
+                responses.append((turn_id, bool(payload.get("prior_turn")), answers, assistant))
+
+    # Resolved in a second pass because a capture fires at the start of turn N
+    # while describing turn N-1, and it can reach the store before turn N's own
+    # turn.observed row. Anchoring during the first pass therefore looked up a
+    # turn that did not exist yet.
+    keys = [_norm(pair.user) for pair in ordered]
+    for turn_id, prior_turn, answers, assistant in responses:
+        index = _match_question(keys, answers) if answers else None
+        if index is None:
+            index = _by_position(index_by_turn.get(turn_id or ""), prior_turn, ordered)
+        if index is None:
+            continue
+        # Last capture wins: a turn can be captured more than once, and the
+        # later read of the transcript is always the more complete one.
+        ordered[index].assistant = assistant
 
     return ordered[-limit:]
+
+
+def _other_session(payload: dict[str, Any], session: str) -> bool:
+    """True when this event belongs to a different session of the same CLI.
+
+    Runs are keyed by (repo, CLI), deliberately, so every Claude session in one
+    repo shares a run and the packet was merging concurrent conversations into a
+    single Recent Conversation -- other people's questions, answered by nobody.
+    Session is the finer key the host CLI already hands us.
+
+    Rows written before session stamping carry no session_id and are kept: a
+    packet with some extra turns beats one that renders empty.
+    """
+    if not session:
+        return False
+    row = str(payload.get("session_id") or "")
+    return bool(row) and row != session
+
+
+def _match_question(keys: list[str], answers: str) -> int | None:
+    """Index of the question an answer names, latest match first.
+
+    Both sides are stored truncated -- the question at 2000 chars, the join key
+    at 200 -- so they are compared on whichever prefix is shorter. Latest wins
+    because a resubmitted prompt leaves an identical earlier row behind and the
+    live one is the later of the two.
+    """
+    key = _norm(answers)
+    if not key:
+        return None
+    for index in reversed(range(len(keys))):
+        candidate = keys[index]
+        if not candidate:
+            continue
+        width = min(len(candidate), len(key))
+        if candidate[:width] == key[:width]:
+            return index
+    return None
+
+
+def _by_position(anchor: int | None, prior_turn: bool, ordered: list[RecentPair]) -> int | None:
+    """Fallback for rows with no join key: rows written before answers_preview
+    existed, and transcripts whose parent chain fell out of the tail window.
+
+    Counting is what the join key replaced, so it stays conservative: a
+    prior_turn row with no anchor, or one whose subject sits outside the
+    window, is dropped rather than guessed onto a neighbour.
+    """
+    if prior_turn:
+        return anchor - 1 if anchor else None
+    if anchor is not None:
+        return anchor
+    return next((i for i in reversed(range(len(ordered))) if not ordered[i].assistant), None)
 
 
 def _format_recent_pairs(pairs: list[RecentPair]) -> list[str]:
@@ -424,12 +791,41 @@ def _section(title: str, lines: list[str]) -> str:
     return "## " + title + "\n\n" + "\n".join(lines)
 
 
-def _allocations(budget: int) -> dict[str, int]:
+def _allocations(budget: int, capabilities: Any = None) -> dict[str, int]:
+    """Byte shares per section. Depends on whether the host still has the
+    conversation.
+
+    `Recent Conversation` took 55% of the budget unconditionally (finding 18).
+    That is the one section every host CLI keeps verbatim -- Claude's compaction
+    prompt and Cursor's watermarks exist specifically to avoid re-sending it --
+    so on the injection path more than half the packet was spending its budget
+    telling the model what it had just read, while memory got 12%.
+
+    It is not always redundant. When the packet *replaces* the host's compaction
+    output, the recent turns are the only record of the conversation and dropping
+    them loses the thing being compacted. So the split follows the capability
+    rather than a single number.
+
+    _load_recent_pairs asks for 10 pairs and _one_line caps each side at 500
+    chars, so ~10k is what delivering all ten actually costs. Shares sum to 0.96,
+    leaving headroom under the hard _limit() so the tail section is never the one
+    clipped.
+    """
     budget = max(budget, 1)
+    capabilities = capabilities or get_capabilities()
+    replacing = getattr(capabilities, "can_replace_compaction", False)
+    memory = budget * (0.12 if replacing else 0.52)
     return {
         "context": int(budget * 0.10),
-        "recent": int(budget * 0.25),
-        "memory": int(budget * 0.18),
+        "recent": int(budget * (0.55 if replacing else 0.15)),
+        # Ephemeral and Persistent are two headings over one ranked set of at
+        # most MAX_PACKET_MEMORIES rows, so they share this budget rather than
+        # each taking it. Applying the same number to both is how the old shares
+        # summed to 1.08 while the comment claimed 0.96 -- and over-allocating
+        # hands the decision back to truncation, which is what ranking exists to
+        # take away from it.
+        "memory": int(memory / 2),
+        "suggestion": int(budget * 0.10),
         "rules": int(budget * 0.07),
     }
 

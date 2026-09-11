@@ -7,7 +7,7 @@ import asyncio
 import os
 
 from arteries.cli_normalize import _message, _transcript, apply_event_env, normalize
-from arteries.eval import evaluate
+from arteries.eval import evaluate, frame_retrieved
 from arteries.eventjson import read_stdin_json
 
 
@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = asyncio.run(evaluate(prompt))
     if result:
-        print(result)
+        print(frame_retrieved(result))
     return 0
 
 

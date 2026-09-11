@@ -227,6 +227,22 @@ def _hooks_dir(ctx: Context) -> str:
     return str(_arteries_dir(ctx) / "hooks")
 
 
+def _hooks_ref(ctx: Context) -> str:
+    """The hooks directory as it should appear in a file the repo tracks.
+
+    Hook *commands* keep the absolute path: they live in generated,
+    machine-local files (.codex/config.toml, .claude/settings.local.json) and
+    the CLI invoking them makes no promise about its working directory.
+
+    Prose in AGENTS.md and HERMES.md is the opposite case. Those files are
+    committed, so an absolute path writes one developer's home directory into
+    every clone -- five repos here already carry `/home/bao-tn` on main -- and
+    it is wrong for everyone else who reads it. Relative, anchored to the
+    repository root, is both portable and true.
+    """
+    return ".arteries/hooks"
+
+
 def _runtime_env(ctx: Context, cli_name: str) -> str:
     return f'''ARTERIES_ROOT="${{ARTERIES_ROOT:-{ctx.arteries_root}}}"
 CAPILLARIES_ROOT="${{CAPILLARIES_ROOT:-{ctx.capillaries_root}}}"
@@ -297,8 +313,11 @@ else
 fi
 
 result="$($script_dir/observe.sh "$prompt")"
+# printed as-is: arteries.eval already wraps injected context in
+# <arteries-retrieved-prompt>. Labelling it again here is how the three hook
+# paths drifted -- two dashes and one bare print.
 if [[ -n "$result" ]]; then
-  printf 'ARTERIES RETRIEVED PROMPT - use this to guide your response:\n\n%s\n' "$result"
+  printf '%s\n' "$result"
 fi
 '''
     hook_observe = f'''#!/usr/bin/env bash
@@ -398,7 +417,7 @@ set -euo pipefail
 {env}
 format="${{ARTERIES_PACKET_FORMAT:-markdown}}"
 message="${{1:-context-pressure}}"
-python3 -m arteries.packet --format "$format" --message "$message" --budget "${{ARTERIES_PACKET_BUDGET:-6000}}"
+python3 -m arteries.packet --format "$format" --message "$message" --budget "${{ARTERIES_PACKET_BUDGET:-20000}}"
 '''
     hook_compact = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -412,7 +431,7 @@ fi
 format="${{ARTERIES_PACKET_FORMAT:-markdown}}"
 message="${{1:-context-pressure}}"
 eval "$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli "$ARTERIES_CLI" --event "$message" --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --format shell)"
-printf '%s' "$event_json" | python3 -m arteries.packet --format "$format" --message "$message" --stdin-json --budget "${{ARTERIES_PACKET_BUDGET:-6000}}"
+printf '%s' "$event_json" | python3 -m arteries.packet --format "$format" --message "$message" --stdin-json --budget "${{ARTERIES_PACKET_BUDGET:-20000}}"
 '''
     pi_compact = f'''#!/usr/bin/env bash
 set -euo pipefail
@@ -424,24 +443,28 @@ else
   event_json="$(cat)"
 fi
 eval "$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli pi --event session_before_compact --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --format shell)"
-printf '%s' "$event_json" | python3 -m arteries.packet --format pi-compaction-json --stdin-json --budget "${{ARTERIES_PACKET_BUDGET:-6000}}"
+printf '%s' "$event_json" | python3 -m arteries.packet --format pi-compaction-json --stdin-json --budget "${{ARTERIES_PACKET_BUDGET:-20000}}"
 '''
     smoke = '''#!/usr/bin/env bash
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 
-# --write opts into real memory. Without it the smoke run is a dry run:
-# ARTERIES_EPHEMERAL=discard exercises every code path but keeps the writes in
-# an in-process buffer, so testing the observer no longer leaves permanent
-# "memories" behind. It used to, and a good share of one project's stored facts
-# were this script talking to itself.
+# --write opts into real memory. Without it the smoke run is a dry run: the two
+# discard switches exercise every code path while keeping the writes in-process,
+# so testing the observer leaves nothing permanent behind.
+#
+# ARTERIES_EPHEMERAL alone was not enough. The runlog kept taking turn.observed
+# rows and kept rewriting the current-run pointer, so a smoke run would hand a
+# live session's turns to a run created by a test -- the memory side was dry and
+# the telemetry side was not.
 dry=" (dry run; --write to persist)"
 if [[ "${1:-}" == "--write" ]]; then
   shift
   dry=""
 else
   export ARTERIES_EPHEMERAL=discard
+  export ARTERIES_RUNLOG=discard
 fi
 prompt="${1:-thanks}"
 
@@ -594,7 +617,8 @@ process.stdin.on('end', () => {
     }).trim();
 
     if (result) {
-      writeOutput('ARTERIES RETRIEVED PROMPT — use this to guide your response:\\n\\n' + result);
+      // arteries.eval wraps it; see the note in the generic observe template
+      writeOutput(result);
     } else {
       writeOutput('');
     }
@@ -638,6 +662,11 @@ def _claude_settings_path(ctx: Context) -> Path:
 def _claude_hooks(ctx: Context) -> dict:
     hooks = _hooks_dir(ctx)
     return {
+        # The continuity packet rides SessionStart, not PreCompact/PostCompact.
+        # A PreCompact packet is written into the transcript the compaction is
+        # about to consume, and neither compact event feeds hook stdout back to
+        # the model -- only SessionStart does. Two hooks on one event is fine;
+        # their output is concatenated.
         "SessionStart": [{
             "matcher": "startup|resume|clear|compact",
             "hooks": [{
@@ -646,6 +675,14 @@ def _claude_hooks(ctx: Context) -> dict:
                 "timeout": 5,
                 "statusMessage": "Activating arteries memory...",
             }],
+        }, {
+            "matcher": "compact",
+            "hooks": [{
+                "type": "command",
+                "command": f"ARTERIES_CLI=claude bash {hooks}/hook-compact-packet.sh claude-compact",
+                "timeout": 10,
+                "statusMessage": "Restoring arteries continuity packet...",
+            }],
         }],
         "UserPromptSubmit": [{
             "hooks": [{
@@ -653,24 +690,6 @@ def _claude_hooks(ctx: Context) -> dict:
                 "command": f"ARTERIES_CLI=claude bash {hooks}/hook-observe.sh",
                 "timeout": 10,
                 "statusMessage": "arteries",
-            }],
-        }],
-        "PreCompact": [{
-            "matcher": "manual|auto",
-            "hooks": [{
-                "type": "command",
-                "command": f"ARTERIES_CLI=claude bash {hooks}/hook-compact-packet.sh claude-precompact",
-                "timeout": 10,
-                "statusMessage": "Building arteries continuity packet...",
-            }],
-        }],
-        "PostCompact": [{
-            "matcher": "manual|auto",
-            "hooks": [{
-                "type": "command",
-                "command": f"ARTERIES_CLI=claude bash {hooks}/hook-compact-packet.sh claude-postcompact",
-                "timeout": 10,
-                "statusMessage": "Recording arteries compact continuity...",
             }],
         }],
         "SubagentStart": [{
@@ -778,9 +797,11 @@ def _codex_config_path(ctx: Context) -> Path:
 
 
 def _codex_agents_section(ctx: Context) -> str:
-    hooks = _hooks_dir(ctx)
+    hooks = _hooks_ref(ctx)
     return f'''{MARKER_START}
 ## Arteries Memory
+
+Paths below are relative to the repository root; run them from there.
 
 At session start, run `PLUGIN_DATA=1 node {hooks}/arteries-activate.cjs` and include the output as session context.
 On each user prompt, pipe the prompt JSON to `PLUGIN_DATA=1 node {hooks}/arteries-observe.cjs` and use any returned `additionalContext` to guide your response.
@@ -836,9 +857,21 @@ statusMessage = "Recording arteries subagent metadata"
 
 
 def _codex_compact_prompt() -> str:
-    return """When compacting this coding session, preserve continuity for Arteries.
+    """Generated from the packet's own section list, not from a copy of it.
 
-Prefer any Arteries continuity packet produced by `.arteries/hooks/hook-compact-packet.sh`. It already organizes continuity into current context, the most recent 10 Q/A pairs, ephemeral memory, persistent project memory, and use rules.
+    Finding 24: this named the v1 layout, and a prompt describing sections that
+    no longer exist tells the model to preserve headings it will never see. The
+    sections come from `packet.SECTION_TITLES` now, and the stamped version is
+    what `art doctor` compares against to notice drift.
+    """
+    from arteries.packet import PACKET_SCHEMA_VERSION, SECTION_TITLES
+
+    sections = ", ".join(SECTION_TITLES[:-1]) + f", and {SECTION_TITLES[-1]}"
+    return f"""When compacting this coding session, preserve continuity for Arteries.
+
+packet-schema: v{PACKET_SCHEMA_VERSION}
+
+Prefer any Arteries continuity packet produced by `.arteries/hooks/hook-compact-packet.sh`. It already organizes continuity into {sections}.
 
 Include:
 - current user intent and unresolved task state
@@ -1332,11 +1365,11 @@ def _hermes_mcp_path(ctx: Context) -> Path:
 
 
 def _hermes_section(ctx: Context) -> str:
-    hooks = _hooks_dir(ctx)
+    hooks = _hooks_ref(ctx)
     return f'''{HERMES_MARKER_START}
 # Arteries Memory
 
-This project has an explicit Hermes adapter installed. Use these commands when Hermes needs project memory or prompt retrieval:
+This project has an explicit Hermes adapter installed. Use these commands when Hermes needs project memory or prompt retrieval, run from the repository root:
 
 ```bash
 ARTERIES_CLI=hermes bash {hooks}/activate.sh
