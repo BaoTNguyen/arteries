@@ -165,13 +165,15 @@ def get_persistent(
     # Both, because `main` writes `scope` and nothing else for as long as it runs
     # the old code -- dropping the fallback before then would hide its rows
     # rather than migrate them.
-    origin_filter = ("AND coalesce(p.source_meta->>'origin', p.scope) = %(origin)s"
-                     if scope else "")
+    # The column is gone (migration 016). The fallback that read it had to be
+    # removed *before* the drop, not after -- naming a dropped column is an
+    # immediate UndefinedColumn on every read, which is what happened.
+    origin_filter = "AND p.source_meta->>'origin' = %(origin)s" if scope else ""
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             SCOPE_CTE + f"""
             SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts,
-                   coalesce(p.source_meta->>'origin', p.scope) AS scope, p.project_id,
+                   p.source_meta->>'origin' AS scope, p.project_id,
                    p.episode_id, p.task_id
             FROM arteries.persistent p
             WHERE p.project_id IN (SELECT project_id FROM scope)
@@ -301,8 +303,8 @@ def insert_persistent(
         cur.execute(
             """
             INSERT INTO arteries.persistent
-                (fact, embedding, domains, confidence, project_id, scope, source_meta)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::jsonb)
+                (fact, embedding, domains, confidence, project_id, source_meta)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb)
             RETURNING id
             """,
             (
@@ -311,11 +313,8 @@ def insert_persistent(
                 psycopg2.extras.Json(domains),
                 confidence,
                 project_id,
-                scope,
-                # Dual-write for one release. The column is what `main` reads
-                # until it moves; the JSON key is what everything after reads.
-                # Writing only one of them is how the first attempt at this
-                # broke the live checkout.
+                # `scope` is still the parameter name because callers use it --
+                # `art remember --scope user`. Only its storage moved.
                 psycopg2.extras.Json({**(source_meta or {}),
                                       **({"origin": scope} if scope else {})}),
             ),
