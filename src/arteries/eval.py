@@ -24,7 +24,7 @@ import os
 import re
 import sys
 
-from arteries import actionlog, degrade, memory_select, runlog, scope, storage
+from arteries import actionlog, degrade, memory_select, runlog, scope, storage, triage
 from arteries.assistant import capture_response, read_last_exchange
 from arteries.config import (
     AGENT_PROCESS_ID,
@@ -45,27 +45,6 @@ from arteries.usage import turn_usage
 from capillaries.find import find as cap_find
 
 
-_ACKNOWLEDGEMENTS = frozenset({
-    "yes", "no", "yeah", "yep", "nope", "nah", "ok", "okay", "sure",
-    "thanks", "thank you", "thx", "got it", "makes sense", "sounds good",
-    "looks good", "perfect", "great", "nice", "cool", "awesome", "do it",
-    "go ahead", "proceed", "continue", "agreed", "correct", "right",
-    "exactly", "nevermind", "never mind", "nvm", "cancel",
-})
-_DIRECTIVE = re.compile(
-    r"^\s*(?:set\s+up|add|change|fix|implement|update|create|build|run|use|"
-    r"make|move|remove|rename|write|test|deploy|continue|revise|refine|edit)\b",
-    re.IGNORECASE,
-)
-_CONTINUATION = re.compile(
-    r"\b(?:again|previous|prior|above|earlier|same|that|those|this|these|it|"
-    r"revise|refine|edit|continue)\b",
-    re.IGNORECASE,
-)
-_BARE_IMPERATIVE = re.compile(
-    r"^[a-z]+(?:\s+(?:up|down|out|off|over|again|now|please|it|this|that|them|all))*$",
-    re.IGNORECASE,
-)
 _PLACEHOLDER = re.compile(r"\[([A-Z][A-Z0-9 _/-]{1,80})\]|\{\{\s*([^{}]{1,80})\s*\}\}")
 
 
@@ -73,31 +52,9 @@ def _triage_skip_reason(
     message: str,
     prior_assistant_turns: list[str],
 ) -> str | None:
-    """Return a categorical reason not to retrieve, or None to retrieve.
-
-    This deliberately replaces Capillaries' similarity, length, and
-    specification-density pre-gate on the automatic-hook path.  A prompt
-    library helps when the conversation does not already make a request
-    obvious. It skips acknowledgements and explicit continuations of a prior
-    assistant result. Subject-word overlap is never completion evidence.
-    """
-    normalized = message.strip().lower().rstrip("!?.,")
-    if normalized in _ACKNOWLEDGEMENTS:
-        return "acknowledgement"
-    # A message that is only a verb and its particles names no object, so its
-    # object is the turn before it. Checked ahead of the directive test, which
-    # only inspects the first word and so waves "Clean up" through to a search
-    # -- that one retrieved a spreadsheet-cleaning workflow at 0.974.
-    if prior_assistant_turns and _BARE_IMPERATIVE.match(normalized):
-        return "bare imperative continuing prior assistant result"
-    if not _DIRECTIVE.match(message) or "?" in message:
-        return None
-
-    if not _CONTINUATION.search(normalized):
-        return None
-    if not prior_assistant_turns:
-        return None
-    return "explicit continuation of prior assistant result"
+    """Kept as a name the hook path already uses; the rules live in `triage`,
+    where memory retrieval can reach them too."""
+    return triage.skip_reason(message, prior_assistant_turns)
 
 
 def _assistant_ephemeral_text(rows: list[dict]) -> list[str]:
@@ -264,7 +221,10 @@ async def evaluate(message: str) -> str | None:
         # the compile LLM call and tripped the UserPromptSubmit timeout. A
         # detached process outlives the hook and does the same work off the hot
         # path; the "+N remembered" notice just surfaces on the next turn.
-        _spawn_detached_compile()
+        # The message rides along so the detached process can warm the corpus
+        # suggestion for it (finding 20). It is the only process in this path
+        # that can afford a network call.
+        _spawn_detached_compile(message)
 
     prompt_text = None
     # heart sets ARTERIES_RETRIEVAL=off for retrieval-ablation episodes.
@@ -369,7 +329,7 @@ def _message_payload(message: str) -> dict:
     }
 
 
-def _spawn_detached_compile() -> None:
+def _spawn_detached_compile(message: str = "") -> None:
     """Fire-and-forget the ephemeral->persistent compile in its own process.
 
     start_new_session detaches it from the hook's process group so it keeps
@@ -377,6 +337,9 @@ def _spawn_detached_compile() -> None:
     all compile_once needs.
     """
     import subprocess
+    env = dict(os.environ)
+    if message:
+        env["ARTERIES_WARM_MESSAGE"] = message[:4000]
     try:
         subprocess.Popen(
             [sys.executable, "-m", "arteries.compile"],
@@ -384,6 +347,7 @@ def _spawn_detached_compile() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
     except Exception as exc:
         runlog.log_failure("memory.compile.failed", "arteries", exc)

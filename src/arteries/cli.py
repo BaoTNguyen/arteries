@@ -14,7 +14,7 @@ from arteries.eval import evaluate
 COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe",
             "activate", "ingest", "rewards", "benchmark", "eval", "inspect", "runs", "journal",
             "doctor", "packet", "trace", "decisions", "remember", "spawn", "search",
-            "compile")
+            "compile", "migrate", "evergreen", "evict")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -108,6 +108,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _spawn(list(ns.args))
     if ns.command == "search":
         return _search(ns.args)
+    if ns.command == "evict":
+        from arteries.evict import main as evict_main
+        return evict_main(ns.args)
+
+    if ns.command == "evergreen":
+        from arteries.evergreen import main as evergreen_main
+        return evergreen_main(ns.args)
+
+    if ns.command == "migrate":
+        from arteries.migrate import main as migrate_main
+        return migrate_main(ns.args)
+
     if ns.command == "compile":
         return _compile(ns.args)
 

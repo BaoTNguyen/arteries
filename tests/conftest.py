@@ -1,5 +1,18 @@
 import os
 
+# BEFORE any arteries import, including the ones test modules do at collection.
+#
+# `arteries.config` builds DB_CONFIG once, at import, from DB_NAME. A fixture
+# that sets DB_NAME later and re-imports the module cannot help a test module
+# that already holds a reference to the old one -- and test_migrate.py does
+# exactly that. The result was `migrate.baseline()` running against the live
+# database from inside the suite, stamping four migrations as applied on a
+# database that had none of their columns. Live had to be repaired by hand.
+#
+# So the switch is thrown here, where nothing has imported arteries yet. The
+# suite has a database of its own, all of it, not by opting in.
+os.environ.setdefault("DB_NAME", "arteries_test")
+
 import pytest
 
 
@@ -54,3 +67,60 @@ def _no_live_events(request, monkeypatch):
 
     monkeypatch.setattr("arteries.runlog.log_event", _blocked)
     return real
+
+
+# --- Test database ------------------------------------------------------------
+#
+# The suite used to point at the live database, which is how test_degrade wrote
+# 30 fabricated internal.bug_swallowed rows into the one channel whose value
+# depends on every entry being real. `_no_live_events` patches that symptom.
+# This is the cure: a database of its own.
+#
+# DB_NAME is the whole switch (config.DB_CONFIG reads it), so a test that wants
+# real Postgres asks for `test_db` and gets arteries_test or a skip. It never
+# gets the live one.
+#
+# Setting it up is two commands, one of which needs a superuser because
+# `CREATE EXTENSION vector` does:
+#
+#     createdb arteries_test
+#     sudo -u postgres psql arteries_test -c 'CREATE EXTENSION vector'
+#
+# Without them the Postgres-backed tests skip and say why. That matters more
+# than it sounds: a suite that cannot run on a laptop with no database stops
+# being run.
+
+TEST_DB = "arteries_test"
+
+
+@pytest.fixture(scope="session")
+def test_db():
+    """arteries_test with schema applied and migrations stamped, or skip."""
+    import psycopg2
+
+    from arteries.config import DB_CONFIG
+
+    # Belt, because the cost of being wrong here is a write to the live store.
+    # If the module-level default above ever stops being applied first, this
+    # fails loudly instead of quietly migrating production.
+    assert DB_CONFIG["database"] == TEST_DB, (
+        f"refusing to run database tests against {DB_CONFIG['database']!r}; "
+        f"expected {TEST_DB!r}")
+
+    try:
+        psycopg2.connect(**DB_CONFIG).close()
+    except psycopg2.OperationalError as exc:
+        pytest.skip(f"no {TEST_DB} database: {exc.args[0].strip().splitlines()[0]}")
+
+    from arteries import migrate, setup_db
+
+    try:
+        setup_db.setup()
+    except psycopg2.errors.InsufficientPrivilege:
+        pytest.skip(f"{TEST_DB} lacks the vector extension: "
+                    f"sudo -u postgres psql {TEST_DB} -c 'CREATE EXTENSION vector'")
+    # Everything on disk, because setup_db just applied a schema.sql that
+    # already contains every migration's effect. This is the one case where
+    # stamping all of them is correct.
+    migrate.baseline(through=migrate.available()[-1][0])
+    return DB_CONFIG

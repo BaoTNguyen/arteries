@@ -1,6 +1,8 @@
 """Retrieval measurement. Ground truth is built out of the store itself."""
 
+import json
 import unittest
+from unittest.mock import patch
 
 from arteries import benchmark
 
@@ -68,3 +70,47 @@ class ContextConsistencyTests(unittest.TestCase):
         src = inspect.getsource(benchmark.run)
         for field in ("claims_added", "useful_added", "noise_ratio", "displaced"):
             self.assertIn(field, src)
+
+
+class OverlapTests(unittest.TestCase):
+    """A query that reuses the claim's own words tests string matching, not
+    retrieval. capillaries discarded two of three benchmarks over this."""
+
+    def test_a_verbatim_query_scores_one(self):
+        fact = "The stale-claim sweep measures claimed_at rather than source_ts."
+        self.assertEqual(benchmark.token_overlap(fact, fact), 1.0)
+
+    def test_a_paraphrase_scores_low(self):
+        self.assertLess(
+            benchmark.token_overlap(
+                "why did the same batch get written twice",
+                "The stale-claim sweep measures claimed_at rather than source_ts."),
+            0.34)
+
+    def test_short_words_are_ignored(self):
+        """'the', 'a', 'is' are shared by everything and mean nothing."""
+        self.assertEqual(
+            benchmark.token_overlap("is the a of", "nothing in common here"), 0.0)
+
+    def test_an_empty_query_does_not_divide_by_zero(self):
+        self.assertEqual(benchmark.token_overlap("", "a fact"), 0.0)
+
+    def test_generated_queries_record_their_overlap(self):
+        claims = [{"id": "c1", "fact": "Ephemeral rows expire after 48 hours."}]
+        payload = {"choices": [{"message": {"content": json.dumps(
+            {"questions": {"0": "how long does the working set last"}})}}]}
+        with patch("httpx.post", return_value=_Resp(payload)):
+            built = benchmark.build_queries(claims)
+        self.assertIn("overlap", built[0])
+        self.assertLess(built[0]["overlap"], 0.34)
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload

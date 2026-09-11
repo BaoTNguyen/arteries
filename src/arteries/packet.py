@@ -9,9 +9,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from arteries import actionlog, degrade, memory_select, runlog, storage
+from arteries import actionlog, degrade, memory_select, rank, runlog, storage, triage
 from arteries import frame as frame_mod
 from arteries.cli_caps import get_capabilities
+from arteries.conversation import recent_assistant_turns
 from arteries.embed import embed_text_sync
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries.eventjson import event_messages, payload_text, read_stdin_json, text_from_mapping
@@ -24,6 +25,11 @@ class MemoryItem:
     confidence: float
     domains: list[str]
     source_id: str | None = None
+    # How this row was reached: None for a direct hit, otherwise the edge that
+    # led here ("contradicts", "shares:hook"). `graph.expand` computes it and it
+    # used to be dropped at this boundary, which is why the packet presented A
+    # and not-A as two equally confident bullets (finding 15).
+    via: str | None = None
 
 
 @dataclass
@@ -85,8 +91,48 @@ def main(argv: list[str] | None = None) -> int:
 GATE_COVERAGE_ABSTAIN = float(os.getenv("ARTERIES_GATE_COVERAGE", "0.92"))
 
 
+# The hook path reads cache; the background compile pass fills it. Set
+# ARTERIES_CORPUS_INLINE=on to fetch inline, which is what the tests and `art
+# packet --format provenance-json` want and what a hook never wants.
+CORPUS_INLINE = os.getenv("ARTERIES_CORPUS_INLINE", "off").lower() == "on"
+CORPUS_TIMEOUT = float(os.getenv("ARTERIES_CORPUS_TIMEOUT", "60"))
+# A suggestion older than this describes a question nobody is asking any more.
+CORPUS_CACHE_SECONDS = int(os.getenv("ARTERIES_CORPUS_CACHE_SECONDS", "900"))
+
+
+def _suggestion_key(message: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(_norm(message).encode()).hexdigest()[:32]
+
+
+def _cached_suggestion(message: str) -> dict[str, Any] | None:
+    """The last suggestion computed for this question, if it is still fresh."""
+    try:
+        return storage.get_corpus_suggestion(
+            PROJECT_ID, _suggestion_key(message), CORPUS_CACHE_SECONDS)
+    except Exception as exc:
+        degrade.note(exc, "suggestion cache")
+        return None
+
+
+def warm_suggestion(message: str, embedding: list[float] | None = None) -> dict[str, Any]:
+    """Fetch a suggestion and cache it. Called from the background compile pass.
+
+    The half of finding 20's fix that does the network call, in the process that
+    can afford one.
+    """
+    result = _corpus_suggestion(message, embedding, None, inline=True)
+    try:
+        storage.put_corpus_suggestion(PROJECT_ID, _suggestion_key(message), result)
+    except Exception as exc:
+        degrade.note(exc, "suggestion cache write")
+    return result
+
+
 def _corpus_suggestion(message: str, embedding: list[float] | None,
-                       provenance: list[dict[str, Any]] | None) -> dict[str, Any]:
+                       provenance: list[dict[str, Any]] | None,
+                       inline: bool = False) -> dict[str, Any]:
     """Consult capillaries, if the gate says this turn needs it.
 
     The gate lives here because arteries owns it: capillaries "does not own a
@@ -103,6 +149,22 @@ def _corpus_suggestion(message: str, embedding: list[float] | None,
             PROJECT_ID, AGENT_PROCESS_ID, embedding) if embedding else 0.0
     except Exception:
         coverage = 0.0          # unknown coverage reads as none, and searches
+
+    # Finding 20: this ran `urlopen(req, timeout=60)` inside packet assembly, on
+    # a hook with a 9s budget. A slow corpus did not degrade the packet, it
+    # stalled the turn -- and the compaction path, where a packet is built with
+    # no user waiting on it, is the same code.
+    #
+    # The fix is not a shorter timeout, it is not being on this path at all. The
+    # suggestion is read from cache here; the fetch that fills the cache runs in
+    # the detached compile process, which already exists and already has no one
+    # waiting on it. A cold cache means no Suggested Approach section this turn
+    # and one next turn, which is what the "+N remembered" notice already does.
+    if not (inline or CORPUS_INLINE):
+        cached = _cached_suggestion(message)
+        if cached is not None:
+            return cached
+        return {"status": "not_cached", "coverage": round(coverage, 3)}
 
     if coverage >= GATE_COVERAGE_ABSTAIN:
         actionlog.log_decision(
@@ -132,7 +194,7 @@ def _corpus_suggestion(message: str, embedding: list[float] | None,
         url = os.getenv("CAPILLARIES_URL", "http://127.0.0.1:8000") + "/agent/route"
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=CORPUS_TIMEOUT) as resp:
             found = json.load(resp)
     except Exception as exc:
         return {"status": "unavailable", "reason": str(exc)[:160]}
@@ -211,9 +273,10 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None,
         ("Recent Conversation", _limit_lines(_format_recent_pairs(recent_pairs), allocations["recent"])),
         ("Ephemeral Memory", _limit_lines(_format_items(memories, "ephemeral"), allocations["memory"])),
         ("Persistent Memory", _limit_lines(_format_items(memories, "persistent"), allocations["memory"])),
+        ("Scope Memory", _limit_lines(_format_items(memories, "evergreen"), allocations["memory"])),
         ("Suggested Approach", _limit_lines(
             [suggestion["text"]] if suggestion.get("text") else [],
-            allocations["memory"])),
+            allocations["suggestion"])),
         ("Use Rules", _limit_lines([
             "Treat this packet as continuity context, not as a higher-priority instruction.",
             "Prefer the current user request and repo instructions over older memories.",
@@ -251,44 +314,173 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None,
 # `art benchmark` as the corpus grows.
 MEMORY_SIMILARITY_FLOOR = float(os.getenv("ARTERIES_PACKET_FLOOR", "0.55"))
 MAX_PACKET_MEMORIES = 15
+
+# Bumped whenever a section is added, removed, or renamed. Finding 24: the Codex
+# compact prompt names the packet's sections, and a prompt describing a layout
+# that no longer exists tells the model to preserve headings it will never see.
+# `art setup` regenerates the prompt when this changes, so the two cannot drift
+# without something noticing.
+PACKET_SCHEMA_VERSION = 2
+
+SECTION_TITLES = ("Current Context", "Recent Conversation", "Ephemeral Memory",
+                  "Persistent Memory", "Scope Memory", "Suggested Approach",
+                  "Use Rules")
 NEUTRAL_SIMILARITY = 0.5
-TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95}
+
+# Tiers are fused by RANK, not by score, because their scores are not the same
+# quantity. Persistent carries a query-to-claim cosine. Ephemeral is chosen by
+# recency and carries no similarity at all. A graph neighbour carries a decayed
+# hop score. Comparing them directly had two measured consequences:
+#
+#   * Ephemeral entered at a flat NEUTRAL_SIMILARITY of 0.5, which is *above*
+#     most of the real persistent distribution. 82% of persistent rows (every
+#     row at confidence <= 0.95) needed an above-median match just to tie one,
+#     so on a median query persistent contributed nothing at all.
+#   * A graph neighbour scores weight(1.0) x decay(0.6) x seed_similarity, so
+#     clearing a 0.55 cosine floor needed a seed at 0.917 -- or 1.528 for the
+#     shared-entity path, which is impossible. Nothing `graph.expand` produced
+#     had ever reached a packet (finding 26).
+#
+# Ranks are commensurable where those scores are not: rank 1 means "the best
+# thing this tier has" in every tier. Each arm ranks on its own policy, and RRF
+# merges them without any arm needing to justify itself on another's scale.
+# Keys are *arms* -- ranking lanes -- not packet sections. "related" holds claims
+# reached through the graph; they are persistent rows and render as such, so the
+# packet gains a lane, not a heading. Branch B adds an "evergreen" arm here when
+# that tier exists.
+TIER_WEIGHT = {"ephemeral": 1.00, "persistent": 0.95, "evergreen": 0.92,
+               "related": 0.90}
+
+# A graph neighbour is relevant by association, never by wording, so it must not
+# crowd out direct hits. Bounded rather than floored: the floor was the wrong
+# instrument (see above), but "at most this many" is still worth saying.
+MAX_GRAPH_MEMORIES = 3
 
 
 def _score(tier: str, row: dict[str, Any]) -> float | None:
-    """Blended entry score, or None if the row fails the floor."""
+    """Admission and ordering **within the persistent arm**, or None if refused.
+
+    Similarity alone. `confidence` used to multiply it, and finding 4 measured
+    what that bought: 448 of 527 live rows sit at 0.9 or above, so for 85% of the
+    store the factor is a constant, and for the remaining 70 it silently demotes
+    the most relevant row available on the grounds that the compiler was slightly
+    less sure when it wrote it. Relevance and certainty are different questions
+    and multiplying them answers neither.
+
+    Confidence is still stored and still rendered on every line, which is what an
+    annotation is for -- the reader can discount a 0.7 claim themselves.
+
+    No longer a cross-tier comparison either; see TIER_WEIGHT.
+    MEMORY_SIMILARITY_FLOOR was calibrated on query-to-claim cosine and applies
+    only to rows carrying one.
+    """
     similarity = row.get("similarity")
     if similarity is not None and float(similarity) < MEMORY_SIMILARITY_FLOOR:
         return None
-    sim = NEUTRAL_SIMILARITY if similarity is None else float(similarity)
-    return sim * float(row.get("confidence") or 1.0) * TIER_WEIGHT.get(tier, 1.0)
+    return NEUTRAL_SIMILARITY if similarity is None else float(similarity)
+
+
+def _arms(ephemerals: list[dict[str, Any]],
+          persistents: list[dict[str, Any]],
+          evergreens: list[dict[str, Any]] | None = None,
+          already_shown: set[str] | None = None) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Split the selection into ranked arms, each ordered by its own policy.
+
+    `select_for_frame` returns graph neighbours mixed into the persistent list,
+    tagged `via_graph`, with a hop score written into `similarity` so they could
+    be compared against direct hits. They cannot be -- that comparison is what
+    finding 26 measured -- so they are separated out here into their own arm.
+    """
+    direct, reached = [], []
+    for row in persistents:
+        (reached if row.get("via_graph") else direct).append(row)
+
+    scored_direct = [(s, r) for r in direct if (s := _score("persistent", r)) is not None]
+    scored_direct.sort(key=lambda t: t[0], reverse=True)
+
+    # Own scale, own order, no cosine floor. Bounded instead.
+    reached.sort(key=lambda r: float(r.get("similarity") or 0.0), reverse=True)
+
+    # Demoted, not dropped. A claim shown last turn that is still the best answer
+    # should still appear; it just should not outrank something new. Dropping it
+    # outright would make a packet worse the longer a session ran.
+    shown = already_shown or set()
+
+    def _rank_within(rows):
+        return sorted(rows, key=lambda r: str(r.get("id") or "") in shown)
+
+    return [
+        # Already newest-first from storage.get_ephemeral; recency IS the ranking.
+        ("ephemeral", _rank_within(ephemerals)),
+        ("persistent", _rank_within([r for _s, r in scored_direct])),
+        ("evergreen", _rank_within(list(evergreens or []))),
+        ("related", reached[:MAX_GRAPH_MEMORIES]),
+    ]
+
+
+# An arm is how a row was ranked; a tier is where it renders. Graph neighbours
+# are persistent rows reached sideways, so they belong in the Persistent section,
+# marked with the edge that led to them rather than filed under a heading of
+# their own.
+ARM_TIER = {"ephemeral": "ephemeral", "persistent": "persistent",
+            "evergreen": "evergreen", "related": "persistent"}
+
+
+def _fuse(arms: list[tuple[str, list[dict[str, Any]]]]) -> list[tuple[str, dict[str, Any]]]:
+    """Reciprocal rank fusion across arms. Returns (arm, row), best first."""
+    return rank.fuse(
+        [(arm, rows, TIER_WEIGHT.get(arm, 1.0)) for arm, rows in arms],
+        key=lambda row: str(row.get("id") or id(row)),
+    )
 
 
 def _load_memories(message: str, event: dict[str, Any] | None = None,
                    provenance: list[dict[str, Any]] | None = None) -> list[MemoryItem]:
     items: list[MemoryItem] = []
     try:
-        msg_vec = embed_text_sync(message, is_query=True) if message else None
-        ephemerals, persistents = memory_select.select_for_frame(message, embedding=msg_vec)
-        scored: list[tuple[float, str, dict[str, Any]]] = []
-        for tier, rows in (("ephemeral", ephemerals),
-                           ("persistent", persistents)):
-            for row in rows:
-                score = _score(tier, row)
-                if score is not None:
-                    scored.append((score, tier, row))
-        scored.sort(key=lambda t: t[0], reverse=True)
+        # Ask before embedding: a message with no object to search for should
+        # not cost an embed call, and the rows it would return are ranked
+        # results of searching for nothing.
+        no_query = triage.skip_reason(message, recent_assistant_turns()) if message else None
+        msg_vec = embed_text_sync(message, is_query=True) if message and not no_query else None
+        ephemerals, persistents = memory_select.select_for_frame(
+            message, embedding=msg_vec, similarity_search=not no_query)
+        evergreens = (memory_select.select_evergreen(
+            message, memory_select.context_from_env(), msg_vec)
+            if not no_query else [])
 
-        for _score_value, tier, row in scored[:MAX_PACKET_MEMORIES]:
-            items.extend(_rows(tier, [row]))
+        # Finding 19. What the last couple of packets already showed, so this one
+        # can differ from them instead of re-sending the same claims every turn.
+        already_shown = storage.recent_packet_members(PROJECT_ID)
+        if no_query:
+            runlog.log_event("memory.retrieval.skipped", "arteries",
+                             {"reason": no_query}, project_id=PROJECT_ID,
+                             agent_id=AGENT_PROCESS_ID)
+
+        members: list[str] = []
+        for rank, (arm, row) in enumerate(
+                _fuse(_arms(ephemerals, persistents, evergreens,
+                            already_shown))[:MAX_PACKET_MEMORIES],
+                start=1):
+            if row.get("id"):
+                members.append(str(row["id"]))
+            items.extend(_rows(ARM_TIER[arm], [row]))
             if provenance is not None and row.get("id"):
                 provenance.append({
-                    "tier": tier,
+                    # `arm` rather than the rendered tier: what is being recorded
+                    # is how the row was ranked, which is what training on
+                    # retrieval outcome needs to attribute.
+                    "tier": arm,
                     "id": str(row["id"]),
-                    "score": round(float(_score_value), 4),
+                    # Fused rank, not a score. After RRF the number a row carries
+                    # is not comparable across runs with different arm sizes;
+                    # its position is.
+                    "rank": rank,
                     "task_id": row.get("task_id"),
                     "episode_id": row.get("episode_id"),
                 })
+        storage.record_packet(PROJECT_ID, members,
+                              agent_process_id=AGENT_PROCESS_ID)
     except Exception as exc:
         items.append(MemoryItem(
             tier="status",
@@ -318,6 +510,7 @@ def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[Mem
     dropped."""
     seen: set[str] = set()
     out: list[MemoryItem] = []
+    summary_words = _content_words(previous_summary)
     for item in items:
         if item.tier == "status":
             out.append(item)
@@ -325,11 +518,43 @@ def _dedupe_memories(items: list[MemoryItem], previous_summary: str) -> list[Mem
         key = _norm(item.text)
         if not key or key in seen:
             continue
-        if previous_summary and key in previous_summary:
+        if _already_covered(item.text, summary_words):
             continue
         seen.add(key)
         out.append(item)
     return out
+
+
+# Finding 21: dedupe was `key in previous_summary` -- substring containment on
+# normalized text. That over-merges, because a claim that happens to be a prefix
+# of a longer sentence in the summary is dropped even when it says something the
+# summary does not, and it under-merges on any rewording at all, because one
+# changed character breaks containment entirely.
+#
+# Word overlap instead: what fraction of this claim's content words the summary
+# already contains. Still shallow -- paraphrase with different vocabulary is the
+# compiler's job -- but it degrades sensibly instead of flipping.
+SUMMARY_OVERLAP = float(os.getenv("ARTERIES_SUMMARY_OVERLAP", "0.8"))
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9_./]+", (text or "").lower()) if len(w) > 3}
+
+
+def _already_covered(text: str, summary_words: set[str]) -> bool:
+    """Compared on raw text, not on `_norm`ed text.
+
+    `_norm` strips punctuation, so `claimed_at` becomes "claimed at" while the
+    untouched summary still holds `claimed_at` -- identical tokens that never
+    match. Both sides go through the same tokenizer now, which is the only way
+    an overlap number means anything.
+    """
+    if not summary_words:
+        return False
+    words = _content_words(text)
+    if not words:
+        return False
+    return len(words & summary_words) / len(words) >= SUMMARY_OVERLAP
 
 
 def _rows(tier: str, rows: list[dict[str, Any]]) -> list[MemoryItem]:
@@ -340,6 +565,7 @@ def _rows(tier: str, rows: list[dict[str, Any]]) -> list[MemoryItem]:
             confidence=float(row.get("confidence") or 1.0),
             domains=list(row.get("domains") or []),
             source_id=str(row.get("id")) if row.get("id") else None,
+            via=str(row["via"]) if row.get("via") else None,
         )
         for row in rows
         if str(row.get("fact") or "").strip()
@@ -554,7 +780,10 @@ def _format_items(items: list[MemoryItem], tier: str) -> list[str]:
         if item.domains:
             meta.append("/".join(item.domains[:3]))
         meta.append(f"conf={item.confidence:.2f}")
-        lines.append(f"- {item.text} ({', '.join(meta)})")
+        # Finding 15: without this, a claim and the claim contradicting it render
+        # as two identical bullets and the reader cannot tell which is disputed.
+        prefix = f"[{item.via}] " if item.via else ""
+        lines.append(f"- {prefix}{item.text} ({', '.join(meta)})")
     return lines
 
 
@@ -562,17 +791,41 @@ def _section(title: str, lines: list[str]) -> str:
     return "## " + title + "\n\n" + "\n".join(lines)
 
 
-def _allocations(budget: int) -> dict[str, int]:
+def _allocations(budget: int, capabilities: Any = None) -> dict[str, int]:
+    """Byte shares per section. Depends on whether the host still has the
+    conversation.
+
+    `Recent Conversation` took 55% of the budget unconditionally (finding 18).
+    That is the one section every host CLI keeps verbatim -- Claude's compaction
+    prompt and Cursor's watermarks exist specifically to avoid re-sending it --
+    so on the injection path more than half the packet was spending its budget
+    telling the model what it had just read, while memory got 12%.
+
+    It is not always redundant. When the packet *replaces* the host's compaction
+    output, the recent turns are the only record of the conversation and dropping
+    them loses the thing being compacted. So the split follows the capability
+    rather than a single number.
+
+    _load_recent_pairs asks for 10 pairs and _one_line caps each side at 500
+    chars, so ~10k is what delivering all ten actually costs. Shares sum to 0.96,
+    leaving headroom under the hard _limit() so the tail section is never the one
+    clipped.
+    """
     budget = max(budget, 1)
-    # _load_recent_pairs asks for 10 pairs and _one_line caps each side at 500
-    # chars, so the recent section needs ~10k to actually deliver 10 turns. At
-    # the old 0.25-of-6000 it got 1500 and dropped seven of them -- the limit
-    # was decorative. Shares sum to 0.96, leaving headroom under the hard
-    # _limit() so the tail section is never the one that gets clipped.
+    capabilities = capabilities or get_capabilities()
+    replacing = getattr(capabilities, "can_replace_compaction", False)
+    memory = budget * (0.12 if replacing else 0.52)
     return {
         "context": int(budget * 0.10),
-        "recent": int(budget * 0.55),
-        "memory": int(budget * 0.12),
+        "recent": int(budget * (0.55 if replacing else 0.15)),
+        # Ephemeral and Persistent are two headings over one ranked set of at
+        # most MAX_PACKET_MEMORIES rows, so they share this budget rather than
+        # each taking it. Applying the same number to both is how the old shares
+        # summed to 1.08 while the comment claimed 0.96 -- and over-allocating
+        # hands the decision back to truncation, which is what ranking exists to
+        # take away from it.
+        "memory": int(memory / 2),
+        "suggestion": int(budget * 0.10),
         "rules": int(budget * 0.07),
     }
 

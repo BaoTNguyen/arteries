@@ -165,6 +165,12 @@ def unreached(root: Path | None = None) -> list[str]:
 
     root = root or Path(__file__).resolve().parent
     sources = {p: p.read_text() for p in sorted(root.glob("*.py"))}
+    # Shell entry points count as callers. `scripts/watch.sh` has called into
+    # storage for months; a Python-only scan reports that as unreached and the
+    # fix would be to delete a function something uses.
+    scripts = root.parent.parent / "scripts"
+    if scripts.is_dir():
+        sources.update({p: p.read_text() for p in sorted(scripts.glob("*.sh"))})
     orphans = []
     for path, text in sources.items():
         for match in re.finditer(r"^def ([a-z][a-z0-9_]*)\(", text, re.M):
@@ -222,9 +228,27 @@ def integrity(project: str) -> dict[str, Any]:
             cur.execute("""
                 SELECT count(*) FROM arteries.ephemeral
                 WHERE status = 'compiling'
-                  AND source_ts < now() - INTERVAL '10 minutes'
+                  -- The lease, not the row's birth. Same correction as the
+                  -- sweep in compile.py: a row that queued a long time before
+                  -- being claimed is not stranded, and counting it as stranded
+                  -- made this number alarming and wrong.
+                  AND coalesce(claimed_at, source_ts) < now() - INTERVAL '10 minutes'
             """)
             out["stranded_claims"] = cur.fetchone()[0]
+
+            # Finding 23: the compile pass was documented as a decomposer at
+            # 1.43 facts per row and measures 0.84. Recomputed rather than
+            # remembered, so the docstring cannot go stale again without this
+            # disagreeing with it.
+            cur.execute("""
+                SELECT (SELECT count(*) FROM arteries.ephemeral
+                        WHERE project_id = %s AND status = 'cleared'),
+                       (SELECT count(*) FROM arteries.persistent
+                        WHERE project_id = %s)
+            """, (project, project))
+            claimed, written = cur.fetchone()
+            out["facts_per_claimed_row"] = (round(written / claimed, 2)
+                                            if claimed else None)
 
             cur.execute(_COLLECTABLE_SQL.format(select="count(*)"),
                         (project, EPHEMERAL_RETENTION_DAYS))
@@ -264,9 +288,29 @@ def integrity(project: str) -> dict[str, Any]:
     except Exception as exc:
         out["error"] = exc.__class__.__name__
 
-    # Static, so it still reports even when Postgres is unreachable.
+    # Static, so these still report when Postgres is unreachable.
     out["unreached_functions"] = unreached()
+    out["compact_prompt_stale"] = _compact_prompt_stale()
     return out
+
+
+def _compact_prompt_stale() -> bool:
+    """Whether the Codex compact prompt describes a packet layout that is gone.
+
+    Finding 24. The prompt names the packet's sections, so a packet that gains
+    or renames one leaves the prompt telling the model to preserve headings it
+    will never see -- and nothing says so, because a prompt cannot fail. The
+    generated file carries `packet-schema: vN`; this compares it.
+    """
+    try:
+        from arteries.packet import PACKET_SCHEMA_VERSION
+
+        prompt = Path.cwd() / ".arteries" / "codex" / "compact_prompt.txt"
+        if not prompt.is_file():
+            return False
+        return f"packet-schema: v{PACKET_SCHEMA_VERSION}" not in prompt.read_text()
+    except Exception:
+        return False
 
 
 def fix(project: str) -> dict[str, Any]:

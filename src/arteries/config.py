@@ -58,6 +58,11 @@ PROJECT_ID = os.getenv("ARTERIES_PROJECT") or os.path.basename(
 AGENT_PROCESS_ID = os.getenv("ARTERIES_AGENT_ID", str(os.getpid()))
 # both names accepted: cli_normalize/hooks set ARTERIES_PARENT_AGENT_ID
 PARENT_AGENT_ID = os.getenv("ARTERIES_PARENT_AGENT_ID") or os.getenv("ARTERIES_PARENT_AGENT") or None
+# Exported by cli_normalize.apply_event_env since the hooks were written; the
+# memory tiers never read it. Stable across a session's turns, and still valid
+# once the process that wrote a row has exited -- which AGENT_PROCESS_ID is not,
+# since it falls back to the pid.
+SESSION_ID = os.getenv("ARTERIES_SESSION_ID") or None
 
 # --- Memory isolation presets ---
 # subagent: writes ephemeral tagged with parent, compiled at higher bar

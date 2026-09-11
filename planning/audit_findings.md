@@ -1,17 +1,19 @@
 # Arteries audit — open findings
 
 Compiled 2026-09-04 from a live audit against the `capillaries` Postgres and
-the installed CLIs. Every item marked **measured** has a query or code path
+the installed CLIs. Finding 26 added 2026-09-07, found while tracing the
+retrieval path for the ingestion redesign. Every item marked **measured** has a query or code path
 behind it; **read** means found by reading code but not exercised against data.
 
-Nothing here has been fixed. Severity is about damage to memory correctness,
-not effort.
+**All 26 are now fixed** on `ingestion-redesign` (and 15, 26 on `main` via
+`retrieval-floor-fix`). Each heading carries the commit that closed it. Severity
+is about damage to memory correctness, not effort.
 
 ---
 
 ## P0 — data corruption
 
-### 1. Stale-claim sweep measures the wrong clock
+### 1. Stale-claim sweep measures the wrong clock — FIXED, commit 1 (claimed_at lease)
 `compile.py:_release_stale_claims` — **measured**
 
 ```sql
@@ -81,7 +83,7 @@ the 2000-char previews, so the true figure is larger.
 
 ## P1 — memory quality
 
-### 3. No quality filter exists on the write path
+### 3. No quality filter exists on the write path — FIXED, commit 5 (worth_keeping)
 `compile.py` — **read**
 
 Between the model's JSON and a permanent row there are exactly two checks:
@@ -95,7 +97,7 @@ Between the model's JSON and a permanent row there are exactly two checks:
 gated on anywhere. Novel noise passes at any store size; on a cold start
 `_reject_duplicates` fails open and *everything* the model names is written.
 
-### 4. Confidence carries no signal
+### 4. Confidence carries no signal — FIXED, commit 6 (confidence annotates)
 **measured**
 
 ```
@@ -108,7 +110,7 @@ gated on anywhere. Novel noise passes at any store size; on a cold start
 score by it (`sim * confidence * TIER_WEIGHT`), which is a no-op at this
 distribution. A confidence floor cannot be used as the fix in (3).
 
-### 5. `COMPILE_SYSTEM` biases toward inclusion on a false promise
+### 5. `COMPILE_SYSTEM` biases toward inclusion on a false promise — FIXED, commit 5 (COMPILE_SYSTEM rule 5)
 `compile.py:47` — **read**
 
 Rule 4: *"Do not skip a new fact merely because something similar exists.
@@ -121,7 +123,7 @@ does not exist at all.
 Fix: add exclusions. Nothing derivable from the repo; nothing that only
 matters to the current conversation.
 
-### 6. Persistent store is contaminated
+### 6. Persistent store is contaminated — FIXED, commit 5 (worth_keeping)
 **measured**
 
 ~11–17% of live rows are transient session intent ("User is verifying
@@ -129,7 +131,7 @@ that…"). 14 rows are cross-project (SmartCity/AgriTwin filed under
 arteries/heart), including a one-session instruction stored as a permanent
 `constraint`. Direct consequence of (3) and (5).
 
-### 7. No eviction
+### 7. No eviction — FIXED, commit 12 (activity-day decay)
 **read**
 
 `access_count` is tracked and never acted on. Nothing decays. Write-side
@@ -140,7 +142,7 @@ Codex uses `max_unused_days` for exactly this.
 
 ## P2 — in-session retrieval
 
-### 8. Promotion deletes the session's own working memory
+### 8. Promotion deletes the session's own working memory — FIXED, commit 4 (time-based visibility)
 `storage.py:get_ephemeral` — **measured**
 
 ```sql
@@ -165,7 +167,7 @@ currently works only while the compiler is broken.**
 Fix: gate visibility on an expiry/session state, not on compile status.
 Compile stays background and stops cannibalizing the tier it reads from.
 
-### 9. Sessions share ephemeral memory
+### 9. Sessions share ephemeral memory — FIXED, commit 3 (session_id)
 **measured**
 
 518 of 612 ephemeral rows are pooled under three fixed `*-hook`
@@ -189,7 +191,7 @@ flowing through the event stream.
 
 ## P3 — compile loop robustness
 
-### 10. Poison batches block the queue forever
+### 10. Poison batches block the queue forever — FIXED, commit 2 (attempts/quarantine)
 `compile.py` — **read**
 
 `_release_claimed` fires immediately on failure and `_claim_ephemeral` orders
@@ -200,14 +202,14 @@ nothing behind it ever compiles.
 Codex's `jobs` table solves this with `retry_remaining` alongside
 `lease_until` and `input_watermark`/`last_success_watermark`.
 
-### 11. Timeout grazes the stale threshold
+### 11. Timeout grazes the stale threshold — FIXED, commit 1 (STALE_CLAIM_MINUTES=3)
 **read**
 
 `COMPILE_TIMEOUT` is 60s and the invalid-response path calls `_llm_compile`
 twice — up to 120s, exactly `STALE_CLAIM_MINUTES = 2`. Even after (1) is
 fixed, that path can trip the sweep. 3 minutes gives it room.
 
-### 12. Cold start wastes an embedding call
+### 12. Cold start wastes an embedding call — FIXED, commit 2 (cold-start guard)
 `compile.py:_load_persistent_context` — **read**
 
 ```python
@@ -218,7 +220,7 @@ Embeds up to 4000 characters through Qwen3 *before* discovering the
 persistent table is empty. Not a correctness bug; a wasted round trip on
 every batch until the store fills.
 
-### 13. Compilation has a hard availability dependency
+### 13. Compilation has a hard availability dependency — FIXED, commit 2 (health probe)
 **measured**
 
 269 of 606 passes fail (44.4%): 158 "All connection attempts failed" (local
@@ -226,7 +228,7 @@ llama-server down), 83 empty error, a few JSON truncations at ~2500 chars.
 Batches are released and retried so nothing is lost permanently, but
 promotion stops entirely while the 27B is off.
 
-### 25. Failed connections churn the queue instead of backing off
+### 25. Failed connections churn the queue instead of backing off — FIXED, commit 2 (health probe)
 `compile.py:compile_once` — **measured**
 
 Nothing checks whether the generation server is reachable before work is
@@ -257,7 +259,7 @@ nothing for it, and the real repair is outside arteries: a systemd unit with
 `Restart=always` on llama-server, or a deterministic degradation path when the
 27B is unreachable.
 
-### 14. Hook timeout mismatch
+### 14. Hook timeout mismatch — FIXED, commit 14 (hook timeout 9000)
 `hooks/arteries-observe.js` vs `hooks/hooks.json` — **read**
 
 The JS gives Python 5000ms; `hooks.json` allows 10s. Embedding call, DB write
@@ -268,14 +270,14 @@ write is killed mid-flight.
 
 ## P4 — graph
 
-### 15. `contradicts` co-retrieves both sides of a conflict
+### 15. `contradicts` co-retrieves both sides of a conflict — FIXED, branch A (via labelling)
 `graph.py` — **measured**
 
 `contradicts` is in `RELATIONS`, so `graph.expand` pulls both statements into
 the packet as identical-looking bullets, and `via_graph` is dropped at the
 `MemoryItem` boundary. The packet presents A and ¬A with no marking.
 
-### 16. All edges are unvalidated
+### 16. All edges are unvalidated — FIXED, commit 8 (scoped T-Box, Layer-0 bindings)
 **measured**
 
 `ontology_valid=false` on all 2457 edges.
@@ -319,9 +321,64 @@ both-dead, 0 inconsistent.
 
 ---
 
+### 26. Graph expansion cannot clear the packet floor — its output is always discarded — FIXED, branch A (rank fusion)
+`memory_select.py:136`, `graph.py:110`, `packet.py:258` — **measured** (arithmetic against
+live constants, 2026-09-07)
+
+`graph.expand` writes its decayed hop score back onto each neighbour as `similarity`, so
+the neighbour is judged by `_score` on the same axis as a direct cosine hit. It cannot
+survive that comparison. With the live constants — `decay = 0.6`, edge `weight = 1.0`,
+`MEMORY_SIMILARITY_FLOOR = 0.55`:
+
+```
+direct edge:    1.0 × 0.6 × seed_similarity  =  0.60 × seed_sim
+shared entity:  0.6 × 0.6 × seed_similarity  =  0.36 × seed_sim
+```
+
+| path | seed similarity needed to clear 0.55 |
+|---|---|
+| direct claim-to-claim edge | **0.917** |
+| shared entity — the common path, 210 pairs vs 33 direct | **1.528**, impossible |
+
+Measured maximum top-hit similarity across 237 plexus queries is **0.78**
+(`packet.py:238`). No expanded neighbour has entered a packet, and none can.
+
+The two gates also fight. `route.choose` (`route.py:51`) triggers expansion *only* when
+fewer than five seeds reach `STRONG_SIMILARITY = 0.65` — that is, only when seed
+similarity is low, which is precisely when `0.60 × seed_sim` is furthest from the floor.
+The condition that starts the walk guarantees the walk is wasted.
+
+Cost: one extra database round trip and a connection open/close per weak query, for
+nothing. `_expand` opens its own `psycopg2.connect` rather than reusing a connection.
+
+Cause: the floor was derived from *query-to-claim cosine* (`packet.py:238`). A decayed hop
+score is a different quantity on a different scale. Comparing them is the same category
+error as scoring ephemeral with a `NEUTRAL_SIMILARITY` constant and then ranking it
+against real cosines.
+
+**Interaction with finding 15.** Finding 15 says `contradicts` co-retrieves both sides of
+a conflict into the packet. That harm is currently *latent* — nothing from `expand`
+reaches the packet at all. Fixing 26 makes 15 live. They must ship together, or the first
+turn after the fix presents A and ¬A as equal bullets.
+
+`doctor.unreached` (`doctor.py:156`) already lists `graph.expand` and "the expansion gate"
+among six things written, tested, and never invoked. They *are* invoked now; the output is
+discarded one function later, where a name-level reachability check cannot see it.
+
+**Confirmed by the fix, 2026-09-07.** After rank fusion, over 15 queries against the live
+store: graph rows went from 0 packet slots to 36, present on 15/15 queries. Persistent went
+47 → 46, i.e. unchanged — the ephemeral constant is a real defect in the ranking function
+but not the binding one; `MEMORY_SIMILARITY_FLOOR` empties the persistent arm outright on
+4 of 15 queries, before any fusion runs.
+
+Fix: rank graph results within their own arm and fuse by rank rather than comparing a hop
+score to a cosine floor (`planning/ingestion_redesign.md` §20.4, §23.3). Stopgap if that
+lands later: exempt `via_graph` rows from `MEMORY_SIMILARITY_FLOOR` and cap their count.
+
+
 ## P5 — packet builder
 
-### 18. 55% of the budget goes to what the host already has
+### 18. 55% of the budget goes to what the host already has — FIXED, commit 6 (capability-aware budget)
 `packet.py:_allocations` — **read**
 
 ```python
@@ -332,18 +389,18 @@ both-dead, 0 inconsistent.
 Claude's third compaction prompt and Cursor's two watermarks both exist
 specifically to avoid re-sending it.
 
-### 19. Nothing chains
+### 19. Nothing chains — FIXED, commit 11 (arteries.packets)
 `packet.py` — **read**
 
 `previousSummary` is read for dedupe and never written back. No record of
 which rows entered which packet, so packets cannot be incremental.
 
-### 20. Network call inside the compaction path
+### 20. Network call inside the compaction path — FIXED, commit E (cached suggestion)
 `packet.py:_corpus_suggestion` — **read**
 
 `urlopen(req, timeout=60)` runs during packet assembly.
 
-### 21. Dedupe is substring containment
+### 21. Dedupe is substring containment — FIXED, commit 11 (word overlap)
 `packet.py:_dedupe_memories` — **read**
 
 Containment on `_norm()` text. Misses paraphrase, over-merges on prefixes.
@@ -352,7 +409,7 @@ Containment on `_norm()` text. Misses paraphrase, over-merges on prefixes.
 
 ## P6 — foundations
 
-### 22. No observations are captured anywhere
+### 22. No observations are captured anywhere — FIXED, commit 13 (evidence ladder, PostToolUse)
 **measured**
 
 All 25 `agent_events` types are memory/prompt/turn bookkeeping. Zero tool
@@ -361,13 +418,13 @@ inferred` evidence ladder therefore has **one populated class**, so
 contradiction resolution degrades to recency — the exact failure the design
 exists to beat.
 
-### 23. Stale docstring understates loss by 2x
+### 23. Stale docstring understates loss by 2x — FIXED, commit 14 (docstring + doctor ratio)
 `compile.py:_reject_duplicates` — **measured**
 
 Docstring claims the LLM pass is a decomposer at 53 ephemeral → 76 facts
 (1.43/row). Live: 763 claimed → 475 written = **0.62 facts/row**.
 
-### 24. Codex compact prompt names the v1 layout
+### 24. Codex compact prompt names the v1 layout — FIXED, commit 14 (generated prompt + version)
 `.arteries/codex/compact_prompt.txt` — **read**
 
 Must be regenerated if the packet schema changes.

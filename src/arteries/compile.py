@@ -26,14 +26,21 @@ from typing import Any
 import httpx
 import psycopg2
 import psycopg2.extras
+from collections import Counter
 
-from arteries import graph, runlog, scope
-from arteries.config import AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL, PROJECT_ID
+from arteries import evidence, graph, promote, runlog, scope
+from arteries.config import (AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL,
+                             PROJECT_ID, SESSION_ID)
 from arteries.scope import SCOPE_CTE
 
 MAX_EPHEMERAL_BATCH = 10
 MAX_PERSISTENT_CONTEXT = 15
-STALE_CLAIM_MINUTES = 2
+# Three, not two, and it is a multiple of COMPILE_TIMEOUT rather than a number.
+# At 2 the lease was 120s against a 60s generation ceiling, so a pass that
+# queued behind llama-server's other slot could be swept while it was still
+# holding -- the timeout grazed the threshold it was supposed to sit under
+# (finding 11). At 3 the lease is 180s, three times the ceiling.
+STALE_CLAIM_MINUTES = 3
 
 # Compilation is generation-bound, not prompt-bound: a 20-record batch measured
 # 0.43s to prefill 5.7k tokens and ~40s to generate 1.3k. The old 30s ceiling
@@ -45,13 +52,41 @@ STALE_CLAIM_MINUTES = 2
 # or a smaller batch -- not a bigger number.
 COMPILE_TIMEOUT = float(os.getenv("ARTERIES_COMPILE_TIMEOUT", "60"))
 
+# A batch the model cannot produce valid output for fails identically every
+# pass, so without a ceiling it is retried until someone notices. Three is
+# enough to ride out a restart and short enough that a poison batch stops
+# costing a generation slot per turn. Quarantined rows stay in the table --
+# `art doctor` reports them, and they are the record of what could not be
+# compiled rather than something to hide.
+MAX_COMPILE_ATTEMPTS = int(os.getenv("ARTERIES_MAX_COMPILE_ATTEMPTS", "3"))
+
+# After this long, an uncompiled row is nobody's: whichever process wrote it is
+# not coming back for it. Without this, a row written under a bare pid is
+# claimable only by that pid, and 84 rows in the live store -- 83 distinct pids,
+# one row each -- were stranded permanently. An hour is far longer than any
+# real compile cycle and far shorter than the tier's own expiry.
+ABANDONED_AFTER_MINUTES = int(os.getenv("ARTERIES_ABANDONED_AFTER_MINUTES", "60"))
+
+# Finding 25: with llama-server down, every turn claimed rows, waited out the
+# connection error, released them, and wrote two queue events. Measured at a 44%
+# failure rate, that is most of a turn's memory budget spent discovering the
+# same outage. One cheap probe answers it before anything is claimed.
+HEALTH_TIMEOUT = float(os.getenv("ARTERIES_HEALTH_TIMEOUT", "1.0"))
+
 COMPILE_SYSTEM = """You are a memory compiler. You receive raw conversation extracts (ephemeral memories) and existing long-term memories (persistent). Your job:
 
 1. Distill the ephemeral records into concise, factual statements worth remembering long-term.
 2. Tag each with relevant domains from this list: technical, AI, business, strategy, product, finance, career, learning, personal, writing.
 3. If a new fact contradicts an existing persistent memory, mark the old one as superseded. Set "replaced_by" to the 0-based index of the entry in new_memories that replaces it, and give the reason.
-4. The existing memories shown to you are the ones most *similar* to this batch — they are selected that way so you can spot contradictions and refinements. Do not skip a new fact merely because something similar exists. Exact restatements are filtered mechanically after you answer; your job is to say how the new fact relates, not to suppress it.
-5. Assign confidence 0.0-1.0 based on how certain the fact is (corrections and explicit statements = high, inferred context = lower).
+4. The existing memories shown to you are the ones most *similar* to this batch — they are selected that way so you can spot contradictions and refinements. Do not skip a new fact merely because something similar exists; say how it relates instead. This is not permission to include everything: nothing downstream judges whether a fact was worth keeping.
+
+5. Do NOT record any of the following. They are true when written and useless a week later, and 16% of the store is currently made of them:
+- What the conversation is about to do. "User intends to...", "User is considering...", "User plans to...", "Next we will...". Record what was decided or discovered, not what was proposed.
+- Anything about the session itself: what is being verified, tested, or checked right now.
+- Anything derivable by reading the repo. File X imports Y, function Z takes two arguments, the test suite passes.
+- Restatements of the user's request back at them.
+A standing preference IS worth recording ("prefers tabs over spaces") — that describes the person, not the turn.
+6. Assign confidence 0.0-1.0 based on how certain the fact is (corrections and explicit statements = high, inferred context = lower).
 
 Records marked [SUBAGENT] came from an automated subagent, not directly from the user. Apply a higher bar:
 - Only keep subagent records that state verifiable facts about the codebase or project.
@@ -98,6 +133,23 @@ themselves.
 Keep facts that would be useful in a future conversation about this project. Skip greetings, acknowledgements, and anything too vague to act on — but a concrete change, measurement, defect, or decision is worth keeping even when it resembles something already stored. Returning an empty list for a batch that contains any of those is wrong."""
 
 
+def _generator_reachable() -> bool:
+    """Cheap liveness check before claiming anything.
+
+    Claiming first and discovering the outage afterwards is what made an outage
+    expensive: rows churn through 'compiling' and back, and the queue fills with
+    events describing the same dead socket. `/health` is llama-server's own
+    endpoint and answers in milliseconds when it answers at all.
+    """
+    import httpx
+
+    base = GENERATE_URL.split("/v1/")[0]
+    try:
+        return httpx.get(f"{base}/health", timeout=HEALTH_TIMEOUT).status_code == 200
+    except Exception:
+        return False
+
+
 async def compile_once() -> dict[str, Any]:
     """
     Run one compilation pass. Returns stats about what happened.
@@ -105,6 +157,12 @@ async def compile_once() -> dict[str, Any]:
     Safe to call concurrently — uses SELECT FOR UPDATE SKIP LOCKED
     to claim ephemeral records, so parallel agents won't double-compile.
     """
+    if not _generator_reachable():
+        # Before the connection, not after: an unreachable generator means there
+        # is no work this pass can finish, and saying so costs one HTTP timeout
+        # instead of a claim, a release, and two queue writes.
+        return {"status": "generator_unreachable", "claimed": 0}
+
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         _release_stale_claims(conn)
@@ -174,10 +232,15 @@ def _release_stale_claims(conn) -> int:
         cur.execute(
             """
             UPDATE arteries.ephemeral
-            SET status = 'uncompiled'
+            SET status = 'uncompiled', claimed_at = NULL
             WHERE project_id = %s
               AND status = 'compiling'
-              AND source_ts < now() - (%s || ' minutes')::interval
+              -- claimed_at, not source_ts: the lease starts when the claim is
+              -- taken, not when the row was written. COALESCE covers rows
+              -- claimed before this column existed -- any of those still in
+              -- 'compiling' is stranded by definition, so falling back to their
+              -- birth time releases them, which is what should happen.
+              AND coalesce(claimed_at, source_ts) < now() - (%s || ' minutes')::interval
             """,
             (PROJECT_ID, STALE_CLAIM_MINUTES),
         )
@@ -189,40 +252,78 @@ def _release_stale_claims(conn) -> int:
 def _claim_ephemeral(conn) -> list[dict]:
     """Atomically claim uncompiled ephemeral records for this compilation pass.
 
-    Claims both the parent's own records AND any subagent records that
-    tagged this agent as their parent_agent_id.
+    Claims this agent's own records, any subagent records that tagged this agent
+    as their parent, anything else from the same session, and anything in this
+    project old enough that nobody is coming back for it. The last clause is the
+    only one that can reach a row written under a pid that has since exited --
+    which is how 84 rows became permanently uncompilable (finding 9).
+
+    Own records first, then oldest, so a busy agent still drains its own queue
+    before doing anyone else's housekeeping.
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
             UPDATE arteries.ephemeral
-            SET status = 'compiling'
+            SET status = 'compiling', claimed_at = now()
             WHERE id IN (
                 SELECT id FROM arteries.ephemeral
                 WHERE project_id = %s
-                  AND (agent_process_id = %s OR parent_agent_id = %s)
+                  AND (agent_process_id = %s
+                       OR parent_agent_id = %s
+                       -- Same session, different process: a turn's hook exits
+                       -- and the next turn's should still be able to finish
+                       -- what it started.
+                       OR (%s::text IS NOT NULL AND session_id = %s)
+                       -- Nobody's any more. This is the only clause that can
+                       -- reach a row written under a pid that no longer exists.
+                       OR source_ts < now() - (%s || ' minutes')::interval)
                   AND status = 'uncompiled'
+                  AND quarantined_at IS NULL
                 ORDER BY (agent_process_id = %s) DESC, source_ts ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING id, fact, domains, source_ts, parent_agent_id, source
             """,
-            (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
+            (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID,
+             SESSION_ID, SESSION_ID, ABANDONED_AFTER_MINUTES,
+             AGENT_PROCESS_ID, MAX_EPHEMERAL_BATCH),
         )
         conn.commit()
         return [dict(r) for r in cur.fetchall()]
 
 
 def _release_claimed(conn, ids: list) -> None:
-    """Roll back claimed records to uncompiled on failure."""
+    """Roll back claimed records to uncompiled, counting the failed attempt.
+
+    The count is what makes failure bounded. A batch the model cannot produce
+    valid output for fails the same way every pass, so without it the same rows
+    are claimed, failed and released for as long as nobody looks. After
+    MAX_COMPILE_ATTEMPTS the rows are quarantined: still in the table, still
+    reported by `art doctor`, but no longer claimed.
+    """
     if not ids:
         return
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE arteries.ephemeral SET status = 'uncompiled' WHERE id = ANY(%s::uuid[])",
-            (ids,),
+            """
+            UPDATE arteries.ephemeral
+            SET status = 'uncompiled',
+                claimed_at = NULL,
+                attempts = attempts + 1,
+                quarantined_at = CASE WHEN attempts + 1 >= %s THEN now() END
+            WHERE id = ANY(%s::uuid[])
+            RETURNING id, quarantined_at
+            """,
+            (MAX_COMPILE_ATTEMPTS, ids),
         )
+        given_up = [str(r[0]) for r in cur.fetchall() if r[1] is not None]
+    if given_up:
+        runlog.log_event("memory.compile.quarantined", "arteries",
+                         {"count": len(given_up), "ids": given_up[:5],
+                          "after_attempts": MAX_COMPILE_ATTEMPTS},
+                         project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
         conn.commit()
 
 
@@ -258,6 +359,24 @@ def _load_persistent_context(conn, batch: list[dict] | None = None,
     so a contradiction of something learned months ago is still visible. Falls
     back to recency when the batch cannot be embedded.
     """
+    # Finding 12: on a cold store there is nothing to compare against, so
+    # embedding the batch buys a network round trip and an empty list. Ask the
+    # cheap question first -- one indexed EXISTS against a query that is about
+    # to run anyway.
+    with conn.cursor() as cur:
+        cur.execute(
+            SCOPE_CTE + """
+            SELECT EXISTS(
+                SELECT 1 FROM arteries.persistent
+                WHERE project_id IN (SELECT project_id FROM scope)
+                  AND valid_until IS NULL
+            )
+            """,
+            {"project": project_id or PROJECT_ID},
+        )
+        if not cur.fetchone()[0]:
+            return []
+
     vec = None
     if batch:
         from arteries.embed import embed_text_sync
@@ -302,9 +421,18 @@ def _reject_duplicates(conn, memories: list[dict], vectors: list,
     cosine backstop at DUPLICATE_SIM for near-identical strings the model let
     through.
 
-    Something has to bound growth -- the LLM pass is a decomposer, 53 ephemeral
-    rows produced 76 facts -- but the bound reads better as a judgement than as a
-    distance, because cosine cannot tell restatement from subsumption.
+    Something has to bound growth, but not for the reason this docstring used to
+    give. It called the LLM pass a decomposer at 53 ephemeral rows to 76 facts,
+    1.43 per row. Measured on the live store it is the opposite: 734 rows
+    claimed, 617 written, 0.84 per row -- and 0.62 when the audit ran. The pass
+    compresses; it does not expand. A docstring that says otherwise makes every
+    growth estimate built on it wrong by about a factor of two.
+
+    The bound still reads better as a judgement than as a distance, because
+    cosine cannot tell restatement from subsumption.
+
+    `art doctor` recomputes the ratio, so this number is checkable rather than
+    remembered.
     """
     kept, kept_vecs, rejected = [], [], []
     with conn.cursor() as cur:
@@ -549,6 +677,22 @@ def _write_results(conn, result: dict, claimed_ids: list,
     # held row locks across ~264ms of network I/O for a typical batch. One
     # batched call is 45ms and happens while holding nothing.
     memories = result.get("new_memories", [])
+
+    # Before embedding, not after: a fact that will not be stored should not cost
+    # an embedding call either. The model is asked not to produce these
+    # (COMPILE_SYSTEM rule 5) and produces them anyway often enough to be 16% of
+    # the live store -- a prompt is a request, and a permanent row is forever.
+    judged = [(m, promote.worth_keeping(m.get("fact", ""))) for m in memories]
+    refused = [(m, why) for m, why in judged if why is not None]
+    if refused:
+        runlog.log_event(
+            "memory.compile.rejected_low_value", "arteries",
+            {"count": len(refused),
+             "by_rule": dict(Counter(why for _m, why in refused)),
+             "rejected": [m.get("fact", "")[:120] for m, _why in refused[:5]]},
+            project_id=project_id, agent_id=AGENT_PROCESS_ID)
+    memories = [m for m, why in judged if why is None]
+
     vectors = embed_texts_sync([m["fact"] for m in memories])
     memories, vectors, duplicates = _reject_duplicates(conn, memories, vectors, project_id)
     if duplicates:
@@ -557,6 +701,11 @@ def _write_results(conn, result: dict, claimed_ids: list,
                          project_id=project_id, agent_id=AGENT_PROCESS_ID)
 
     scope_id = scope.scope_for(project_id) or project_id
+    # The strongest evidence in the batch. A batch is one turn's worth of claims
+    # and they share a source, so this is a property of the turn rather than of
+    # each row.
+    batch_evidence = min((evidence.for_source(r.get("source")) for r in claimed),
+                         key=evidence.rank, default=evidence.DEFAULT)
     new_ids: list[str] = []
 
     unattributed = 0
@@ -583,8 +732,8 @@ def _write_results(conn, result: dict, claimed_ids: list,
                 """
                 INSERT INTO arteries.persistent
                     (fact, domains, confidence, project_id, parent_ids, embedding,
-                     kind, episode_id, task_id)
-                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s,
+                     kind, evidence, episode_id, task_id)
+                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s, %s,
                     -- carried up from the ephemerals this was distilled from,
                     -- but only when they agree. A fact compiled from several
                     -- tasks is by construction not about any one of them, so
@@ -608,6 +757,7 @@ def _write_results(conn, result: dict, claimed_ids: list,
                     sources,
                     vec,
                     mem.get("kind", "fact"),
+                    batch_evidence,
                     sources,
                     sources,
                 ),
@@ -662,6 +812,31 @@ def _write_results(conn, result: dict, claimed_ids: list,
                                  {"persistent_id": str(pid), "reason": "not a uuid"},
                                  project_id=project_id, agent_id=AGENT_PROCESS_ID)
                 continue
+            # Finding 22's one real rule: equal or higher evidence class only.
+            # Without it an inferred "prefers spaces" retires a stated "I prefer
+            # tabs", which also makes the eviction exemption for preferences
+            # worthless -- the row survives age and is overwritten instead.
+            cur.execute(
+                "SELECT evidence FROM arteries.persistent "
+                "WHERE id = %s AND project_id = %s AND valid_until IS NULL",
+                (pid, project_id),
+            )
+            existing = cur.fetchone()
+            old_evidence = existing[0] if existing else None
+            if existing and not evidence.can_supersede(batch_evidence, old_evidence):
+                runlog.log_event(
+                    "memory.compile.supersede_refused", "arteries",
+                    {"persistent_id": str(pid), "existing_evidence": old_evidence,
+                     "new_evidence": batch_evidence,
+                     "reason": "weaker evidence than the claim it would retire"},
+                    project_id=project_id, agent_id=AGENT_PROCESS_ID)
+                # Recorded as a disagreement rather than dropped: both sides stay
+                # retrievable and the packet marks which is disputed (finding 15).
+                if new_ids:
+                    graph.add_edge(cur, project_id, "persistent", new_ids[0],
+                                   "contradicts", "persistent", str(pid))
+                continue
+
             cur.execute(
                 """
                 UPDATE arteries.persistent
@@ -696,7 +871,12 @@ def _write_results(conn, result: dict, claimed_ids: list,
                                  project_id=project_id, agent_id=AGENT_PROCESS_ID)
 
         cur.execute(
-            "UPDATE arteries.ephemeral SET status = 'cleared' WHERE id = ANY(%s::uuid[])",
+            # `cleared` still tells the compiler this row needs no claiming, and
+            # `doctor` still collects on it. What it no longer does is hide the
+            # row from its own session -- that is `compiled_at` plus the
+            # visibility window in storage (finding 8).
+            "UPDATE arteries.ephemeral SET status = 'cleared', compiled_at = now() "
+            "WHERE id = ANY(%s::uuid[])",
             (claimed_ids,),
         )
         conn.commit()
@@ -716,3 +896,17 @@ if __name__ == "__main__":
     # pulling the full `art` CLI import chain. Used by an orchestrator to flush
     # its subagents' ephemeral after they exit.
     print(asyncio.run(compile_once()))
+
+    # Finding 20: the corpus fetch used to run inside packet assembly, on a hook
+    # with a 9s budget. Here there is no one waiting, so the suggestion for this
+    # turn's message is fetched and cached for the next packet to read.
+    _warm = os.getenv("ARTERIES_WARM_MESSAGE")
+    if _warm:
+        try:
+            from arteries.packet import warm_suggestion
+
+            warm_suggestion(_warm)
+        except Exception as _exc:
+            from arteries import degrade
+
+            degrade.note(_exc, "suggestion warming")
