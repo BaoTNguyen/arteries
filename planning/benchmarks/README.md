@@ -91,3 +91,43 @@ the hybrid arm was cut to `window`, it read 37/40 at window 1 against cosine's
 21/40. That was a list of 21 being compared against a list of 1 -- the lexical
 channel contributes 20 candidates whatever the window is. It measured the length
 of the list, not the quality of retrieval.
+
+## identifier-20260911.json — and the hybrid question, closed
+
+The set the hybrid verdict was waiting on. 23 claims that actually contain an
+identifier (of 40 sampled; the rest have none, and asking for an identifier
+query about a claim without one produces a paraphrase wearing the wrong label).
+Queries reuse the claim's paths, symbols, columns and error types verbatim and
+ordinary words for everything else -- someone staring at `UndefinedColumn` and
+asking about `UndefinedColumn`.
+
+This is the population a lexical channel exists for. With `ARTERIES_HYBRID=on`:
+
+```
+  window        cosine        hybrid
+       1   19/23 (0.83)   19/23 (0.83)
+       3   22/23 (0.89)   22/23 (0.88)
+      10   23/23 (0.90)   23/23 (0.90)
+```
+
+**No gain, on the population it was built for.** Hybrid retrieval does not help
+this corpus on either query style, and the flag stays off.
+
+The reason is not the one predicted. §21.4 argued embeddings compress
+identifiers into the same 0.45-0.55 band as all technical prose, so dense would
+be blind to them. It is not: dense scores 0.83-0.90 MRR on these queries and
+finds 23 of 23 by window 10. There is no headroom for a second channel to
+recover, because nothing is being missed.
+
+What was actually true is the first half of the same argument -- that a 492-row
+corpus of one-sentence claims is an easy retrieval problem. Both populations
+support that reading: the paraphrase set is hard (0.53-0.67) because rewording is
+hard, and the identifier set is easy (0.83-0.90) because an embedding of a
+sentence containing `claimed_at` is close to a question containing `claimed_at`.
+BM25 adds nothing to a problem dense has already solved.
+
+The code and the GIN index stay, off, because the measurement is worth more than
+the sixty lines: it says a lexical channel is not what is wrong with retrieval
+here, which is a question that would otherwise get asked again. The thing that
+would reopen it is a corpus large enough for dense recall to fall -- not a
+different weighting, and not a different query set.

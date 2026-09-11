@@ -170,11 +170,20 @@ def _should_include_parent_ephemeral(context: AgentContext) -> bool:
 # paragraphs. And the benchmark's queries are paraphrases written to *avoid* the
 # claim's vocabulary, which is precisely the case a lexical channel cannot serve.
 #
-# What the benchmark does not contain is the case this was built for: a query
-# naming an identifier. `get_persistent_by_text("why does UndefinedColumn happen
-# with claimed_at")` returns five relevant rows today. So the code and the index
-# stay, and the switch stays off until there is a query set with identifier
-# queries in it to turn it on against.
+# Measured again 2026-09-11 on the population it was built for -- 23 queries that
+# reuse the claim's own identifiers -- and it gains nothing there either:
+# cosine 19/23, 22/23, 23/23 against hybrid 19/23, 22/23, 23/23.
+#
+# The prediction was wrong in an instructive way. The argument was that
+# embeddings compress identifiers into the same band as all technical prose, so
+# dense would be blind to them. Dense scores 0.83-0.90 MRR on those queries and
+# finds every target by window 10; there is no headroom for a second channel,
+# because nothing is being missed. A 492-row corpus of one-sentence claims is
+# simply an easy retrieval problem.
+#
+# The code and the index stay, off. The measurement is worth more than the sixty
+# lines: it says a lexical channel is not what is wrong with retrieval here.
+# What would reopen it is a corpus large enough for dense recall to fall.
 DENSE_WEIGHT = float(os.getenv("ARTERIES_DENSE_WEIGHT", "0.5"))
 LEXICAL_WEIGHT = float(os.getenv("ARTERIES_LEXICAL_WEIGHT", "0.5"))
 HYBRID_RETRIEVAL = os.getenv("ARTERIES_HYBRID", "off").lower() == "on"
