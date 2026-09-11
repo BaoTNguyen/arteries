@@ -314,6 +314,17 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None,
 # `art benchmark` as the corpus grows.
 MEMORY_SIMILARITY_FLOOR = float(os.getenv("ARTERIES_PACKET_FLOOR", "0.55"))
 MAX_PACKET_MEMORIES = 15
+
+# Bumped whenever a section is added, removed, or renamed. Finding 24: the Codex
+# compact prompt names the packet's sections, and a prompt describing a layout
+# that no longer exists tells the model to preserve headings it will never see.
+# `art setup` regenerates the prompt when this changes, so the two cannot drift
+# without something noticing.
+PACKET_SCHEMA_VERSION = 2
+
+SECTION_TITLES = ("Current Context", "Recent Conversation", "Ephemeral Memory",
+                  "Persistent Memory", "Scope Memory", "Suggested Approach",
+                  "Use Rules")
 NEUTRAL_SIMILARITY = 0.5
 
 # Tiers are fused by RANK, not by score, because their scores are not the same

@@ -421,9 +421,18 @@ def _reject_duplicates(conn, memories: list[dict], vectors: list,
     cosine backstop at DUPLICATE_SIM for near-identical strings the model let
     through.
 
-    Something has to bound growth -- the LLM pass is a decomposer, 53 ephemeral
-    rows produced 76 facts -- but the bound reads better as a judgement than as a
-    distance, because cosine cannot tell restatement from subsumption.
+    Something has to bound growth, but not for the reason this docstring used to
+    give. It called the LLM pass a decomposer at 53 ephemeral rows to 76 facts,
+    1.43 per row. Measured on the live store it is the opposite: 734 rows
+    claimed, 617 written, 0.84 per row -- and 0.62 when the audit ran. The pass
+    compresses; it does not expand. A docstring that says otherwise makes every
+    growth estimate built on it wrong by about a factor of two.
+
+    The bound still reads better as a judgement than as a distance, because
+    cosine cannot tell restatement from subsumption.
+
+    `art doctor` recomputes the ratio, so this number is checkable rather than
+    remembered.
     """
     kept, kept_vecs, rejected = [], [], []
     with conn.cursor() as cur:
