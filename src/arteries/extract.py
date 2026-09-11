@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass
 
 from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PARENT_AGENT_ID, PROJECT_ID
-from arteries import degrade, normalize, storage
+from arteries import activity, degrade, normalize, storage
 
 # Capillaries owns the domain taxonomy; prefer it so the two ends of the memory
 # channel can't drift. But extraction is a pure-memory op — it must not hard-fail
@@ -89,6 +89,10 @@ def extract_and_store(message: str, embedding: list[float] | None = None) -> int
     separately, and doing so would put N HTTP calls on the hook path. The caller
     embeds the message once and hands the vector down.
     """
+    # One upsert against a primary key, once per turn. This is the only writer
+    # of the clock everything else reads.
+    activity.touch(PROJECT_ID)
+
     extractions = extract_from_message(message)
     if EPHEMERAL_MODE == "discard":
         for ext in extractions:
