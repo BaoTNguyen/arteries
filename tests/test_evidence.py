@@ -108,3 +108,96 @@ class ObservationTests(unittest.TestCase):
 
         with patch.object(sys, "stdin", io.StringIO("{not json")):
             self.assertEqual(observe_tool.main(), 0)
+
+
+class WritePathEvidenceTests(unittest.TestCase):
+    """`_write_results` must run against a real batch.
+
+    The evidence change shipped a NameError to main: it read a `claimed` local
+    that only exists in `compile_once`, so every real pass died with
+    "write_error" while the suite stayed green -- the only test touching this
+    function patched `_reject_duplicates` to raise first, and nothing ran the
+    whole thing. This runs the whole thing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import pytest
+
+        pytest.importorskip("psycopg2")
+
+    def setUp(self):
+        import psycopg2
+
+        from arteries.config import DB_CONFIG
+
+        self.project = "evidence-write"
+        self.conn = psycopg2.connect(**DB_CONFIG)
+        self._clean()
+
+    def tearDown(self):
+        self._clean()
+        self.conn.close()
+
+    def _clean(self):
+        with self.conn.cursor() as cur:
+            for table in ("ephemeral", "persistent"):
+                cur.execute(f"DELETE FROM arteries.{table} WHERE project_id = %s",
+                            (self.project,))
+        self.conn.commit()
+
+    def _ephemeral(self, fact, source):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO arteries.ephemeral "
+                "(fact, domains, project_id, agent_process_id, source) "
+                "VALUES (%s, '[]'::jsonb, %s, 'test', %s) RETURNING id",
+                (fact, self.project, source))
+            row_id = cur.fetchone()[0]
+        self.conn.commit()
+        return str(row_id)
+
+    def _write(self, claimed_ids, fact="a compiled claim about compile.py"):
+        from unittest.mock import patch
+
+        from arteries import compile as compile_mod
+        from arteries.config import EMBED_DIM
+
+        result = {"new_memories": [{"fact": fact, "kind": "fact",
+                                    "confidence": 0.9, "entities": []}]}
+        with patch("arteries.embed.embed_texts_sync",
+                   lambda texts: [[0.1] * EMBED_DIM for _ in texts]):
+            return compile_mod._write_results(self.conn, result, claimed_ids,
+                                              self.project)
+
+    def _stored_evidence(self):
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT evidence FROM arteries.persistent "
+                        "WHERE project_id = %s", (self.project,))
+            return [row[0] for row in cur.fetchall()]
+
+    def test_a_real_batch_writes_without_raising(self):
+        written = self._write([self._ephemeral("the user said a thing", "user")])
+        self.assertEqual(written["new"], 1)
+
+    def test_a_user_turn_carries_user_evidence(self):
+        self._write([self._ephemeral("the user said a thing", "user")])
+        self.assertEqual(self._stored_evidence(), ["user"])
+
+    def test_an_assistant_turn_is_only_stated(self):
+        self._write([self._ephemeral("the assistant concluded a thing", "assistant")])
+        self.assertEqual(self._stored_evidence(), ["stated"])
+
+    def test_a_mixed_batch_takes_the_strongest(self):
+        """A batch is one turn's claims and they share a source; when they do
+        not, the strongest is the honest label for what produced them."""
+        ids = [self._ephemeral("said by the user", "user"),
+               self._ephemeral("said by the assistant", "assistant")]
+        self._write(ids)
+        self.assertEqual(self._stored_evidence(), ["user"])
+
+    def test_an_empty_batch_still_writes(self):
+        """`art ingest` calls this with no claimed ids at all."""
+        written = self._write([])
+        self.assertEqual(written["new"], 1)
+        self.assertEqual(self._stored_evidence(), ["stated"])
