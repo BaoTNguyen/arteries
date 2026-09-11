@@ -15,7 +15,7 @@ from arteries.memory_types import (
     Insight,
     MemoryFrame,
     PersistentMemory,
-    ScopeMemory,
+    EvergreenMemory,
 )
 
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
@@ -96,7 +96,7 @@ def _build_frame(message: str, embedding: list[float] | None = None) -> MemoryFr
         # project_id per row, so this costs no extra query. capillaries reads
         # recurring_domains and user_intent for two of its four ranking boosts;
         # both were dead while this was empty.
-        scope=ScopeMemory(
+        scope=EvergreenMemory(
             user_intent=[
                 r["fact"] for r in persistents
                 if "intent" in (r.get("domains") or [])

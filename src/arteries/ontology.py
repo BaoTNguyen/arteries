@@ -184,7 +184,9 @@ def load(path: str | Path, source: str | None = None, db_config: dict | None = N
 # -- resolve (stdlib only) -----------------------------------------------------
 
 # key -> (uri, kind, label). Populated once per process.
-_cache: dict[str, tuple[str, str, str]] | None = None
+# Keyed by scope, because two scopes may legitimately see different vocabularies
+# and a single cache would serve whichever asked first to both.
+_cache: dict[str, dict[str, tuple[str, str, str]]] = {}
 
 # When two terms normalize to the same key -- PROV-O has both the class
 # prov:Entity and the property prov:entity -- prefer this order. A name being
@@ -192,15 +194,26 @@ _cache: dict[str, tuple[str, str, str]] | None = None
 _KIND_PRIORITY = {"class": 0, "individual": 1, "property": 2}
 
 
-def _lookup(db_config: dict | None = None) -> dict[str, tuple[str, str, str]]:
-    """match key -> (uri, kind, label), loaded once per process.
+def _lookup(db_config: dict | None = None,
+            scope_id: str | None = None) -> dict[str, tuple[str, str, str]]:
+    """match key -> (uri, kind, label), loaded once per process and scope.
 
     A compile pass grounds every extracted name against this; re-querying per
     name would be a round trip each. The whole T-Box is a few thousand rows.
+
+    Scoped, because `ontology_terms` is one flat table and reading all of it
+    means a vocabulary loaded for one domain grounds names in every other. Load
+    a finance ontology and "position" inside a coding scope resolves to a
+    securities holding -- a false identity, produced silently, by the layer whose
+    only job is deciding when two names mean the same thing.
+
+    A scope with no bindings reads everything, so this is inert until someone
+    binds one.
     """
     global _cache
-    if _cache is not None:
-        return _cache
+    cache_key = scope_id or ""
+    if cache_key in _cache:
+        return _cache[cache_key]
     # Any failure here -- no database, no schema, no ontology_terms table --
     # is the same situation as no ontology loaded: everything grounds unmatched
     # and nothing raises. Grounding is an enhancement, never a gate, and it runs
@@ -209,7 +222,18 @@ def _lookup(db_config: dict | None = None) -> dict[str, tuple[str, str, str]]:
     try:
         conn = psycopg2.connect(**(db_config or DB_CONFIG))
         with conn.cursor() as cur:
-            cur.execute("SELECT uri, label, normalized, aliases, kind FROM arteries.ontology_terms")
+            sources = []
+            if scope_id:
+                cur.execute("SELECT source FROM arteries.ontology_bindings "
+                            "WHERE scope_id = %s", (scope_id,))
+                sources = [r[0] for r in cur.fetchall()]
+            if sources:
+                cur.execute("SELECT uri, label, normalized, aliases, kind "
+                            "FROM arteries.ontology_terms WHERE source = ANY(%s)",
+                            (sources,))
+            else:
+                cur.execute("SELECT uri, label, normalized, aliases, kind "
+                            "FROM arteries.ontology_terms")
             table: dict[str, tuple[str, str, str]] = {}
             for uri, label, normalized, aliases, kind in cur.fetchall():
                 for key in (normalized, *(aliases or [])):
@@ -219,21 +243,43 @@ def _lookup(db_config: dict | None = None) -> dict[str, tuple[str, str, str]]:
                     if incumbent and _KIND_PRIORITY.get(incumbent[1], 9) <= _KIND_PRIORITY.get(kind, 9):
                         continue
                     table[key] = (uri, kind, label)
-            _cache = table
+            _cache[cache_key] = table
     except Exception as exc:
         from arteries import degrade
         degrade.note(exc, "ontology lookup")
-        _cache = {}
+        _cache[cache_key] = {}
     finally:
         if conn is not None:
             conn.close()
-    return _cache
+    return _cache[cache_key]
+
+
+# Layer 0: the relations arteries asserts that a standard vocabulary already has
+# a predicate for. `ontology_valid` on an edge means "this relation is grounded",
+# and it was false on all 3219 edges because nothing ever set it (finding 16).
+#
+# Deliberately partial. `supports`, `contradicts` and `depends_on` have no
+# faithful standard predicate -- SKOS has `skos:related`, which asserts far less
+# than "supports" and would be a false grounding rather than a missing one. They
+# stay unbound and unvalidated, which is exactly what the flag is for: it
+# distinguishes a relation someone standardised from one this system invented.
+PREDICATE_BINDINGS = {
+    "derived_from": "http://www.w3.org/ns/prov#wasDerivedFrom",
+    "supersedes": "http://www.w3.org/ns/prov#wasRevisionOf",
+    "is_a": "http://www.w3.org/2004/02/skos/core#broader",
+    "is_part_of": "http://purl.org/dc/terms/isPartOf",
+    "mentions": "http://www.w3.org/ns/prov#used",
+}
+
+
+def predicate_uri(rel: str) -> str | None:
+    """The standard predicate for one of arteries' relations, if there is one."""
+    return PREDICATE_BINDINGS.get((rel or "").strip().lower())
 
 
 def reset_cache() -> None:
     """Drop the in-process T-Box cache. For tests and for after a reload."""
-    global _cache
-    _cache = None
+    _cache.clear()
 
 
 def resolve(
@@ -241,6 +287,7 @@ def resolve(
     cutoff: float = DEFAULT_CUTOFF,
     kind: str | None = None,
     db_config: dict | None = None,
+    scope_id: str | None = None,
 ) -> Match:
     """Ground one extracted name against the loaded ontology.
 
@@ -253,7 +300,7 @@ def resolve(
     if not raw:
         return Match(name="", uri=None, score=0.0, valid=False)
 
-    table = _lookup(db_config)
+    table = _lookup(db_config, scope_id)
     if kind:
         table = {k: v for k, v in table.items() if v[1] == kind}
     if not table:
