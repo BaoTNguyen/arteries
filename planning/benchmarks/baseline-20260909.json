@@ -1,0 +1,242 @@
+[
+ {
+  "id": "004a441d-43d1-4515-96ec-56db4294ec5d",
+  "fact": "Finding 26 (planning/audit_findings.md:322) documents that route.choose only triggers expansion when seeds are weak, and that the measured 0.78 similarity ceiling prevents expansion from contributing rows to retrieval packets.",
+  "query": "Why does weak seeding block row expansion?",
+  "overlap": 0.4
+ },
+ {
+  "id": "019b7f03-fac8-4102-98f0-2ee7784f9167",
+  "fact": "User is questioning the readiness of `frame_compat` for deletion, specifically requesting evidence of a 'doctor contradiction' and a plan for an actual ontology structure.",
+  "query": "Where is the ontology plan?",
+  "overlap": 0.667
+ },
+ {
+  "id": "01a64af9-357b-437e-8aba-21393f3c55fa",
+  "fact": "User requires a stricter filter for ephemeral memory promotion to handle concurrent sessions, aiming to remove more noise than the current <5 word filter while retaining useful messages, potentially using Codex/Claude Code methods.",
+  "query": "How do we filter noise better?",
+  "overlap": 0.667
+ },
+ {
+  "id": "020c62c1-dd97-4592-acd8-9bfc3abae5a1",
+  "fact": "Evaluation strategy under consideration: combining keyword filtering (method 2) with LLM-as-a-judge (methods 1 and 3) for retrieval quality assessment.",
+  "query": "Are we combining filters with judges?",
+  "overlap": 0.5
+ },
+ {
+  "id": "0273f1e3-c555-4952-8fdb-ecd711cce086",
+  "fact": "The logic for determining specific subtask order and amount within a feature is an open question.",
+  "query": "How do we order subtasks?",
+  "overlap": 0.5
+ },
+ {
+  "id": "02917564-7403-4d3d-b939-a3803199fe27",
+  "fact": "User proposes mapping the exoharness architecture to their stack: Plexus as the central repo/exoharness equivalent (storing logs, secrets, planning episodes via graph), and Marrow as the active self-improvement engine (implementing RL, analyzing logs for improvements).",
+  "query": "How does their stack map to ours?",
+  "overlap": 0.5
+ },
+ {
+  "id": "0325eff0-e866-4a74-a92c-26d4df21a714",
+  "fact": "The false contradiction defect where a plan was ruled to supersede its own completed outcome originated from the 27B model, indicating that the quality bar for extraction tasks is not high enough to strictly require the 27B model.",
+  "query": "Is the 27B model overkill?",
+  "overlap": 0.5
+ },
+ {
+  "id": "03395ff2-2f39-44ad-8f7a-12b23e3dd901",
+  "fact": "User is analyzing the DDN_VSS2.0 repository to understand how videos are processed for the VSS side, ignoring DDN specifics for now.",
+  "query": "How does VSS process video?",
+  "overlap": 0.0
+ },
+ {
+  "id": "0366907a-877a-438a-9a88-f5780f50ebad",
+  "fact": "User intends to create an image pricing and packaging one-pager.",
+  "query": "When is the pricing sheet done?",
+  "overlap": 0.25
+ },
+ {
+  "id": "03abbd0d-736e-47d6-b27d-ded46aacad02",
+  "fact": "User intends to modify ML_PROCESS_GUIDE and prepare a PR to the dev branch.",
+  "query": "Is the guide updated yet?",
+  "overlap": 0.0
+ },
+ {
+  "id": "03b7406f-99e0-44a6-8717-da7f6b6fefa8",
+  "fact": "User believed agent workflows and chat support were using NAT.",
+  "query": "Did we think agents used NAT?",
+  "overlap": 0.0
+ },
+ {
+  "id": "053c0f36-7bef-416b-a080-e9001524b9b5",
+  "fact": "Planning documents `planning/ingestion_redesign.md` (~1,900 lines) and `planning/audit_findings.md` (finding 26) are in progress on dev; `EvergreenMemory` rename in arteries and shim fix in capillaries are the only code changes.",
+  "query": "What code changed besides the rename?",
+  "overlap": 0.4
+ },
+ {
+  "id": "057edc82-c76d-44b4-ba66-17b4590d746b",
+  "fact": "The `degrade.py` module classifies environment failures from code defects and should be used by new modules instead of bare exception handlers to prevent shipping defects behind `except Exception`.",
+  "query": "Why use degrade.py?",
+  "overlap": 1.0
+ },
+ {
+  "id": "06297d13-0871-4490-b422-81be00e865d0",
+  "fact": "Exploring the use of a smaller local model for Capillaries to reduce errors.",
+  "query": "Can a smaller model help?",
+  "overlap": 0.667
+ },
+ {
+  "id": "06baea62-c5be-4f88-82aa-b37e24e99649",
+  "fact": "The user requires explicit details on concurrency types for the capillaries and arteries stages, and whether upstream concurrency (heart + plexus) is needed.",
+  "query": "Do we need upstream concurrency?",
+  "overlap": 0.667
+ },
+ {
+  "id": "06cab73f-6227-4151-a943-9b8dd11086c0",
+  "fact": "PR #5 merged to Capillaries main (commit 97ba404) to unify retrieval surfaces and tighten prompt eligibility.",
+  "query": "What did PR #5 change?",
+  "overlap": 0.0
+ },
+ {
+  "id": "073dc7fa-0af1-41f4-ad72-401243f653e2",
+  "fact": "Sandboxes must provide security isolation to prevent subtasks from exposing the system to hacking or malfunction, and must shut down automatically if such risks are detected.",
+  "query": "How do sandboxes ensure safety?",
+  "overlap": 0.333
+ },
+ {
+  "id": "07e0d700-1835-4da5-b6d8-c91fc90eb7c0",
+  "fact": "User decided to implement a quick fix first, then investigate remaining sandbox gaps.",
+  "query": "Are we fixing gaps later?",
+  "overlap": 0.0
+ },
+ {
+  "id": "0847ad84-caf3-4d38-9776-8fdd77b52038",
+  "fact": "The ephemeral memory regex gate was left unchanged after audit revealed that prior justification for tightening was based on artifacts from a capture bug; the bug fix in capture_response increased assistant content volume by 535x, making the existing _ARTIFACT regex load-bearing for filtering markdown table rules.",
+  "query": "Why keep the old regex?",
+  "overlap": 0.5
+ },
+ {
+  "id": "087c4c66-156d-4901-9fe9-72519732c1e7",
+  "fact": "Evergreen is restructured as the first tier with its own store and traversal, rather than a layer over persistent, making the graph question and tier question one unified structural change.",
+  "query": "Is Evergreen a tier now?",
+  "overlap": 1.0
+ },
+ {
+  "id": "08bf338d-cd90-43b9-97c4-8fa11a8c6d54",
+  "fact": "Reranker batch size is controlled by RERANKER_BATCH_SIZE in api.py (default 32), not Reranker.__init__. At MAX_DOC_CHARS=4000, batch 32 uses 4.64 GiB activations; batch 8 uses ~1.11 GB.",
+  "query": "How much VRAM does the batch use?",
+  "overlap": 0.25
+ },
+ {
+  "id": "08c3aa3c-f3a9-4233-88d9-ec9475cc7fa1",
+  "fact": "The user is redesigning the Arteries ingestion pipeline to process messages from multiple sessions/projects, deduplicate facts, normalize them to single sentences, and promote them through ephemeral to persistent (PostgreSQL/pgvector) and then to an evergreen graph database (Gephi for visualization).",
+  "query": "What is the new pipeline flow?",
+  "overlap": 0.333
+ },
+ {
+  "id": "08ff2ba1-3bcf-41f7-ac25-2cb81c339847",
+  "fact": "There is an 'arteries reward/none type error' occurring in example runs, potentially specific to worker episodes.",
+  "query": "Why is there a type error?",
+  "overlap": 1.0
+ },
+ {
+  "id": "09790954-b924-4c65-a6c3-65a5419fd377",
+  "fact": "User requires a consolidated markdown file listing all models and datasets in the dev branch, categorized by pretraining status and inclusion in the Ridgetown Acres case study, derived from merging previous markdown files and removing unnecessary details for Google Docs conversion.",
+  "query": "Where is the model list?",
+  "overlap": 0.0
+ },
+ {
+  "id": "09e7271a-484f-4dd7-a251-21d269328b62",
+  "fact": "User intends to diagnose and fix art ingest issues.",
+  "query": "Are ingest issues fixed?",
+  "overlap": 0.333
+ },
+ {
+  "id": "09eb7df0-029d-4ac4-b851-a344d896c49f",
+  "fact": "Test suite currently points at the live database; migration rehearsal requires a separate test database (DB_NAME=arteries_test) to avoid polluting production data.",
+  "query": "Do tests use a separate DB?",
+  "overlap": 0.5
+ },
+ {
+  "id": "0bd07a73-6148-4de8-866c-35922366e8c6",
+  "fact": "Ephemeral memory retention is set to 48 hours, with refresh based on access count.",
+  "query": "How long does memory last?",
+  "overlap": 0.25
+ },
+ {
+  "id": "0c069476-b1e9-4995-bb90-bc37d8d50d70",
+  "fact": "User questions whether merged episodes should still be scored since work was done, and asks for definition of worker episodes.",
+  "query": "Should merged episodes be scored?",
+  "overlap": 1.0
+ },
+ {
+  "id": "0c1393c3-e5cc-44bc-804c-8ebbf99ee295",
+  "fact": "User requires explanation of Heart's logic for planning path A vs B, including all decisions and factors.",
+  "query": "Why does Heart pick path A?",
+  "overlap": 0.5
+ },
+ {
+  "id": "0c5890da-213c-4e56-a1b1-d39dd2a9ddfb",
+  "fact": "Background command 'Rerun the pgvector trial after both fixes' (task bcu9npcpg) completed with exit code 0.",
+  "query": "Did the trial succeed?",
+  "overlap": 0.5
+ },
+ {
+  "id": "0cd87949-5953-4d26-8ec0-8f489b6b4178",
+  "fact": "Arteries hooks include 'hook-compact-packet.sh' which triggers on 'claude-precompact' and 'claude-postcompact' events. It injects context including project name, agent, CLI, capabilities, and recent conversation history.",
+  "query": "What context do hooks inject?",
+  "overlap": 0.5
+ },
+ {
+  "id": "0e2c556d-4091-4b10-8bc9-c7bde302b047",
+  "fact": "Capillaries hooks should drop the RERANKER_DEVICE line to restore intended behavior: pick the emptiest GPU card, falling back to CPU rather than crashing.",
+  "query": "Why drop the device line?",
+  "overlap": 0.667
+ },
+ {
+  "id": "0fdcd36b-7b26-4ed9-9187-580b38627e1f",
+  "fact": "Sequential Plexus feature plans can contain DAGs at the Heart level for each step.",
+  "query": "Can plans contain DAGs?",
+  "overlap": 1.0
+ },
+ {
+  "id": "126a9ca7-af3f-4435-ad01-6fc9df8c30a7",
+  "fact": "The 'rework' and 'dev-wip' branches and their associated worktree have been deleted.",
+  "query": "Are the old branches gone?",
+  "overlap": 0.5
+ },
+ {
+  "id": "12934157-95a0-4392-9826-550c3b8e32a7",
+  "fact": "Arteries requires no code changes to switch models; configuration is handled via environment variables sourced from $PROJECT_ROOT/.arteries/env by hook-observe.sh.",
+  "query": "How do we switch models?",
+  "overlap": 1.0
+ },
+ {
+  "id": "1422bb33-6bcd-46f8-b72a-6f27975ea4d5",
+  "fact": "Retrieval diagnosis: top hit per query runs p25 0.50, p50 0.55, p50 0.66, indicating a floor caused by single dense retrieval strategy failing on exact identifiers.",
+  "query": "Why is retrieval failing?",
+  "overlap": 1.0
+ },
+ {
+  "id": "1488ce8e-9fc0-4923-b6b5-ed4d7b6f0794",
+  "fact": "UMAP projection of 1024-dim pgvector embeddings to 2D is proposed as a scalable alternative to node-link diagrams for visualizing semantic density and drift in Arteries memory, capable of handling 80k points.",
+  "query": "Can UMAP visualize memory?",
+  "overlap": 0.667
+ },
+ {
+  "id": "15217c1b-2198-4777-bf3a-ff293f1ce4a9",
+  "fact": "Authorization (AuthZ) is mocked for the current testing phase.",
+  "query": "Is AuthZ mocked?",
+  "overlap": 1.0
+ },
+ {
+  "id": "15b5cb20-02d1-45b2-a1df-00190c2ddfe9",
+  "fact": "llama-server switched from Qwen3.6-27B to Qwen3.6-35B-A3B (MoE model).",
+  "query": "Which model is running now?",
+  "overlap": 0.333
+ },
+ {
+  "id": "16ccf57e-8232-4513-bf7d-66246d60d685",
+  "fact": "The Arteries rework goal is decomposed into seven phases, each containing one runnable check.",
+  "query": "How many phases are there?",
+  "overlap": 0.333
+ }
+]

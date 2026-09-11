@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from collections.abc import Sequence
 
 from arteries import benchmark, doctor, docs, graph, ingest, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
@@ -11,9 +12,9 @@ from arteries.eval import evaluate
 
 
 COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe",
-            "activate", "ingest", "rewards", "benchmark", "eval", "inspect", "runs",
+            "activate", "ingest", "rewards", "benchmark", "eval", "inspect", "runs", "journal",
             "doctor", "packet", "trace", "decisions", "remember", "spawn", "search",
-            "compile")
+            "compile", "migrate", "evergreen", "evict")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -70,6 +71,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _activate(ns.args)
     if ns.command == "inspect":
         return inspect.main(ns.args)
+    if ns.command == "journal":
+        from arteries import journal
+        sub = ns.args[0] if ns.args else "drain"
+        if sub == "drain":
+            print(json.dumps(journal.drain(), indent=2, sort_keys=True))
+            return 0
+        if sub == "inbox" and len(ns.args) > 1:
+            # The seam heart mounts. Asking for the path beats reimplementing it:
+            # a sandbox that writes somewhere the drain does not read is a silent
+            # loss of everything that run remembered.
+            box = journal.inbox(ns.args[1])
+            box.mkdir(parents=True, exist_ok=True)
+            print(box)
+            return 0
+        print("usage: art journal drain | art journal inbox <run_id>")
+        return 2
     if ns.command == "runs":
         return runs.main(ns.args)
     if ns.command == "doctor":
@@ -91,6 +108,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _spawn(list(ns.args))
     if ns.command == "search":
         return _search(ns.args)
+    if ns.command == "evict":
+        from arteries.evict import main as evict_main
+        return evict_main(ns.args)
+
+    if ns.command == "evergreen":
+        from arteries.evergreen import main as evergreen_main
+        return evergreen_main(ns.args)
+
+    if ns.command == "migrate":
+        from arteries.migrate import main as migrate_main
+        return migrate_main(ns.args)
+
     if ns.command == "compile":
         return _compile(ns.args)
 

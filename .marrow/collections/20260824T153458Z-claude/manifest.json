@@ -1,0 +1,17 @@
+{
+  "collector": "cli-session",
+  "agent": "claude",
+  "task_id": null,
+  "command": [
+    "claude",
+    "--resume",
+    "a2be0826-975e-439d-94e8-27128a088dd7"
+  ],
+  "cwd": "/home/bao-tn/Coding/Projects/arteries",
+  "mode": "pty",
+  "started_at": "2026-08-24T15:34:58.705096+00:00",
+  "finished_at": "2026-08-25T18:57:14.929897+00:00",
+  "duration_seconds": 98536.225,
+  "returncode": 0,
+  "terminal": "terminal.typescript"
+}
