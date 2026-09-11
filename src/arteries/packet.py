@@ -91,8 +91,48 @@ def main(argv: list[str] | None = None) -> int:
 GATE_COVERAGE_ABSTAIN = float(os.getenv("ARTERIES_GATE_COVERAGE", "0.92"))
 
 
+# The hook path reads cache; the background compile pass fills it. Set
+# ARTERIES_CORPUS_INLINE=on to fetch inline, which is what the tests and `art
+# packet --format provenance-json` want and what a hook never wants.
+CORPUS_INLINE = os.getenv("ARTERIES_CORPUS_INLINE", "off").lower() == "on"
+CORPUS_TIMEOUT = float(os.getenv("ARTERIES_CORPUS_TIMEOUT", "60"))
+# A suggestion older than this describes a question nobody is asking any more.
+CORPUS_CACHE_SECONDS = int(os.getenv("ARTERIES_CORPUS_CACHE_SECONDS", "900"))
+
+
+def _suggestion_key(message: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(_norm(message).encode()).hexdigest()[:32]
+
+
+def _cached_suggestion(message: str) -> dict[str, Any] | None:
+    """The last suggestion computed for this question, if it is still fresh."""
+    try:
+        return storage.get_corpus_suggestion(
+            PROJECT_ID, _suggestion_key(message), CORPUS_CACHE_SECONDS)
+    except Exception as exc:
+        degrade.note(exc, "suggestion cache")
+        return None
+
+
+def warm_suggestion(message: str, embedding: list[float] | None = None) -> dict[str, Any]:
+    """Fetch a suggestion and cache it. Called from the background compile pass.
+
+    The half of finding 20's fix that does the network call, in the process that
+    can afford one.
+    """
+    result = _corpus_suggestion(message, embedding, None, inline=True)
+    try:
+        storage.put_corpus_suggestion(PROJECT_ID, _suggestion_key(message), result)
+    except Exception as exc:
+        degrade.note(exc, "suggestion cache write")
+    return result
+
+
 def _corpus_suggestion(message: str, embedding: list[float] | None,
-                       provenance: list[dict[str, Any]] | None) -> dict[str, Any]:
+                       provenance: list[dict[str, Any]] | None,
+                       inline: bool = False) -> dict[str, Any]:
     """Consult capillaries, if the gate says this turn needs it.
 
     The gate lives here because arteries owns it: capillaries "does not own a
@@ -109,6 +149,22 @@ def _corpus_suggestion(message: str, embedding: list[float] | None,
             PROJECT_ID, AGENT_PROCESS_ID, embedding) if embedding else 0.0
     except Exception:
         coverage = 0.0          # unknown coverage reads as none, and searches
+
+    # Finding 20: this ran `urlopen(req, timeout=60)` inside packet assembly, on
+    # a hook with a 9s budget. A slow corpus did not degrade the packet, it
+    # stalled the turn -- and the compaction path, where a packet is built with
+    # no user waiting on it, is the same code.
+    #
+    # The fix is not a shorter timeout, it is not being on this path at all. The
+    # suggestion is read from cache here; the fetch that fills the cache runs in
+    # the detached compile process, which already exists and already has no one
+    # waiting on it. A cold cache means no Suggested Approach section this turn
+    # and one next turn, which is what the "+N remembered" notice already does.
+    if not (inline or CORPUS_INLINE):
+        cached = _cached_suggestion(message)
+        if cached is not None:
+            return cached
+        return {"status": "not_cached", "coverage": round(coverage, 3)}
 
     if coverage >= GATE_COVERAGE_ABSTAIN:
         actionlog.log_decision(
@@ -138,7 +194,7 @@ def _corpus_suggestion(message: str, embedding: list[float] | None,
         url = os.getenv("CAPILLARIES_URL", "http://127.0.0.1:8000") + "/agent/route"
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=CORPUS_TIMEOUT) as resp:
             found = json.load(resp)
     except Exception as exc:
         return {"status": "unavailable", "reason": str(exc)[:160]}

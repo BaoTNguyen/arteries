@@ -621,3 +621,49 @@ class PacketChainingTests(unittest.TestCase):
                         packet.TIER_WEIGHT["persistent"])
         self.assertGreater(packet.TIER_WEIGHT["evergreen"],
                            packet.TIER_WEIGHT["related"])
+
+
+class CorpusPathTests(unittest.TestCase):
+    """Finding 20: `urlopen(req, timeout=60)` ran inside packet assembly, on a
+    hook with a 9s budget. A slow corpus did not degrade the packet, it stalled
+    the turn."""
+
+    def test_the_hook_path_never_opens_a_socket(self):
+        with patch.object(packet, "CORPUS_INLINE", False), \
+             patch.object(packet, "_cached_suggestion", return_value=None), \
+             patch.object(packet.storage, "max_ephemeral_similarity", return_value=0.0), \
+             patch("urllib.request.urlopen",
+                   side_effect=AssertionError("network call on the hook path")):
+            result = packet._corpus_suggestion("a question", None, None)
+        self.assertEqual(result["status"], "not_cached")
+
+    def test_a_cold_cache_costs_a_section_not_a_turn(self):
+        """No Suggested Approach this turn, one next turn -- the same shape as
+        the "+N remembered" notice arriving a turn late."""
+        with patch.object(packet, "CORPUS_INLINE", False), \
+             patch.object(packet, "_cached_suggestion", return_value=None), \
+             patch.object(packet.storage, "max_ephemeral_similarity", return_value=0.0):
+            self.assertNotIn("text", packet._corpus_suggestion("a question", None, None))
+
+    def test_a_warm_cache_is_served(self):
+        cached = {"status": "ok", "text": "try the migration runner", "mode": "prompt"}
+        with patch.object(packet, "CORPUS_INLINE", False), \
+             patch.object(packet, "_cached_suggestion", return_value=cached), \
+             patch.object(packet.storage, "max_ephemeral_similarity", return_value=0.0):
+            self.assertEqual(packet._corpus_suggestion("a question", None, None), cached)
+
+    def test_inline_is_opt_in_and_still_works(self):
+        """The background warmer and the tests want it; a hook never does."""
+        import inspect
+
+        self.assertIn("inline", inspect.signature(packet._corpus_suggestion).parameters)
+        self.assertFalse(packet.CORPUS_INLINE)
+
+    def test_the_same_question_hashes_to_one_cache_key(self):
+        self.assertEqual(packet._suggestion_key("Why is the build failing?"),
+                         packet._suggestion_key("why is the build   failing"))
+
+    def test_a_cache_failure_is_not_a_turn_failure(self):
+        with patch.object(packet.storage, "get_corpus_suggestion",
+                          side_effect=RuntimeError("cache table missing")):
+            self.assertIsNone(packet._cached_suggestion("a question"))
