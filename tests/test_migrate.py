@@ -125,3 +125,61 @@ class BaselineScopeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as caught:
             migrate.baseline("999_not_a_migration")
         self.assertIn("unknown migration", str(caught.exception))
+
+
+class PartialApplicationTests(unittest.TestCase):
+    """A refusal used to report only itself. A run that applied 015 and refused
+    016 printed "refused" and nothing else, so the operator had no way to know
+    half the work had landed -- silent partial success, in the runner built to
+    prevent exactly that."""
+
+    def test_a_refusal_carries_what_it_applied_first(self):
+        refused = migrate.Refused("no", applied=["015_x"])
+        self.assertEqual(refused.applied, ["015_x"])
+
+    def test_the_cli_prints_both(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(migrate, "apply",
+                          side_effect=migrate.Refused("destructive", ["015_x"])), \
+             redirect_stdout(out), redirect_stderr(err):
+            code = migrate.main(["apply"])
+        self.assertEqual(code, 1)
+        self.assertIn("applied 1: 015_x", out.getvalue())
+        self.assertIn("refused: destructive", err.getvalue())
+
+    def test_a_refusal_with_nothing_applied_says_only_that(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(migrate, "apply", side_effect=migrate.Refused("edited")), \
+             redirect_stdout(out), redirect_stderr(err):
+            migrate.main(["apply"])
+        self.assertNotIn("applied", out.getvalue())
+        self.assertIn("refused: edited", err.getvalue())
+
+
+class ContractMigrationTests(unittest.TestCase):
+    """expand / migrate / contract, with the contract half staged and refused."""
+
+    def test_the_drop_is_marked_destructive(self):
+        by_version = dict(migrate.available())
+        drop = by_version.get("016_drop_persistent_scope")
+        self.assertIsNotNone(drop, "the contract migration is missing")
+        self.assertIn("destructive", migrate._directives(drop))
+
+    def test_the_backfill_is_not(self):
+        by_version = dict(migrate.available())
+        self.assertNotIn("destructive",
+                         migrate._directives(by_version["015_persistent_origin"]))
+
+    def test_the_drop_names_its_precondition(self):
+        """d40ff8e reverted this exact change because it ran before main could
+        read the new location. The file has to say so."""
+        by_version = dict(migrate.available())
+        self.assertIn("main", by_version["016_drop_persistent_scope"])
