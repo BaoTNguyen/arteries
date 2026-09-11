@@ -402,6 +402,20 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding
     ON arteries.chunks USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
+-- Days this project was actually worked on. Retention counts these rather than
+-- calendar days, so time away does not age out a working set. See migration 013.
+CREATE TABLE IF NOT EXISTS arteries.project_activity (
+    project_id  TEXT NOT NULL,
+    day         DATE NOT NULL,
+    PRIMARY KEY (project_id, day)
+);
+
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS last_activity_day INT;
+
+CREATE INDEX IF NOT EXISTS idx_persistent_activity
+    ON arteries.persistent (project_id, last_activity_day)
+    WHERE valid_until IS NULL;
+
 -- Which memories went into which packet, so a packet can be incremental rather
 -- than re-sending the same claims every turn. See migration 012.
 CREATE TABLE IF NOT EXISTS arteries.packets (

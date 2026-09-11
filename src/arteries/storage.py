@@ -524,9 +524,19 @@ def touch_persistent(ids: list[str]) -> None:
         return
     try:
         with _conn() as conn, conn.cursor() as cur:
+            # The activity day comes along, because "unread for 30 days" needs
+            # to know when the row was last read, and this is the only place
+            # that knows. Counted in one statement so a surfaced row cannot get
+            # one half of the update and not the other.
             cur.execute(
-                "UPDATE arteries.persistent SET access_count = access_count + 1 "
-                "WHERE id = ANY(%s::uuid[])",
+                """
+                UPDATE arteries.persistent p
+                SET access_count = p.access_count + 1,
+                    last_activity_day = (
+                        SELECT count(*) FROM arteries.project_activity a
+                        WHERE a.project_id = p.project_id)
+                WHERE p.id = ANY(%s::uuid[])
+                """,
                 (ids,),
             )
             conn.commit()
