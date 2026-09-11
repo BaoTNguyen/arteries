@@ -1,0 +1,140 @@
+[
+ {
+  "id": "004a441d-43d1-4515-96ec-56db4294ec5d",
+  "fact": "Finding 26 (planning/audit_findings.md:322) documents that route.choose only triggers expansion when seeds are weak, and that the measured 0.78 similarity ceiling prevents expansion from contributing rows to retrieval packets.",
+  "query": "why does route.choose skip expansion when seeds are weak?",
+  "overlap": 0.714
+ },
+ {
+  "id": "019b7f03-fac8-4102-98f0-2ee7784f9167",
+  "fact": "User is questioning the readiness of `frame_compat` for deletion, specifically requesting evidence of a 'doctor contradiction' and a plan for an actual ontology structure.",
+  "query": "why is frame_compat deletion risky without a doctor contradiction?",
+  "overlap": 0.667
+ },
+ {
+  "id": "01a64af9-357b-437e-8aba-21393f3c55fa",
+  "fact": "User requires a stricter filter for ephemeral memory promotion to handle concurrent sessions, aiming to remove more noise than the current <5 word filter while retaining useful messages, potentially using Codex/Claude Code methods.",
+  "query": "why is the <5 word filter insufficient for concurrent sessions?",
+  "overlap": 0.8
+ },
+ {
+  "id": "020c62c1-dd97-4592-acd8-9bfc3abae5a1",
+  "fact": "Evaluation strategy under consideration: combining keyword filtering (method 2) with LLM-as-a-judge (methods 1 and 3) for retrieval quality assessment.",
+  "query": "why combine keyword filtering with LLM-as-a-judge for retrieval?",
+  "overlap": 0.833
+ },
+ {
+  "id": "02917564-7403-4d3d-b939-a3803199fe27",
+  "fact": "User proposes mapping the exoharness architecture to their stack: Plexus as the central repo/exoharness equivalent (storing logs, secrets, planning episodes via graph), and Marrow as the active self-improvement engine (implementing RL, analyzing logs for improvements).",
+  "query": "how does Plexus map to exoharness in my stack?",
+  "overlap": 0.75
+ },
+ {
+  "id": "03395ff2-2f39-44ad-8f7a-12b23e3dd901",
+  "fact": "User is analyzing the DDN_VSS2.0 repository to understand how videos are processed for the VSS side, ignoring DDN specifics for now.",
+  "query": "how does DDN_VSS2.0 process videos for VSS?",
+  "overlap": 0.5
+ },
+ {
+  "id": "03abbd0d-736e-47d6-b27d-ded46aacad02",
+  "fact": "User intends to modify ML_PROCESS_GUIDE and prepare a PR to the dev branch.",
+  "query": "what changes are needed in ML_PROCESS_GUIDE for the PR?",
+  "overlap": 0.25
+ },
+ {
+  "id": "03b7406f-99e0-44a6-8717-da7f6b6fefa8",
+  "fact": "User believed agent workflows and chat support were using NAT.",
+  "query": "why did I think agent workflows used NAT?",
+  "overlap": 0.5
+ },
+ {
+  "id": "053c0f36-7bef-416b-a080-e9001524b9b5",
+  "fact": "Planning documents `planning/ingestion_redesign.md` (~1,900 lines) and `planning/audit_findings.md` (finding 26) are in progress on dev; `EvergreenMemory` rename in arteries and shim fix in capillaries are the only code changes.",
+  "query": "why are planning docs in progress while code changes are minimal?",
+  "overlap": 0.429
+ },
+ {
+  "id": "057edc82-c76d-44b4-ba66-17b4590d746b",
+  "fact": "The `degrade.py` module classifies environment failures from code defects and should be used by new modules instead of bare exception handlers to prevent shipping defects behind `except Exception`.",
+  "query": "why should modules use degrade.py instead of bare except?",
+  "overlap": 1.0
+ },
+ {
+  "id": "06cab73f-6227-4151-a943-9b8dd11086c0",
+  "fact": "PR #5 merged to Capillaries main (commit 97ba404) to unify retrieval surfaces and tighten prompt eligibility.",
+  "query": "what did PR #5 unify in Capillaries main?",
+  "overlap": 0.75
+ },
+ {
+  "id": "0847ad84-caf3-4d38-9776-8fdd77b52038",
+  "fact": "The ephemeral memory regex gate was left unchanged after audit revealed that prior justification for tightening was based on artifacts from a capture bug; the bug fix in capture_response increased assistant content volume by 535x, making the existing _ARTIFACT regex load-bearing for filtering markdown table rules.",
+  "query": "why was the ephemeral memory regex gate left unchanged?",
+  "overlap": 1.0
+ },
+ {
+  "id": "08bf338d-cd90-43b9-97c4-8fa11a8c6d54",
+  "fact": "Reranker batch size is controlled by RERANKER_BATCH_SIZE in api.py (default 32), not Reranker.__init__. At MAX_DOC_CHARS=4000, batch 32 uses 4.64 GiB activations; batch 8 uses ~1.11 GB.",
+  "query": "how does RERANKER_BATCH_SIZE affect memory usage in api.py?",
+  "overlap": 0.333
+ },
+ {
+  "id": "08c3aa3c-f3a9-4233-88d9-ec9475cc7fa1",
+  "fact": "The user is redesigning the Arteries ingestion pipeline to process messages from multiple sessions/projects, deduplicate facts, normalize them to single sentences, and promote them through ephemeral to persistent (PostgreSQL/pgvector) and then to an evergreen graph database (Gephi for visualization).",
+  "query": "how does the redesigned Arteries pipeline handle multi-session messages?",
+  "overlap": 0.375
+ },
+ {
+  "id": "08ff2ba1-3bcf-41f7-ac25-2cb81c339847",
+  "fact": "There is an 'arteries reward/none type error' occurring in example runs, potentially specific to worker episodes.",
+  "query": "why is the arteries reward/none type error occurring?",
+  "overlap": 1.0
+ },
+ {
+  "id": "09eb7df0-029d-4ac4-b851-a344d896c49f",
+  "fact": "Test suite currently points at the live database; migration rehearsal requires a separate test database (DB_NAME=arteries_test) to avoid polluting production data.",
+  "query": "why use arteries_test DB instead of the live database?",
+  "overlap": 0.75
+ },
+ {
+  "id": "0cd87949-5953-4d26-8ec0-8f489b6b4178",
+  "fact": "Arteries hooks include 'hook-compact-packet.sh' which triggers on 'claude-precompact' and 'claude-postcompact' events. It injects context including project name, agent, CLI, capabilities, and recent conversation history.",
+  "query": "what context does hook-compact-packet.sh inject on claude-precompact?",
+  "overlap": 0.667
+ },
+ {
+  "id": "0e2c556d-4091-4b10-8bc9-c7bde302b047",
+  "fact": "Capillaries hooks should drop the RERANKER_DEVICE line to restore intended behavior: pick the emptiest GPU card, falling back to CPU rather than crashing.",
+  "query": "why should Capillaries hooks drop the RERANKER_DEVICE line?",
+  "overlap": 1.0
+ },
+ {
+  "id": "12934157-95a0-4392-9826-550c3b8e32a7",
+  "fact": "Arteries requires no code changes to switch models; configuration is handled via environment variables sourced from $PROJECT_ROOT/.arteries/env by hook-observe.sh.",
+  "query": "how does Arteries switch models without code changes?",
+  "overlap": 0.714
+ },
+ {
+  "id": "1422bb33-6bcd-46f8-b72a-6f27975ea4d5",
+  "fact": "Retrieval diagnosis: top hit per query runs p25 0.50, p50 0.55, p50 0.66, indicating a floor caused by single dense retrieval strategy failing on exact identifiers.",
+  "query": "why does retrieval fail on exact identifiers with single dense retrieval?",
+  "overlap": 0.5
+ },
+ {
+  "id": "1488ce8e-9fc0-4923-b6b5-ed4d7b6f0794",
+  "fact": "UMAP projection of 1024-dim pgvector embeddings to 2D is proposed as a scalable alternative to node-link diagrams for visualizing semantic density and drift in Arteries memory, capable of handling 80k points.",
+  "query": "why use UMAP projection for Arteries memory visualization?",
+  "overlap": 0.8
+ },
+ {
+  "id": "15217c1b-2198-4777-bf3a-ff293f1ce4a9",
+  "fact": "Authorization (AuthZ) is mocked for the current testing phase.",
+  "query": "why is AuthZ mocked in the current testing phase?",
+  "overlap": 0.8
+ },
+ {
+  "id": "15b5cb20-02d1-45b2-a1df-00190c2ddfe9",
+  "fact": "llama-server switched from Qwen3.6-27B to Qwen3.6-35B-A3B (MoE model).",
+  "query": "why did llama-server switch to Qwen3.6-35B-A3B?",
+  "overlap": 0.75
+ }
+]
