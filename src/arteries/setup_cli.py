@@ -857,9 +857,21 @@ statusMessage = "Recording arteries subagent metadata"
 
 
 def _codex_compact_prompt() -> str:
-    return """When compacting this coding session, preserve continuity for Arteries.
+    """Generated from the packet's own section list, not from a copy of it.
 
-Prefer any Arteries continuity packet produced by `.arteries/hooks/hook-compact-packet.sh`. It already organizes continuity into current context, the most recent 10 Q/A pairs, ephemeral memory, persistent project memory, and use rules.
+    Finding 24: this named the v1 layout, and a prompt describing sections that
+    no longer exist tells the model to preserve headings it will never see. The
+    sections come from `packet.SECTION_TITLES` now, and the stamped version is
+    what `art doctor` compares against to notice drift.
+    """
+    from arteries.packet import PACKET_SCHEMA_VERSION, SECTION_TITLES
+
+    sections = ", ".join(SECTION_TITLES[:-1]) + f", and {SECTION_TITLES[-1]}"
+    return f"""When compacting this coding session, preserve continuity for Arteries.
+
+packet-schema: v{PACKET_SCHEMA_VERSION}
+
+Prefer any Arteries continuity packet produced by `.arteries/hooks/hook-compact-packet.sh`. It already organizes continuity into {sections}.
 
 Include:
 - current user intent and unresolved task state
