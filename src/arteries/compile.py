@@ -704,8 +704,23 @@ def _write_results(conn, result: dict, claimed_ids: list,
     # The strongest evidence in the batch. A batch is one turn's worth of claims
     # and they share a source, so this is a property of the turn rather than of
     # each row.
-    batch_evidence = min((evidence.for_source(r.get("source")) for r in claimed),
-                         key=evidence.rank, default=evidence.DEFAULT)
+    # Read from the rows being cleared, not from a `claimed` local that only
+    # exists in compile_once -- this referenced one that was never in scope here
+    # and raised NameError on every real pass. One query rather than threading
+    # the batch through, because `art ingest` calls this with claimed_ids empty
+    # and has no batch to thread.
+    batch_evidence = evidence.DEFAULT
+    if claimed_ids:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT source FROM arteries.ephemeral "
+                "WHERE id = ANY(%s::uuid[])",
+                (claimed_ids,),
+            )
+            sources = [row[0] for row in cur.fetchall()]
+        if sources:
+            batch_evidence = min((evidence.for_source(s) for s in sources),
+                                 key=evidence.rank)
     new_ids: list[str] = []
 
     unattributed = 0
