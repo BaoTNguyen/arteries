@@ -25,7 +25,7 @@ import psycopg2.extras
 
 from arteries import runlog
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
-from arteries.spool import spool_emit
+from arteries.journal import journal_append
 
 
 def episode_id() -> str | None:
@@ -64,7 +64,7 @@ def log_decision(
         "created_at": _now_iso(),
     }
     store = _persist(record, "decision", run, repo_path)
-    spool_emit(
+    journal_append(
         "arteries",
         f"decision.{decision_type}",
         turn_id=turn_id,
@@ -106,7 +106,7 @@ def log_reward(
         "created_at": _now_iso(),
     }
     store = _persist(record, "reward", run, repo_path)
-    spool_emit(
+    journal_append(
         "arteries", f"reward.{reward_type}", turn_id=turn_id,
         value=value, reward_source=source, store=store,
     )
@@ -143,6 +143,54 @@ def recent_decisions(
         return _recent_jsonl(project if not episode else None, episode, limit, repo_path)
 
 
+def _corpus_feedback(episode: dict) -> None:
+    """Tell capillaries how the prompt it suggested turned out.
+
+    Here rather than in heart for the same reason the gate is: the direction is
+    capillaries -> arteries -> heart, and heart reaching back around arteries to
+    report on a component it should not know about inverts that. This function
+    already has the episode's outcome and reward in hand.
+
+    Arteries had the whole loop for its own memory -- situation out, reward back
+    through this ingest, joined on episode_id. Capillaries heard the question
+    and never the answer, so its relevance signal could not exist at all. It is
+    deliberately not the same signal as the episode reward (they are joined,
+    neither replaces the other), but it needs the outcome to be computed from.
+
+    Best-effort: retrieval feedback must never be what fails a finished episode.
+    """
+    outcome = episode.get("outcome")
+    total = (episode.get("reward") or {}).get("total")
+    for packet in episode.get("context_packets") or []:
+        trace_id = (packet.get("corpus") or {}).get("trace_id")
+        if not trace_id or not outcome:
+            continue
+        body = {"trace_id": trace_id, "outcome": outcome,
+                "notes": f"heart role={packet.get('role')}"}
+        if total is not None:
+            body["quality_score"] = max(0.0, min(1.0, float(total)))
+        _corpus_feedback_post(body)
+
+
+def _corpus_feedback_post(body: dict) -> None:
+    """Post to the daemon rather than calling FeedbackHandler directly.
+
+    The handler wants `mode`, `prompt_id` and `skill_id` -- internals the API
+    layer resolves from the trace. POST /agent/feedback needs only trace_id and
+    outcome, so it is the contract that does not break when those internals
+    move.
+    """
+    import urllib.request
+
+    url = os.getenv("CAPILLARIES_URL", "http://127.0.0.1:8000") + "/agent/feedback"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=20).close()
+    except Exception:
+        pass
+
+
 def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | None = None) -> int:
     """Backfill the rewards table from episode records.
 
@@ -154,6 +202,12 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
     and the sender pipes it in; reaching into another repo's directory layout
     couples this to whichever of them happens to own the filesystem this week,
     and RL traffic is moving to marrow.
+
+    An episode whose reward total is null is skipped, not scored zero. Heart
+    writes null on purpose for `blocked`, `unverified` and `scope_denied`, and a
+    zero would assert those episodes did badly rather than that nothing measured
+    them. Each skip is journalled as `reward.unscored` and counted on stderr, so
+    a run that scores nothing says so instead of looking like a quiet success.
     """
     if source is None:
         episodes = [json.loads(line) for line in sys.stdin.read().splitlines() if line.strip()]
@@ -172,7 +226,7 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
     except Exception:
         pass  # ponytail: no dedup in jsonl-fallback mode; re-ingest after db is back
 
-    count = 0
+    count = skipped = 0
     saved = {k: os.environ.get(k) for k in ("ARTERIES_EPISODE_ID", "ARTERIES_TASK_ID")}
     try:
         for ep in episodes:
@@ -181,10 +235,30 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
             os.environ["ARTERIES_EPISODE_ID"] = ep["episode_id"]
             os.environ["ARTERIES_TASK_ID"] = ep.get("task_id") or ""
             usage = ep.get("usage") or {}
+            reward = ep.get("reward") or {}
+            total = reward.get("total")
+            if total is None:
+                # Unscored is not zero, and the difference is the whole reason
+                # heart writes null here: `blocked` means the agent declined to
+                # guess, `unverified` means nothing ran a check, `scope_denied`
+                # means the sandbox refused writes the spec allowed. Recording
+                # 0.0 for any of them teaches the model a failure that never
+                # happened -- and blaming it for a mount table drawn too tight
+                # is the worst of the three.
+                #
+                # It is also not something to swallow. `.get("total", 0.0)` used
+                # to default only on a MISSING key, so a present null reached
+                # float() and raised -- which aborted the loop, leaving every
+                # later episode in the directory permanently unread.
+                journal_append("arteries", "reward.unscored", reward_source="heart",
+                               outcome=ep.get("outcome"))
+                skipped += 1
+                _corpus_feedback(ep)  # capillaries still wants the outcome
+                continue
             log_reward(
                 "episode",
-                ep.get("reward", {}).get("total", 0.0),
-                components={**ep.get("reward", {}).get("components", {}),
+                total,
+                components={**(reward.get("components") or {}),
                             "outcome": ep.get("outcome")},
                 source="heart",
                 repo_path=repo_path,
@@ -192,10 +266,15 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
                 tokens_out=usage.get("tokens_out"),
                 cost_usd=usage.get("cost_usd"),
             )
+            _corpus_feedback(ep)
             count += 1
     finally:
         for k, v in saved.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    if skipped:
+        # one line, because silence here is how you fail to notice that most of
+        # a week's episodes carried no score at all
+        print(f"skipped {skipped} unscored episode(s)", file=sys.stderr)
     return count
 
 
@@ -224,7 +303,7 @@ def _persist(record: dict, kind: str, run: dict, repo_path: str | Path | None) -
             _write_jsonl(run, kind, record, repo_path)
             return "jsonl"
         except Exception:
-            return "lost"  # the spool tee still fires; never break the caller
+            return "lost"  # the journal tee still fires; never break the caller
 
 
 def _db_insert_decision(record: dict) -> None:

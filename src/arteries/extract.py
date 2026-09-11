@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass
 
 from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PARENT_AGENT_ID, PROJECT_ID
-from arteries import storage
+from arteries import activity, degrade, normalize, storage
 
 # Capillaries owns the domain taxonomy; prefer it so the two ends of the memory
 # channel can't drift. But extraction is a pure-memory op — it must not hard-fail
@@ -44,15 +44,34 @@ class Extraction:
 
 
 def extract_from_message(message: str) -> list[Extraction]:
-    """One record per turn, verbatim.
+    """One record per claim, each a single sentence.
 
-    The only gate is length: "ok thanks" is not a memory. Everything else is
-    the compiler's call, and it has the whole message plus its neighbours to
-    make it with.
+    Was one record per turn, verbatim, and the docstring above explains why the
+    pattern extractor that preceded that was removed: splitting on regexes threw
+    the turn away and kept fragments.
+
+    This is not that. `normalize.atoms` splits on sentence structure rather than
+    on what a fact is supposed to look like, joins anything ambiguous, and the
+    turn itself is still stored whole in `agent_events.payload.message_preview`.
+    Atoms are the unit dedupe operates on -- a turn hashes to itself and collides
+    with nothing, so a per-turn key can never catch a fact said twice in
+    different sentences around it.
+
+    Compilation still sees them together: `_claim_ephemeral` takes ten rows from
+    one session ordered by `source_ts`, so a turn's atoms arrive adjacent in the
+    same prompt.
+
+    The length gate is unchanged and now applies per atom.
     """
     if len(message.split()) < MIN_EXTRACTABLE_WORDS:
         return []
-    return [Extraction(fact=message, domains=_infer_domains(message.lower()))]
+    domains = _infer_domains(message.lower())
+    claims = normalize.atoms(message)
+    # A turn that splits into nothing -- no sentence long enough to stand alone --
+    # is still a turn someone typed. Keep it whole rather than dropping it.
+    if not claims:
+        claims = [message]
+    return [Extraction(fact=claim, domains=domains) for claim in claims]
 
 
 _ephemeral_buffer: list[dict] = []
@@ -70,6 +89,10 @@ def extract_and_store(message: str, embedding: list[float] | None = None) -> int
     separately, and doing so would put N HTTP calls on the hook path. The caller
     embeds the message once and hands the vector down.
     """
+    # One upsert against a primary key, once per turn. This is the only writer
+    # of the clock everything else reads.
+    activity.touch(PROJECT_ID)
+
     extractions = extract_from_message(message)
     if EPHEMERAL_MODE == "discard":
         for ext in extractions:
@@ -79,14 +102,30 @@ def extract_and_store(message: str, embedding: list[float] | None = None) -> int
                 "status": "ephemeral-only",
             })
         return len(extractions)
-    for ext in extractions:
+    # One turn used to be one row, so one vector served it. Atoms are separate
+    # claims and a shared vector would make them indistinguishable to the
+    # coverage gate. Embedded in one batched call rather than N -- the point of
+    # the original rule was to keep N HTTP calls off the hook path, not to keep
+    # rows from having their own vectors.
+    vectors: list = [embedding] * len(extractions)
+    if len(extractions) > 1:
+        try:
+            from arteries.embed import embed_texts_sync
+
+            vectors = embed_texts_sync([e.fact for e in extractions])
+        except Exception as exc:
+            # Memory must not fail a turn. A shared vector is worse than one per
+            # atom and much better than no row at all.
+            degrade.note(exc, "atom embedding")
+
+    for ext, vector in zip(extractions, vectors):
         storage.insert_ephemeral(
             project_id=PROJECT_ID,
             agent_process_id=AGENT_PROCESS_ID,
             fact=ext.fact,
             domains=ext.domains,
             parent_agent_id=PARENT_AGENT_ID,
-            embedding=embedding,
+            embedding=vector,
         )
     return len(extractions)
 
@@ -182,6 +221,29 @@ def strip_assistant_response(text: str, user_turn: str = "") -> str:
     return head + _ELISION + (kept + _ELISION if kept else "") + tail
 
 
+def strip_report(text: str, user_turn: str = "") -> dict:
+    """What the stripper did, for the journal.
+
+    `stored: 0` says an assistant turn was discarded and nothing says which
+    filter discarded it. Replaying the stripper offline on 250 real turns from
+    the same transcript drops 3%; the journal says 71% were dropped in the hook.
+    Both cannot be true, and no field recorded at the time can tell them apart.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    fences = sum(1 for ln in text.splitlines() if _CODE_FENCE.match(ln))
+    return {
+        "in_chars": len(text),
+        "in_lines": len(lines),
+        "fences": fences,
+        "unbalanced_fence": bool(fences % 2),
+        "ref_chars": len(user_turn),
+        "narration_dropped": sum(1 for ln in lines if _NARRATION.match(ln)),
+        "overlap_dropped": sum(1 for ln in lines if _overlap(ln, user_turn) > 0.6),
+        "out_words": len(strip_assistant_response(text, user_turn).split()),
+        "min_words": MIN_EXTRACTABLE_WORDS,
+    }
+
+
 def store_assistant_response(text: str, user_turn: str = "") -> int:
     """Strip and store an assistant response as a single ephemeral record.
 
@@ -200,6 +262,12 @@ def store_assistant_response(text: str, user_turn: str = "") -> int:
             "source": "assistant",
         })
         return 1
+    # Embedded here rather than handed down like the user path: this text is
+    # the previous turn's answer, not the current message, so there is no vector
+    # to reuse. Without it every assistant row lands NULL and the coverage
+    # signal in eval.py compares each turn only against the user's own earlier
+    # questions -- which cannot show that an answer already exists.
+    from arteries.embed import embed_text_sync
     storage.insert_ephemeral(
         project_id=PROJECT_ID,
         agent_process_id=AGENT_PROCESS_ID,
@@ -207,5 +275,6 @@ def store_assistant_response(text: str, user_turn: str = "") -> int:
         domains=domains,
         parent_agent_id=PARENT_AGENT_ID,
         source="assistant",
+        embedding=embed_text_sync(stripped),
     )
     return 1

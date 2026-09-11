@@ -11,7 +11,7 @@ from typing import Any
 
 import psycopg2
 
-from arteries import runlog
+from arteries import runlog, scope
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG
 
 
@@ -25,9 +25,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--fix", action="store_true",
                         help="repair what can be repaired: embed rows missing a vector")
     ns = parser.parse_args(argv)
-    # Hooks set ARTERIES_PROJECT; a human running `art doctor` does not, and
-    # PROJECT_ID would fall back to "default" and report on the wrong project.
-    from arteries import scope
+    # Hooks set ARTERIES_PROJECT; a human running `art doctor` does not, so
+    # resolve the project from the cwd rather than trusting the env.
     ns.project = ns.project or scope.current_project()
 
     report = check(ns.project, ns.agent, ns.cli, ns.repo)
@@ -49,7 +48,8 @@ CLAIM_RETENTION_DAYS = int(os.getenv("ARTERIES_CLAIM_RETENTION_DAYS", "90"))
 
 _COLLECTABLE_SQL = """
     SELECT {select} FROM arteries.ephemeral e
-    WHERE e.status = 'cleared'
+    WHERE e.project_id = %s
+      AND e.status = 'cleared'
       AND e.source_ts < now() - (%s || ' days')::interval
       AND NOT EXISTS (
           SELECT 1 FROM arteries.memory_edges m
@@ -65,7 +65,8 @@ _COLLECTABLE_SQL = """
 # Same rule as ephemeral collection.
 _COLLECTABLE_CLAIMS = """
     SELECT {select} FROM arteries.persistent p
-    WHERE p.valid_until IS NOT NULL
+    WHERE p.project_id = %s
+      AND p.valid_until IS NOT NULL
       AND p.valid_until < now() - (%s || ' days')::interval
       AND NOT EXISTS (
           SELECT 1 FROM arteries.memory_edges m
@@ -77,9 +78,13 @@ _COLLECTABLE_CLAIMS = """
 
 # An entity nothing live mentions any more. Cheap to recreate if it comes back,
 # and it otherwise sits in the uniqueness index forever holding a name.
+# Entities are keyed by scope_id, not project_id -- one namespace shared by
+# every repo in the group -- so this is the one collector that scopes rather
+# than projects.
 _ORPHAN_ENTITIES = """
     SELECT {select} FROM arteries.entities e
-    WHERE NOT EXISTS (
+    WHERE e.scope_id = %s
+      AND NOT EXISTS (
         SELECT 1 FROM arteries.memory_edges m
         JOIN arteries.persistent p ON p.id::text = m.src_id
         WHERE m.dst_kind = 'entity' AND m.dst_id = e.id::text
@@ -106,29 +111,29 @@ def _retire_edges_to_dead_claims(conn) -> int:
         return cur.rowcount
 
 
-def _collect_claims(conn) -> int:
+def _collect_claims(conn, project: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"DELETE FROM arteries.persistent p WHERE p.id IN ("
                     f"{_COLLECTABLE_CLAIMS.format(select='p.id')})",
-                    (CLAIM_RETENTION_DAYS,))
+                    (project, CLAIM_RETENTION_DAYS))
         conn.commit()
         return cur.rowcount
 
 
-def _collect_entities(conn) -> int:
+def _collect_entities(conn, scope_id: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"DELETE FROM arteries.entities e WHERE e.id IN ("
-                    f"{_ORPHAN_ENTITIES.format(select='e.id')})")
+                    f"{_ORPHAN_ENTITIES.format(select='e.id')})", (scope_id,))
         conn.commit()
         return cur.rowcount
 
 
-def _collect_ephemeral(conn) -> int:
+def _collect_ephemeral(conn, project: str) -> int:
     """Delete spent ephemeral rows. Nothing that is cited is ever removed."""
     with conn.cursor() as cur:
         cur.execute(f"DELETE FROM arteries.ephemeral e WHERE e.id IN ("
                     f"{_COLLECTABLE_SQL.format(select='e.id')})",
-                    (EPHEMERAL_RETENTION_DAYS,))
+                    (project, EPHEMERAL_RETENTION_DAYS))
         conn.commit()
         return cur.rowcount
 
@@ -160,6 +165,12 @@ def unreached(root: Path | None = None) -> list[str]:
 
     root = root or Path(__file__).resolve().parent
     sources = {p: p.read_text() for p in sorted(root.glob("*.py"))}
+    # Shell entry points count as callers. `scripts/watch.sh` has called into
+    # storage for months; a Python-only scan reports that as unreached and the
+    # fix would be to delete a function something uses.
+    scripts = root.parent.parent / "scripts"
+    if scripts.is_dir():
+        sources.update({p: p.read_text() for p in sorted(scripts.glob("*.sh"))})
     orphans = []
     for path, text in sources.items():
         for match in re.finditer(r"^def ([a-z][a-z0-9_]*)\(", text, re.M):
@@ -204,28 +215,55 @@ def integrity(project: str) -> dict[str, Any]:
                     OR (e.dst_kind = 'chunk' AND NOT EXISTS
                           (SELECT 1 FROM arteries.chunks c WHERE c.id::text = e.dst_id))
                     OR (e.dst_kind = 'entity' AND NOT EXISTS
-                          (SELECT 1 FROM arteries.entities n WHERE n.id::text = e.dst_id)))
+                          (SELECT 1 FROM arteries.entities n WHERE n.id::text = e.dst_id))
+                    -- src, not just dst. Checking one end only reported 0 while
+                    -- 49 edges hung off claims that had been deleted -- the
+                    -- `literal` chose/over edges never had a dst to check, so
+                    -- the src side is the only place they can be caught.
+                    OR (e.src_kind = 'persistent' AND NOT EXISTS
+                          (SELECT 1 FROM arteries.persistent p WHERE p.id::text = e.src_id)))
             """)
             out["dangling_edges"] = cur.fetchone()[0]
 
             cur.execute("""
                 SELECT count(*) FROM arteries.ephemeral
                 WHERE status = 'compiling'
-                  AND source_ts < now() - INTERVAL '10 minutes'
+                  -- The lease, not the row's birth. Same correction as the
+                  -- sweep in compile.py: a row that queued a long time before
+                  -- being claimed is not stranded, and counting it as stranded
+                  -- made this number alarming and wrong.
+                  AND coalesce(claimed_at, source_ts) < now() - INTERVAL '10 minutes'
             """)
             out["stranded_claims"] = cur.fetchone()[0]
 
-            cur.execute(_COLLECTABLE_SQL.format(select="count(*)"), (EPHEMERAL_RETENTION_DAYS,))
+            # Finding 23: the compile pass was documented as a decomposer at
+            # 1.43 facts per row and measures 0.84. Recomputed rather than
+            # remembered, so the docstring cannot go stale again without this
+            # disagreeing with it.
+            cur.execute("""
+                SELECT (SELECT count(*) FROM arteries.ephemeral
+                        WHERE project_id = %s AND status = 'cleared'),
+                       (SELECT count(*) FROM arteries.persistent
+                        WHERE project_id = %s)
+            """, (project, project))
+            claimed, written = cur.fetchone()
+            out["facts_per_claimed_row"] = (round(written / claimed, 2)
+                                            if claimed else None)
+
+            cur.execute(_COLLECTABLE_SQL.format(select="count(*)"),
+                        (project, EPHEMERAL_RETENTION_DAYS))
             out["collectable_ephemeral"] = cur.fetchone()[0]
 
             cur.execute("SELECT count(*) FROM arteries.scope_members WHERE project_id = %s",
                         (project,))
             out["scope_registered"] = bool(cur.fetchone()[0])
 
-            cur.execute(_COLLECTABLE_CLAIMS.format(select="count(*)"), (CLAIM_RETENTION_DAYS,))
+            cur.execute(_COLLECTABLE_CLAIMS.format(select="count(*)"),
+                        (project, CLAIM_RETENTION_DAYS))
             out["collectable_claims"] = cur.fetchone()[0]
 
-            cur.execute(_ORPHAN_ENTITIES.format(select="count(*)"))
+            cur.execute(_ORPHAN_ENTITIES.format(select="count(*)"),
+                        (scope.scope_for(project) or project,))
             out["orphan_entities"] = cur.fetchone()[0]
 
             cur.execute("""
@@ -250,9 +288,29 @@ def integrity(project: str) -> dict[str, Any]:
     except Exception as exc:
         out["error"] = exc.__class__.__name__
 
-    # Static, so it still reports even when Postgres is unreachable.
+    # Static, so these still report when Postgres is unreachable.
     out["unreached_functions"] = unreached()
+    out["compact_prompt_stale"] = _compact_prompt_stale()
     return out
+
+
+def _compact_prompt_stale() -> bool:
+    """Whether the Codex compact prompt describes a packet layout that is gone.
+
+    Finding 24. The prompt names the packet's sections, so a packet that gains
+    or renames one leaves the prompt telling the model to preserve headings it
+    will never see -- and nothing says so, because a prompt cannot fail. The
+    generated file carries `packet-schema: vN`; this compares it.
+    """
+    try:
+        from arteries.packet import PACKET_SCHEMA_VERSION
+
+        prompt = Path.cwd() / ".arteries" / "codex" / "compact_prompt.txt"
+        if not prompt.is_file():
+            return False
+        return f"packet-schema: v{PACKET_SCHEMA_VERSION}" not in prompt.read_text()
+    except Exception:
+        return False
 
 
 def fix(project: str) -> dict[str, Any]:
@@ -280,9 +338,9 @@ def fix(project: str) -> dict[str, Any]:
         # removed, so the dangling sweep runs last -- running it first left
         # eight fresh dangling edges behind the entity collection.
         retired = _retire_edges_to_dead_claims(conn)
-        collected = _collect_ephemeral(conn)
-        claims = _collect_claims(conn)
-        entities = _collect_entities(conn)
+        collected = _collect_ephemeral(conn, project)
+        claims = _collect_claims(conn, project)
+        entities = _collect_entities(conn, scope.scope_for(project) or project)
         retired += _retire_dangling(conn)
         if not rows:
             return {"embedded": 0, "dangling_edges_retired": retired,

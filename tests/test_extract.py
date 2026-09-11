@@ -2,6 +2,7 @@
 
 import unittest
 
+from arteries import extract
 from arteries.extract import (
     MIN_EXTRACTABLE_WORDS,
     extract_from_message,
@@ -10,16 +11,25 @@ from arteries.extract import (
 
 
 class ExtractFromMessageTests(unittest.TestCase):
-    def test_a_turn_is_stored_whole(self):
-        """No truncation. The old fallback cut every message at 500 characters,
-        which was 87% of the corpus losing its tail."""
-        message = "we use pgvector. " * 60          # ~1020 chars
-        (extraction,) = extract_from_message(message)
-        self.assertEqual(extraction.fact, message)
-        self.assertGreater(len(extraction.fact), 500)
+    def test_nothing_is_truncated(self):
+        """The invariant the old one-row-per-turn rule existed to protect. The
+        fallback before it cut every message at 500 characters, which was 87% of
+        the corpus losing its tail. Rows are per claim now; the content is still
+        all there."""
+        message = "The sweep reads claimed_at. " * 40      # ~1120 chars
+        out = extract_from_message(message)
+        self.assertGreater(len(" ".join(e.fact for e in out)), 1000)
 
-    def test_one_record_per_turn(self):
-        out = extract_from_message("I prefer stdlib. We use Postgres. No, actually pgvector.")
+    def test_a_turn_becomes_one_record_per_claim(self):
+        out = extract_from_message(
+            "The sweep now reads claimed_at instead. "
+            "The health probe runs before anything is claimed.")
+        self.assertEqual(len(out), 2)
+
+    def test_a_turn_with_no_standalone_claim_is_kept_whole(self):
+        """Under-splitting is the cheaper failure: a fragment that fails the word
+        gate would vanish, so ambiguity joins rather than splits."""
+        out = extract_from_message("I prefer stdlib. We use Postgres. Not pgvector.")
         self.assertEqual(len(out), 1)
 
     def test_short_turns_are_skipped(self):
@@ -76,3 +86,44 @@ class AssistantCompressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StripReportTests(unittest.TestCase):
+    """Why an assistant turn was dropped, recorded at the moment it is dropped.
+
+    `stored: 0` said an assistant response was discarded and nothing said which
+    filter did it -- so 292 drops across 412 captures had no diagnosis, and
+    replaying the stripper offline disagreed with the journal by 68 points.
+    """
+
+    def test_counters_name_the_filter_that_cut_each_line(self):
+        text = "\n".join([
+            "Let me check that for you.",           # narration
+            "```",
+            "print('hidden by the fence')",
+            "```",
+            "The p50 is 1397 ms at ef_search=100.",  # the finding
+        ])
+        report = extract.strip_report(text, "what is the p50")
+        self.assertEqual(report["in_lines"], 5)
+        self.assertEqual(report["fences"], 2)
+        self.assertFalse(report["unbalanced_fence"])
+        self.assertGreaterEqual(report["narration_dropped"], 1)
+        self.assertEqual(report["min_words"], extract.MIN_EXTRACTABLE_WORDS)
+
+    def test_an_unbalanced_fence_is_flagged(self):
+        """One unclosed fence swallows every line after it."""
+        report = extract.strip_report("finding\n```\ncode that never closes")
+        self.assertTrue(report["unbalanced_fence"])
+
+    def test_out_words_matches_what_the_stripper_actually_returns(self):
+        text = "The migration moved prompts.embedding to halfvec(1024) in 1.03 s."
+        report = extract.strip_report(text, "")
+        self.assertEqual(report["out_words"],
+                         len(extract.strip_assistant_response(text, "").split()))
+
+    def test_the_reference_size_is_recorded(self):
+        """A huge reference makes the overlap filter cut almost everything, so
+        its size has to be visible next to the drop count."""
+        report = extract.strip_report("a finding about pgvector", "x" * 5000)
+        self.assertEqual(report["ref_chars"], 5000)
