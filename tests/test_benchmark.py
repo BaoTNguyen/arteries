@@ -114,3 +114,34 @@ class _Resp:
 
     def json(self):
         return self._payload
+
+
+class QueryStyleTests(unittest.TestCase):
+    """Two populations, because they ask different things of retrieval.
+    Paraphrase avoids the claim's vocabulary; identifier reuses it deliberately.
+    A lexical channel is invisible on the first and was the entire argument for
+    the second."""
+
+    def test_a_claim_with_no_identifier_is_excluded(self):
+        """Asking for an identifier query about a claim that has none produces
+        a paraphrase wearing the wrong label, which would quietly turn this set
+        back into the other one."""
+        claims = [{"id": "c1", "fact": "the team prefers smaller changes"}]
+        self.assertEqual(benchmark.build_queries(claims, style="identifier"), [])
+
+    def test_paths_symbols_and_error_types_all_count(self):
+        for fact in ("compile.py raises UndefinedColumn",
+                     "the claimed_at column is stamped on claim",
+                     "EMBED_DIM is 1024",
+                     "`art migrate apply` stamps schema_migrations"):
+            self.assertTrue(benchmark._HAS_IDENTIFIER.search(fact), fact)
+
+    def test_ordinary_prose_does_not_count(self):
+        for fact in ("the user prefers fewer changes at once",
+                     "a decision was made to wait"):
+            self.assertIsNone(benchmark._HAS_IDENTIFIER.search(fact), fact)
+
+    def test_the_two_styles_use_different_prompts(self):
+        self.assertNotEqual(benchmark.QUERY_PROMPT, benchmark.IDENTIFIER_PROMPT)
+        self.assertIn("DIFFERENT vocabulary", benchmark.QUERY_PROMPT)
+        self.assertIn("REUSE", benchmark.IDENTIFIER_PROMPT)

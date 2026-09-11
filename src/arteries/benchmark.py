@@ -34,6 +34,9 @@ import psycopg2.extras
 
 from arteries.config import COMPILE_MODEL, DB_CONFIG, GENERATE_URL
 
+# Two populations, because they ask different things of retrieval and the answer
+# differs. capillaries names them "describing" and "naming" and measured a
+# lexical channel winning on one and losing on the other.
 QUERY_PROMPT = """For each numbered fact, write the question a developer would ask months later whose answer is that fact.
 
 Rules:
@@ -44,6 +47,26 @@ Rules:
 Respond with JSON only: {"questions": {"0": "...", "1": "..."}}
 
 """
+
+
+IDENTIFIER_PROMPT = """For each numbered fact, write the question a developer would ask whose answer is that fact, the way someone asks when they are staring at the thing.
+
+Rules:
+- REUSE the fact's identifiers verbatim: file paths, function names, column names, error types, constants. Those are what the person has in front of them.
+- Use ordinary words for everything else. Do not restate the fact.
+- Under 12 words. Phrase it as a question about the identifier.
+
+Example fact: "The stale-claim sweep measures claimed_at rather than source_ts."
+Example question: "why does claimed_at matter for the sweep?"
+
+Respond with JSON only: {"questions": {"0": "...", "1": "..."}}
+
+"""
+
+# A claim with no identifier cannot produce an identifier query, and asking for
+# one anyway gets a paraphrase wearing the wrong label -- which would quietly
+# turn this set back into the first one.
+_HAS_IDENTIFIER = re.compile(r"[/.]\w|\b\w+_\w+|`|\b[A-Z]{2,}\b|[a-z][A-Z]")
 
 
 def sample_claims(project: str, n: int, db_config: dict | None = None) -> list[dict]:
@@ -68,13 +91,25 @@ def sample_claims(project: str, n: int, db_config: dict | None = None) -> list[d
         conn.close()
 
 
-def build_queries(claims: list[dict]) -> list[dict]:
-    """One paraphrased query per claim, in a single model call."""
+def build_queries(claims: list[dict], style: str = "paraphrase") -> list[dict]:
+    """One query per claim, in a single model call.
+
+    `paraphrase` avoids the claim's vocabulary and measures whether retrieval
+    can bridge wording. `identifier` reuses it deliberately and measures the
+    other half of real traffic: someone staring at `UndefinedColumn` and asking
+    about `UndefinedColumn`. A lexical channel is invisible on the first and is
+    the entire point of the second.
+    """
+    if style == "identifier":
+        claims = [c for c in claims if _HAS_IDENTIFIER.search(c["fact"])]
+        if not claims:
+            return []
+    prompt = IDENTIFIER_PROMPT if style == "identifier" else QUERY_PROMPT
     listing = "\n".join(f"[{i}] {c['fact']}" for i, c in enumerate(claims))
     resp = httpx.post(GENERATE_URL, timeout=300.0, json={
         "model": COMPILE_MODEL, "temperature": 0.4,
         "response_format": {"type": "json_object"},
-        "messages": [{"role": "user", "content": QUERY_PROMPT + listing}],
+        "messages": [{"role": "user", "content": prompt + listing}],
     })
     resp.raise_for_status()
     questions = json.loads(resp.json()["choices"][0]["message"]["content"])["questions"]
@@ -209,6 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--window", type=int, nargs="+", default=[1, 3, 10],
                         help="cosine result windows to sweep")
     parser.add_argument("--project", default=None)
+    parser.add_argument("--style", choices=("paraphrase", "identifier"),
+                        default="paraphrase",
+                        help="paraphrase avoids the claim's words; identifier reuses them")
     parser.add_argument("--save", help="write the generated query set here")
     parser.add_argument("--load", help="reuse a saved query set instead of generating")
     parser.add_argument("--json", action="store_true", dest="as_json")
@@ -227,7 +265,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"only {len(claims)} claims with graph edges -- run `art compile` first")
             return 1
         print(f"building {len(claims)} paraphrased queries...")
-        cases = build_queries(claims)
+        cases = build_queries(claims, style=args.style)
+        if not cases:
+            print(f"no claims suitable for a {args.style} query set")
+            return 1
         if args.save:
             pathlib.Path(args.save).write_text(json.dumps(cases, indent=1))
             print(f"saved to {args.save} -- reuse it with --load to compare runs")
