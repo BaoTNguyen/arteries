@@ -487,6 +487,39 @@ def recent_packet_members(project_id: str, session_id: str | None = None,
         return set()
 
 
+def get_corpus_suggestion(project_id: str, key: str,
+                          max_age_seconds: int) -> dict[str, Any] | None:
+    """The cached suggestion for this question, if it is still fresh.
+
+    Stored in `agent_events` rather than a table of its own. It is a cache with
+    one row per question and a fifteen-minute life; a table, an index and a
+    migration for that would be three things to maintain in exchange for
+    nothing.
+    """
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT payload FROM arteries.agent_events
+            WHERE event_type = 'corpus.suggestion.cached'
+              AND project_id = %s
+              AND payload->>'key' = %s
+              AND created_at > now() - (%s || ' seconds')::interval
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (project_id, key, max_age_seconds),
+        )
+        row = cur.fetchone()
+    return (row[0] or {}).get("suggestion") if row else None
+
+
+def put_corpus_suggestion(project_id: str, key: str, suggestion: dict) -> None:
+    from arteries import runlog
+
+    runlog.log_event("corpus.suggestion.cached", "arteries",
+                     {"key": key, "suggestion": suggestion},
+                     project_id=project_id)
+
+
 def get_evergreen_count(project_id: str) -> int:
     """How many live evergreen rows this project's scope can see.
 

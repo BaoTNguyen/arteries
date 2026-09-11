@@ -221,7 +221,10 @@ async def evaluate(message: str) -> str | None:
         # the compile LLM call and tripped the UserPromptSubmit timeout. A
         # detached process outlives the hook and does the same work off the hot
         # path; the "+N remembered" notice just surfaces on the next turn.
-        _spawn_detached_compile()
+        # The message rides along so the detached process can warm the corpus
+        # suggestion for it (finding 20). It is the only process in this path
+        # that can afford a network call.
+        _spawn_detached_compile(message)
 
     prompt_text = None
     # heart sets ARTERIES_RETRIEVAL=off for retrieval-ablation episodes.
@@ -326,7 +329,7 @@ def _message_payload(message: str) -> dict:
     }
 
 
-def _spawn_detached_compile() -> None:
+def _spawn_detached_compile(message: str = "") -> None:
     """Fire-and-forget the ephemeral->persistent compile in its own process.
 
     start_new_session detaches it from the hook's process group so it keeps
@@ -334,6 +337,9 @@ def _spawn_detached_compile() -> None:
     all compile_once needs.
     """
     import subprocess
+    env = dict(os.environ)
+    if message:
+        env["ARTERIES_WARM_MESSAGE"] = message[:4000]
     try:
         subprocess.Popen(
             [sys.executable, "-m", "arteries.compile"],
@@ -341,6 +347,7 @@ def _spawn_detached_compile() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
     except Exception as exc:
         runlog.log_failure("memory.compile.failed", "arteries", exc)
