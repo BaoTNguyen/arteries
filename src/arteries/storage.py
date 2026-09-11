@@ -161,11 +161,17 @@ def get_persistent(
     scope: str | None = None,
 ) -> list[dict[str, Any]]:
     """Live persistent memories for this project's whole scope, newest first."""
-    origin_filter = "AND p.scope = %(origin)s" if scope else ""
+    # Reads the new home, falls back to the old column while it still exists.
+    # Both, because `main` writes `scope` and nothing else for as long as it runs
+    # the old code -- dropping the fallback before then would hide its rows
+    # rather than migrate them.
+    origin_filter = ("AND coalesce(p.source_meta->>'origin', p.scope) = %(origin)s"
+                     if scope else "")
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             SCOPE_CTE + f"""
-            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts, p.scope, p.project_id,
+            SELECT p.id, p.fact, p.domains, p.confidence, p.source_ts,
+                   coalesce(p.source_meta->>'origin', p.scope) AS scope, p.project_id,
                    p.episode_id, p.task_id
             FROM arteries.persistent p
             WHERE p.project_id IN (SELECT project_id FROM scope)
@@ -306,7 +312,12 @@ def insert_persistent(
                 confidence,
                 project_id,
                 scope,
-                psycopg2.extras.Json(source_meta or {}),
+                # Dual-write for one release. The column is what `main` reads
+                # until it moves; the JSON key is what everything after reads.
+                # Writing only one of them is how the first attempt at this
+                # broke the live checkout.
+                psycopg2.extras.Json({**(source_meta or {}),
+                                      **({"origin": scope} if scope else {})}),
             ),
         )
         conn.commit()

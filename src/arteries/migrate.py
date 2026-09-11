@@ -63,6 +63,21 @@ CREATE TABLE IF NOT EXISTS arteries.schema_migrations (
 """
 
 
+class Refused(RuntimeError):
+    """A migration the runner will not apply, carrying what it applied first.
+
+    The `applied` list is the point. A refusal used to report only itself, so a
+    run that applied 015 and refused 016 printed "refused" and nothing else --
+    the operator had no way to know half the work had landed, and would find out
+    by running it again and seeing a shorter pending list. Silent partial
+    success is the failure mode this runner exists to prevent, and it had one.
+    """
+
+    def __init__(self, message: str, applied: list[str] | None = None):
+        super().__init__(message)
+        self.applied = applied or []
+
+
 def render(sql: str) -> str:
     """Substitute what schema.sql templates, so migrations match it."""
     return sql.replace("VECTOR(EMBED_DIM)", f"VECTOR({EMBED_DIM})")
@@ -149,7 +164,7 @@ def apply(dry_run: bool = False, contract: bool = False) -> list[str]:
     pending = [v for v, state in status() if state == "pending"]
     changed = [v for v, state in status() if state == "CHANGED"]
     if changed:
-        raise RuntimeError(
+        raise Refused(
             f"already-applied migrations were edited: {', '.join(changed)}. "
             "Add a new migration; do not rewrite one another checkout has run.")
     if dry_run or not pending:
@@ -168,9 +183,10 @@ def apply(dry_run: bool = False, contract: bool = False) -> list[str]:
                 sql = by_version[version]
                 directives = _directives(sql)
                 if "destructive" in directives and not contract:
-                    raise RuntimeError(
+                    raise Refused(
                         f"{version} is marked destructive. Run it as a contract "
-                        "migration, after main is on the new code, with --contract.")
+                        "migration, after main is on the new code, with --contract.",
+                        applied=ran)
                 if "no-transaction" in directives:
                     conn.set_session(autocommit=True)
                 cur.execute(render(sql))
@@ -223,6 +239,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         ran = apply(dry_run=args.dry_run, contract=args.contract)
+    except Refused as refused:
+        if refused.applied:
+            # What landed before the refusal, said out loud. Otherwise the
+            # operator reads "refused" and assumes nothing happened.
+            print(f"applied {len(refused.applied)}: {', '.join(refused.applied)}")
+        print(f"refused: {refused}", file=sys.stderr)
+        return 1
     except RuntimeError as refused:
         # A refusal is a message, not a stack trace. Both cases -- an edited
         # migration and an unflagged destructive one -- are things the operator

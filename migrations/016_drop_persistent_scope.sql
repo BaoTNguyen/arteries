@@ -1,0 +1,13 @@
+-- destructive
+--
+-- The contract half. Do NOT apply until `main` is running code that reads
+-- `source_meta->>'origin'` -- which is the whole reason d40ff8e had to revert
+-- the first attempt at this. The runner refuses this file without --contract
+-- precisely so that it cannot be applied by someone catching up on migrations.
+--
+-- Checklist before running it:
+--   1. dev is merged to main
+--   2. the main checkout has been restarted (hooks are one-shot, so this is
+--      just: the next turn runs the new code)
+--   3. `art remember list` works from the main checkout
+ALTER TABLE arteries.persistent DROP COLUMN IF EXISTS scope;
