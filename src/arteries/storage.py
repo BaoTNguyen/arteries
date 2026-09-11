@@ -396,6 +396,97 @@ def max_ephemeral_similarity(
         return float(cur.fetchone()[0])
 
 
+def get_evergreen_by_relevance(project_id: str, query_embedding: list[float],
+                               limit: int = 10,
+                               threshold: float = 0.0) -> list[dict[str, Any]]:
+    """Cosine-ranked evergreen claims for this project's scope group.
+
+    The third retrieval arm. Evergreen is scope-wide, so this is the only read
+    that can surface a constraint recorded in arteries while someone is working
+    in heart.
+    """
+    from arteries import scope as scope_mod
+
+    scope_id = scope_mod.scope_for(project_id) or project_id
+    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, fact, domains, confidence, kind, core, incrementality,
+                   episode_id, task_id, valid_from AS source_ts,
+                   1 - (embedding <=> %(q)s::vector) AS similarity
+            FROM arteries.evergreen
+            WHERE scope_id = %(scope)s
+              AND valid_until IS NULL
+              AND embedding IS NOT NULL
+              AND 1 - (embedding <=> %(q)s::vector) >= %(threshold)s
+            ORDER BY
+              -- Core first at equal relevance: a project's own specification
+              -- outranks a claim that merely scored well against it.
+              core DESC, embedding <=> %(q)s::vector
+            LIMIT %(limit)s
+            """,
+            {"q": query_embedding, "scope": scope_id,
+             "threshold": threshold, "limit": limit},
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def record_packet(project_id: str, member_ids: list[str],
+                  session_id: str | None = None,
+                  agent_process_id: str | None = None) -> None:
+    """Remember what went into a packet, so the next one can differ from it.
+
+    Best effort: a packet that fails to record itself is a packet the next turn
+    repeats, which is the old behaviour and not worth failing a turn over.
+    """
+    if not member_ids:
+        return
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO arteries.packets "
+                "(project_id, session_id, agent_process_id, member_ids) "
+                "VALUES (%s, %s, %s, %s)",
+                (project_id,
+                 session_id if session_id is not None else _env_session_id(),
+                 agent_process_id, member_ids),
+            )
+            conn.commit()
+    except Exception as exc:
+        from arteries import degrade
+
+        degrade.note(exc, "packet chaining")
+
+
+def recent_packet_members(project_id: str, session_id: str | None = None,
+                          packets: int = 2) -> set[str]:
+    """Ids surfaced by the last few packets of this session.
+
+    Bounded to the last two rather than the whole session: a claim shown once is
+    worth not repeating immediately, and a claim shown twenty turns ago is worth
+    showing again if it is still the best answer. Forgetting is the feature.
+    """
+    session_id = session_id if session_id is not None else _env_session_id()
+    if not session_id:
+        return set()
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT member_ids FROM arteries.packets
+                WHERE project_id = %s AND session_id = %s
+                ORDER BY created_at DESC LIMIT %s
+                """,
+                (project_id, session_id, packets),
+            )
+            return {member for (row,) in cur.fetchall() for member in (row or [])}
+    except Exception as exc:
+        from arteries import degrade
+
+        degrade.note(exc, "packet history")
+        return set()
+
+
 def get_evergreen_count(project_id: str) -> int:
     """How many live evergreen rows this project's scope can see.
 
