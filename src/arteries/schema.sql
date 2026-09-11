@@ -50,6 +50,49 @@ ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEF
 -- it, and both run against the same database. Drop it when main has moved.
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS confidence REAL NOT NULL DEFAULT 1.0;
 
+-- Dedupe key and its counters. `fact_hash` is normalize.fact_hash of the claim;
+-- the unique index below is what makes two sessions saying the same sentence one
+-- row rather than two. See migrations 006 and 007.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS fact_hash TEXT;
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS seen_count INT NOT NULL DEFAULT 1;
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_eph_dedupe
+    ON arteries.ephemeral (project_id, coalesce(session_id, ''), fact_hash)
+    WHERE valid_until IS NULL AND fact_hash IS NOT NULL;
+
+-- When this row was promoted, recorded instead of hiding the row. Visibility is
+-- a time window now; `status` only tells the compiler what still needs
+-- claiming. See migration 005.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS compiled_at TIMESTAMPTZ;
+
+-- Which session wrote this. `agent_process_id` defaults to the pid, so it dies
+-- with the process and strands the row; a session id outlives the turn. See
+-- migration 004.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS session_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_ephemeral_session
+    ON arteries.ephemeral (project_id, session_id)
+    WHERE status = 'uncompiled';
+
+-- How many compile passes have failed on this row, and when it was given up on.
+-- Without a count, a batch the model cannot parse is retried forever; see
+-- migration 003.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_ephemeral_attempts
+    ON arteries.ephemeral (project_id, attempts)
+    WHERE status = 'uncompiled' AND quarantined_at IS NULL;
+
+-- When the claim was taken, so the stale sweep measures the lease and not the
+-- row's birth. Swept on coalesce(claimed_at, source_ts); see migration 002.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_ephemeral_claimed
+    ON arteries.ephemeral (claimed_at)
+    WHERE status = 'compiling';
+
 CREATE INDEX IF NOT EXISTS idx_eph_domains
     ON arteries.ephemeral USING gin (domains);
 
@@ -100,6 +143,15 @@ ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS source_meta JSONB NOT N
 -- persistent, where an untagged copy of the answer outlives the exclusion.
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS episode_id TEXT;
 ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS task_id TEXT;
+
+-- Lexical half of hybrid retrieval. Generated, so it cannot drift from `fact`
+-- and there is no trigger to forget on a fresh database. See migration 011.
+ALTER TABLE arteries.persistent
+    ADD COLUMN IF NOT EXISTS search_tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector('english', coalesce(fact, ''))) STORED;
+
+CREATE INDEX IF NOT EXISTS idx_persistent_search
+    ON arteries.persistent USING gin (search_tsv);
 
 CREATE INDEX IF NOT EXISTS idx_persistent_task
     ON arteries.persistent (project_id, task_id) WHERE task_id IS NOT NULL;
@@ -273,6 +325,15 @@ CREATE INDEX IF NOT EXISTS idx_onto_parent ON arteries.ontology_terms (parent_ur
 ALTER TABLE arteries.ontology_terms
     ADD COLUMN IF NOT EXISTS aliases TEXT[] NOT NULL DEFAULT '{}';
 
+-- Which vocabularies a scope may ground against. Empty means unrestricted, so
+-- an unbound scope behaves exactly as before. See migration 008.
+CREATE TABLE IF NOT EXISTS arteries.ontology_bindings (
+    scope_id    TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (scope_id, source)
+);
+
 CREATE INDEX IF NOT EXISTS idx_onto_aliases ON arteries.ontology_terms USING gin (aliases);
 
 -- Entities: the canonical names a claim can be about. The UNIQUE constraint is
@@ -340,6 +401,43 @@ CREATE INDEX IF NOT EXISTS idx_chunks_document ON arteries.chunks (document_id, 
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding
     ON arteries.chunks USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
+
+-- How strongly a claim is known: user > observed > stated > inferred. Distinct
+-- from which door it came through. See migration 014.
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS evidence TEXT NOT NULL DEFAULT 'stated';
+ALTER TABLE arteries.evergreen ADD COLUMN IF NOT EXISTS evidence TEXT NOT NULL DEFAULT 'stated';
+
+CREATE INDEX IF NOT EXISTS idx_persistent_evidence
+    ON arteries.persistent (project_id, evidence)
+    WHERE valid_until IS NULL;
+
+-- Days this project was actually worked on. Retention counts these rather than
+-- calendar days, so time away does not age out a working set. See migration 013.
+CREATE TABLE IF NOT EXISTS arteries.project_activity (
+    project_id  TEXT NOT NULL,
+    day         DATE NOT NULL,
+    PRIMARY KEY (project_id, day)
+);
+
+ALTER TABLE arteries.persistent ADD COLUMN IF NOT EXISTS last_activity_day INT;
+
+CREATE INDEX IF NOT EXISTS idx_persistent_activity
+    ON arteries.persistent (project_id, last_activity_day)
+    WHERE valid_until IS NULL;
+
+-- Which memories went into which packet, so a packet can be incremental rather
+-- than re-sending the same claims every turn. See migration 012.
+CREATE TABLE IF NOT EXISTS arteries.packets (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id  TEXT NOT NULL,
+    session_id  TEXT,
+    agent_process_id TEXT,
+    member_ids  TEXT[] NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_packets_session
+    ON arteries.packets (project_id, session_id, created_at DESC);
 
 -- Typed edges over every node kind above. src/dst ids are TEXT because the
 -- things being linked have heterogeneous key types: UUID for memories and

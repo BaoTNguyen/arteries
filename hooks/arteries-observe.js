@@ -67,7 +67,11 @@ process.stdin.on('end', () => {
     const result = execFileSync(
       'python3',
       ['-m', 'arteries.eval', prompt],
-      { timeout: 5000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env }
+      // Finding 14: this was 5000 while hooks.json allows 10s, so the embedding
+      // call, the database write and corpus retrieval all had to finish inside
+      // half the budget or the write was killed mid-flight. 9000 leaves a second
+      // for node's own start-up and teardown under the outer limit.
+      { timeout: 9000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env }
     ).trim();
 
     if (result) {
