@@ -856,3 +856,17 @@ if __name__ == "__main__":
     # pulling the full `art` CLI import chain. Used by an orchestrator to flush
     # its subagents' ephemeral after they exit.
     print(asyncio.run(compile_once()))
+
+    # Finding 20: the corpus fetch used to run inside packet assembly, on a hook
+    # with a 9s budget. Here there is no one waiting, so the suggestion for this
+    # turn's message is fetched and cached for the next packet to read.
+    _warm = os.getenv("ARTERIES_WARM_MESSAGE")
+    if _warm:
+        try:
+            from arteries.packet import warm_suggestion
+
+            warm_suggestion(_warm)
+        except Exception as _exc:
+            from arteries import degrade
+
+            degrade.note(_exc, "suggestion warming")
