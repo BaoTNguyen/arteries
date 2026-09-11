@@ -28,7 +28,7 @@ import psycopg2
 import psycopg2.extras
 from collections import Counter
 
-from arteries import graph, promote, runlog, scope
+from arteries import evidence, graph, promote, runlog, scope
 from arteries.config import (AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL,
                              PROJECT_ID, SESSION_ID)
 from arteries.scope import SCOPE_CTE
@@ -692,6 +692,11 @@ def _write_results(conn, result: dict, claimed_ids: list,
                          project_id=project_id, agent_id=AGENT_PROCESS_ID)
 
     scope_id = scope.scope_for(project_id) or project_id
+    # The strongest evidence in the batch. A batch is one turn's worth of claims
+    # and they share a source, so this is a property of the turn rather than of
+    # each row.
+    batch_evidence = min((evidence.for_source(r.get("source")) for r in claimed),
+                         key=evidence.rank, default=evidence.DEFAULT)
     new_ids: list[str] = []
 
     unattributed = 0
@@ -718,8 +723,8 @@ def _write_results(conn, result: dict, claimed_ids: list,
                 """
                 INSERT INTO arteries.persistent
                     (fact, domains, confidence, project_id, parent_ids, embedding,
-                     kind, episode_id, task_id)
-                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s,
+                     kind, evidence, episode_id, task_id)
+                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s, %s,
                     -- carried up from the ephemerals this was distilled from,
                     -- but only when they agree. A fact compiled from several
                     -- tasks is by construction not about any one of them, so
@@ -743,6 +748,7 @@ def _write_results(conn, result: dict, claimed_ids: list,
                     sources,
                     vec,
                     mem.get("kind", "fact"),
+                    batch_evidence,
                     sources,
                     sources,
                 ),
@@ -797,6 +803,31 @@ def _write_results(conn, result: dict, claimed_ids: list,
                                  {"persistent_id": str(pid), "reason": "not a uuid"},
                                  project_id=project_id, agent_id=AGENT_PROCESS_ID)
                 continue
+            # Finding 22's one real rule: equal or higher evidence class only.
+            # Without it an inferred "prefers spaces" retires a stated "I prefer
+            # tabs", which also makes the eviction exemption for preferences
+            # worthless -- the row survives age and is overwritten instead.
+            cur.execute(
+                "SELECT evidence FROM arteries.persistent "
+                "WHERE id = %s AND project_id = %s AND valid_until IS NULL",
+                (pid, project_id),
+            )
+            existing = cur.fetchone()
+            old_evidence = existing[0] if existing else None
+            if existing and not evidence.can_supersede(batch_evidence, old_evidence):
+                runlog.log_event(
+                    "memory.compile.supersede_refused", "arteries",
+                    {"persistent_id": str(pid), "existing_evidence": old_evidence,
+                     "new_evidence": batch_evidence,
+                     "reason": "weaker evidence than the claim it would retire"},
+                    project_id=project_id, agent_id=AGENT_PROCESS_ID)
+                # Recorded as a disagreement rather than dropped: both sides stay
+                # retrievable and the packet marks which is disputed (finding 15).
+                if new_ids:
+                    graph.add_edge(cur, project_id, "persistent", new_ids[0],
+                                   "contradicts", "persistent", str(pid))
+                continue
+
             cur.execute(
                 """
                 UPDATE arteries.persistent
