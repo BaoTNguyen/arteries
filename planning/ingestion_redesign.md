@@ -2395,3 +2395,64 @@ corpus moves.
 
 A is the other one that cannot slide: it fixes a defect running in `main` today, and it
 gates the meaning of every measurement after it.
+
+---
+
+## 27. Done
+
+Every commit in §26.4 has landed and every audit finding is closed. What was
+built, and what measuring it changed:
+
+| # | commit | outcome |
+|---|---|---|
+| A | rank fusion, graph on its own scale, `contradicts` labelled | Merged to `main`. Graph rows went from 0 packet slots to 36 across 15 live queries |
+| 0 | test database + `art migrate` | `arteries_test`, 14 migrations, all rehearsed against live's actual shape before applying |
+| 1 | `claimed_at` lease | Sweep measures the claim, not the row's birth |
+| 2 | health probe, quarantine, cold-start guard | Verified: dead generator claims nothing; three failures quarantine |
+| 3 | `session_id` on read and claim | 84 rows stranded under dead pids are reachable again |
+| 4 | time-based ephemeral visibility | In-session recall no longer requires the compiler to be broken |
+| B | retrieval triage | "yes" and "clean up" retrieve nothing and cost no embed call |
+| C | benchmark baseline | Saved, and its contamination measured: mean overlap 0.51 |
+| 5 | `worth_keeping` | 12.5% of live rows are transient intent; all 24 preferences survive |
+| 6 | confidence annotates; capability-aware budget | Old shares summed to 1.08 of budget, not the 0.96 claimed |
+| 7 | atoms, `fact_hash`, unique index | Three turns saying one thing become one row, `seen_count` 3 |
+| 8 | scoped T-Box, Layer-0 predicates | `ontology_valid` means something for the first time |
+| 9 | the evergreen tier | Decision promoted at 0.800, single-file fact held at 0.406 |
+| D | hybrid dense + sparse | **Measured and left off.** No recall gain, mrr 0.67 → 0.54 |
+| 10 | GEXF export | 1 hop 23 nodes, 2 hops 163, 3 hops 506 |
+| 11 | evergreen arm, packet chaining, overlap dedupe | Loop closed |
+| 12 | activity-day decay | Only the old unread plain fact is a candidate, of six |
+| E | corpus fetch off the packet path | Packet builds in 141ms; the suite went 25s → 3.4s |
+| 13 | evidence ladder + `PostToolUse` | Successful Read records nothing; failed Bash does |
+| 14 | housekeeping | Three numbers that had stopped being true |
+
+### What measuring changed
+
+Four things were built as designed and then changed by their own measurement.
+That is the part worth keeping.
+
+1. **Hybrid retrieval lost.** Designed at §20.1 as the biggest single win, built,
+   measured, shipped off. And its first measurement was wrong in the flattering
+   direction: 37/40 against 21/40, which was a list of 21 compared against a list
+   of 1.
+2. **The ephemeral constant was a small defect, not the large one.** §20.2
+   claimed persistent contributed nothing on a median query; 47 slots before and
+   46 after. `MEMORY_SIMILARITY_FLOOR` is the binding constraint.
+3. **Two `worth_keeping` rules were discarded after running them against the
+   store.** A concreteness regex refused 150 of 527 good rows; entity-absence
+   refused 109 whose entity edges postdate them.
+4. **`baseline()` stamped everything.** Correct on a fresh database, catastrophic
+   on the one it exists for. Caught by rehearsing the live sequence rather than
+   by reading the code.
+
+### Still open
+
+- **`compact_prompt_stale` is true on live.** `art setup` regenerates it; the
+  check firing is the fix working.
+- **61 dangling edges** reported by `art doctor`, pre-existing and not in scope
+  here.
+- **The parked list in §13** is unchanged: the `art migrate` runner vs Alembic,
+  a shadow database, Gephi defaults, incrementality weights, the contract-phase
+  `persistent.scope` drop, and llama-server under systemd.
+- **A benchmark query set containing identifier queries**, which is what would
+  turn hybrid retrieval back on.
