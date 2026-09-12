@@ -95,16 +95,19 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-async def ingest_file(path: Path, project: str, kind: str = "document") -> dict:
+async def ingest_file(path: Path, project: str, kind: str = "document",
+                      core: bool = False) -> dict:
     """Store one document from disk and compile its chunks into claims."""
     return await ingest_text(
         path.read_text(encoding="utf-8", errors="replace"),
         name=str(path), project=project, kind=kind, base_dir=path.parent,
+        core=core,
     )
 
 
 async def ingest_text(text: str, *, name: str, project: str,
-                      kind: str = "document", base_dir: Path | None = None) -> dict:
+                      kind: str = "document", base_dir: Path | None = None,
+                      core: bool = False) -> dict:
     """Same pipeline, for content that was never a file.
 
     Plexus plans and heart's episode notes are generated in memory, not written
@@ -180,6 +183,7 @@ async def ingest_text(text: str, *, name: str, project: str,
             conn.commit()
 
         claims = 0
+        promoted = 0
         for c, cid in zip(chunks, chunk_ids):
             # One compile call per chunk. Unlike conversation turns, a document
             # chunk is self-contained -- which is exactly why cognee can chunk
@@ -201,15 +205,78 @@ async def ingest_text(text: str, *, name: str, project: str,
                     SELECT id FROM arteries.persistent
                     WHERE project_id = %s ORDER BY source_ts DESC LIMIT %s
                     """, (project, written["new"]))
-                for (pid,) in cur.fetchall():
-                    graph.add_edge(cur, project, "persistent", str(pid),
+                fresh = [str(pid) for (pid,) in cur.fetchall()]
+                for pid in fresh:
+                    graph.add_edge(cur, project, "persistent", pid,
                                    graph.DERIVED_FROM, "chunk", cid)
                 conn.commit()
 
+            if core:
+                # A specification does not wait five activity days to prove it
+                # is durable -- it is the thing everything else is measured
+                # against, so it enters the graph on the first pass with the
+                # score skipped entirely. It still lands in persistent first:
+                # promotion goes one level at a time, and this is the authored
+                # write that the rule exempts because a human named the tier.
+                promoted += _promote_core(conn, project, fresh, cid)
+
         return {"path": name, "status": "ingested", "images": images,
-                "chunks": len(chunks), "claims": claims, "scope": scope_id}
+                "chunks": len(chunks), "claims": claims, "core": promoted,
+                "scope": scope_id}
     finally:
         conn.close()
+
+
+def _promote_core(conn, project: str, persistent_ids: list[str], chunk_id: str) -> int:
+    """Copy freshly written claims into evergreen as `core`.
+
+    Keeps the chunk provenance the rest of this module builds: the evergreen row
+    carries `parent_ids` pointing at the persistent claim, and a `derived_from`
+    edge to the chunk it came from, so a core node in the graph still answers
+    "which paragraph of which document said this".
+    """
+    from arteries import evergreen, graph, scope as scope_mod
+
+    if not persistent_ids:
+        return 0
+    scope_id = scope_mod.scope_for(project) or project
+    written = 0
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, fact, kind, domains, confidence, embedding,
+                   episode_id, task_id
+            FROM arteries.persistent WHERE id = ANY(%s::uuid[])
+            """,
+            (persistent_ids,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+
+    for row in rows:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO arteries.evergreen
+                    (scope_id, fact, kind, domains, confidence, embedding,
+                     source_project_id, parent_ids, episode_id, task_id,
+                     core, origin, evidence)
+                VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s::uuid[], %s, %s,
+                        true, 'authored', 'user')
+                ON CONFLICT DO NOTHING
+                RETURNING id
+                """,
+                (scope_id, row["fact"], row.get("kind") or "fact",
+                 psycopg2.extras.Json(row.get("domains") or []),
+                 row.get("confidence") or 1.0, row.get("embedding"), project,
+                 [str(row["id"])], row.get("episode_id"), row.get("task_id")),
+            )
+            new_id = cur.fetchone()
+            if new_id:
+                graph.add_edge(cur, project, "evergreen", str(new_id[0]),
+                               graph.DERIVED_FROM, "chunk", chunk_id)
+                written += 1
+        conn.commit()
+    return written
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -227,6 +294,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kind", default="document",
                         help="document | plan | spec -- recorded on the document row")
     parser.add_argument("--project", default=None)
+    parser.add_argument("--core", action="store_true",
+                        help="also write the claims into evergreen as core: the "
+                             "project's own specification, exempt from scoring "
+                             "and from eviction")
     args = parser.parse_args(argv)
 
     project = args.project or scope.current_project()
@@ -266,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
                       "--describe \"...\" with what it shows")
                 continue
         else:
-            result = asyncio.run(ingest_file(path.resolve(), project, args.kind))
+            result = asyncio.run(ingest_file(path.resolve(), project, args.kind, core=args.core))
         if result["status"] == "unchanged":
             print(f"  unchanged  {path}")
         else:
@@ -277,8 +348,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 # -- images --------------------------------------------------------------------
@@ -472,3 +541,13 @@ def resolve_images(text: str, base_dir: Path) -> tuple[str, list[dict]]:
 def FRONTIER_ENABLED() -> bool:
     from arteries.config import FRONTIER_VISION_MODEL
     return bool(FRONTIER_VISION_MODEL)
+
+
+# At the bottom, not in the middle. This block sat at line 349 while
+# `resolve_images` and the rest of the image path were defined below it, so
+# `python -m arteries.ingest` called main() before those names existed and died
+# with NameError on every file. Going through the `art` CLI worked, because that
+# imports the module fully first and then calls main() -- which is why the break
+# stayed hidden.
+if __name__ == "__main__":
+    raise SystemExit(main())
