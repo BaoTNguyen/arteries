@@ -13,7 +13,10 @@ class CompileOnceTests(unittest.TestCase):
         async def cancelled(_claimed, _persistent):
             raise asyncio.CancelledError()
 
-        with patch.object(compiler.psycopg2, "connect", return_value=conn),              patch.object(compiler, "_release_stale_claims"),              patch.object(compiler, "_claim_ephemeral", return_value=claimed),              patch.object(compiler, "_load_persistent_context", return_value=[]),              patch.object(compiler, "_llm_compile", side_effect=cancelled),              patch.object(compiler, "_release_claimed") as release_claimed:
+        # A Mock connection has no real cursor, and this test is about
+        # cancellation rather than slot acquisition or liveness -- so both are
+        # stated instead of being reached through a mock that cannot serve them.
+        with patch.object(compiler.psycopg2, "connect", return_value=conn),              patch.object(compiler, "_acquire_slot", return_value=0),              patch.object(compiler, "_release_slot"),              patch.object(compiler, "_generator_reachable", return_value=True),              patch.object(compiler, "_release_stale_claims"),              patch.object(compiler, "_claim_ephemeral", return_value=claimed),              patch.object(compiler, "_load_persistent_context", return_value=[]),              patch.object(compiler, "_llm_compile", side_effect=cancelled),              patch.object(compiler, "_release_claimed") as release_claimed:
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(compiler.compile_once())
 
