@@ -271,7 +271,21 @@ def promote_once(project_id: str | None = None, limit: int = 20) -> dict[str, An
 
 
 def _insert(conn, row: dict[str, Any], scope_id: str, value: float) -> bool:
-    """Write one evergreen row. False if it was already there."""
+    """Write one evergreen row. False if it was already there, or if its parent
+    stopped being live while this pass was scoring it.
+
+    The parent check is inside the statement, not a read before it. Scoring a
+    claim takes four queries, and eviction can tombstone it in that window --
+    leaving an evergreen row whose parent is retired, which is not corrupt but is
+    a lineage that never existed. Re-reading the parent first would only narrow
+    the window; selecting from it makes the window zero, because the same
+    snapshot that supplies the values decides whether there are any.
+
+    This is the same move as the intake dedupe: a read-then-write became one
+    conditional write, and the condition is enforced by the database rather than
+    by hoping the two statements land close together. It needs no lock, so it
+    costs nothing at any level of concurrency.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -279,15 +293,14 @@ def _insert(conn, row: dict[str, Any], scope_id: str, value: float) -> bool:
                 (scope_id, fact, kind, domains, confidence, embedding,
                  source_project_id, parent_ids, episode_id, task_id,
                  incrementality)
-            VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s::uuid[], %s, %s, %s)
+            SELECT %s, p.fact, p.kind, p.domains, p.confidence, p.embedding,
+                   p.project_id, ARRAY[p.id], p.episode_id, p.task_id, %s
+            FROM arteries.persistent p
+            WHERE p.id = %s AND p.valid_until IS NULL
             ON CONFLICT DO NOTHING
             RETURNING id
             """,
-            (scope_id, row["fact"], row.get("kind") or "fact",
-             psycopg2.extras.Json(row.get("domains") or []),
-             row.get("confidence") or 1.0, row.get("embedding"),
-             row.get("project_id"), [str(row["id"])],
-             row.get("episode_id"), row.get("task_id"), value),
+            (scope_id, value, str(row["id"])),
         )
         return cur.fetchone() is not None
 
