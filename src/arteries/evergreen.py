@@ -314,6 +314,17 @@ def seed(conn, scope_id: str, fact: str, *, kind: str = "fact",
         return str(cur.fetchone()[0])
 
 
+# A new project's specification lives in its planning documents. AGENTS.md is a
+# later artefact -- it describes how agents work in a repo that already exists --
+# so it is seeded on demand rather than at project creation.
+DEFAULT_SPEC_GLOBS = ("planning/*.md",)
+AGENTS_SPEC = "AGENTS.md"
+
+
+def _default_specs(agents: bool = False) -> list[str]:
+    return [*DEFAULT_SPEC_GLOBS, *([AGENTS_SPEC] if agents else [])]
+
+
 def main(argv: list[str] | None = None) -> int:
     """`art evergreen` -- promote, seed, and look at the tier."""
     import argparse
@@ -331,12 +342,16 @@ def main(argv: list[str] | None = None) -> int:
     promote_p.add_argument("--dry-run", action="store_true",
                            help="show scores without writing")
 
-    seed_p = sub.add_parser("seed", help="write a project's own specs as core rows")
-    seed_p.add_argument("paths", nargs="+", help="markdown files, e.g. planning/*.md")
+    seed_p = sub.add_parser(
+        "seed", help="ingest a project's own specs into evergreen as core")
+    seed_p.add_argument("paths", nargs="*",
+                        help="files to seed; default is planning/*.md")
     seed_p.add_argument("--project", default=None)
-    seed_p.add_argument("--kind", default="fact")
-    seed_p.add_argument("--write", action="store_true",
-                        help="without this, print what would be written")
+    seed_p.add_argument("--kind", default="plan",
+                        help="document kind, passed to `art ingest`")
+    seed_p.add_argument("--agents", action="store_true",
+                        help="also seed AGENTS.md, which describes how agents "
+                             "work in a repo that already exists")
 
     stats_p = sub.add_parser("stats")
     stats_p.add_argument("--project", default=None)
@@ -346,39 +361,42 @@ def main(argv: list[str] | None = None) -> int:
     scope_id = scope_mod.scope_for(project) or project
 
     if args.command == "seed":
-        # Manual and reviewable on purpose. A project's specification is the
-        # thing every other claim is measured against, so it enters by someone
-        # deciding it should, not by a scheduler.
-        from arteries import normalize
-        from arteries.embed import embed_text_sync
+        # Discovery plus `art ingest --core`, not a second extractor.
+        #
+        # The first version split markdown with `normalize.atoms` and wrote the
+        # sentences straight in. That threw away everything `ingest.py` already
+        # does: chunking, the compile call that assigns `kind` and extracts
+        # entities, `derived_from` edges back to the chunk and document, and a
+        # digest so re-seeding an unchanged file is a no-op. Two extractors for
+        # one job, and the worse one was the default.
+        import asyncio
+        import pathlib
 
-        claims: list[tuple[str, str]] = []
-        for raw in args.paths:
-            path = pathlib.Path(raw)
-            if not path.is_file():
-                print(f"skipped {raw}: not a file")
+        from arteries import ingest
+
+        patterns = args.paths or _default_specs(args.agents)
+        paths = []
+        for pattern in patterns:
+            direct = pathlib.Path(pattern)
+            if direct.is_file():
+                paths.append(direct)
                 continue
-            for claim in normalize.atoms(path.read_text()):
-                claims.append((str(path), claim))
+            paths.extend(sorted(m for m in pathlib.Path().glob(pattern)
+                                if m.is_file()))
+        paths = sorted(set(paths))
+        if not paths:
+            print("nothing to seed: no planning/*.md here, and no paths given")
+            return 1
 
-        if not args.write:
-            for source, claim in claims:
-                print(f"{source}: {claim[:96]}")
-            print(f"\n{len(claims)} claims would be seeded as core into {scope_id}."
-                  " Re-run with --write.")
-            return 0
-
-        conn = psycopg2.connect(**DB_CONFIG)
-        written = 0
-        try:
-            for _source, claim in claims:
-                if seed(conn, scope_id, claim, kind=args.kind,
-                        embedding=embed_text_sync(claim)):
-                    written += 1
-            conn.commit()
-        finally:
-            conn.close()
-        print(f"seeded {written} core claims into {scope_id}")
+        seeded = 0
+        for path in paths:
+            result = asyncio.run(ingest.ingest_file(path, project, kind=args.kind,
+                                                    core=True))
+            print(f"  {result['status']:<10} {path}  "
+                  f"({result.get('chunks', 0)} chunks, "
+                  f"{result.get('core', 0)} core claims)")
+            seeded += result.get("core", 0)
+        print(f"seeded {seeded} core claims into {scope_id}")
         return 0
 
     if args.command == "stats":
