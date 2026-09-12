@@ -18,6 +18,8 @@ import json
 from collections.abc import Sequence
 
 from arteries import scope as scope_mod
+import psycopg2.extras
+
 from arteries import storage
 from arteries.docs import _infer_domains
 
@@ -30,6 +32,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_p.add_argument("fact", nargs="+")
     add_p.add_argument("--domains", default="")
     add_p.add_argument("--confidence", type=float, default=1.0)
+    add_p.add_argument("--core", action="store_true",
+                       help="also write it into evergreen as core: exempt from "
+                            "scoring and from eviction. For the one-off a spec "
+                            "does not cover -- documents are the usual route")
 
     list_p = sub.add_parser("list", help="list user-written persistent memories")
     list_p.add_argument("--limit", type=int, default=50)
@@ -87,6 +93,43 @@ def _do_add(args) -> int:
         embedding=embedding,
     )
     print(f"persistent: {pid[:8]}  {fact}")
+
+    if getattr(args, "core", False):
+        # Written to persistent first and then to evergreen, rather than
+        # straight in: promotion goes one level at a time, and an authored write
+        # is exempt from that rule only because a human named the tier. The
+        # lineage still has to be real.
+        import psycopg2
+
+        from arteries import evergreen
+        from arteries.config import DB_CONFIG
+
+        project = scope_mod.current_project()
+        conn = psycopg2.connect(**DB_CONFIG)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO arteries.evergreen
+                        (scope_id, fact, domains, confidence, embedding,
+                         source_project_id, parent_ids, core, origin, evidence)
+                    VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s::uuid[],
+                            true, 'authored', 'user')
+                    RETURNING id
+                    """,
+                    (scope_mod.scope_for(project) or project, fact,
+                     psycopg2.extras.Json(domains), args.confidence, embedding,
+                     project, [pid]),
+                )
+                eid = cur.fetchone()[0]
+            conn.commit()
+            print(f"evergreen:  {str(eid)[:8]}  core")
+        except Exception as exc:
+            from arteries import degrade
+
+            degrade.note(exc, "core write")
+        finally:
+            conn.close()
 
     return 0
 
