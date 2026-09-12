@@ -915,6 +915,22 @@ if __name__ == "__main__":
     # Finding 20: the corpus fetch used to run inside packet assembly, on a hook
     # with a 9s budget. Here there is no one waiting, so the suggestion for this
     # turn's message is fetched and cached for the next packet to read.
+    # Consolidation, not a fourth step of ingestion. Claims only become
+    # candidates after surviving MIN_MATURITY_DAYS of activity, so most passes
+    # find nothing and exit on one query -- which is the intended shape. Running
+    # it here rather than on a timer means it happens exactly as often as work
+    # happens, and in the one process with nobody waiting on it.
+    try:
+        from arteries import evergreen as _evergreen
+
+        _consolidated = _evergreen.promote_once()
+        if _consolidated.get("promoted"):
+            print(_consolidated)
+    except Exception as _exc:
+        from arteries import degrade
+
+        degrade.note(_exc, "evergreen consolidation")
+
     _warm = os.getenv("ARTERIES_WARM_MESSAGE")
     if _warm:
         try:

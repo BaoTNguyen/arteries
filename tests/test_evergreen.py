@@ -55,9 +55,13 @@ class EligibilityTests(unittest.TestCase):
             self.assertTrue(evergreen.eligible(0.8, kind, reach=0.0), kind)
 
 
-class DatabaseTests(unittest.TestCase):
-    """Promotion against a real table: the scoring queries are most of the
-    logic and none of them run without one."""
+class _Fixture(unittest.TestCase):
+    """Shared setup, and no tests of its own.
+
+    MaturityTests subclassed DatabaseTests at first, which silently re-ran every
+    inherited test under a second name -- so a failure appeared twice and the
+    class that owned it was not obvious.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -82,7 +86,39 @@ class DatabaseTests(unittest.TestCase):
         with self.conn.cursor() as cur:
             cur.execute("DELETE FROM arteries.evergreen WHERE scope_id = %s", (self.scope,))
             cur.execute("DELETE FROM arteries.persistent WHERE project_id = %s", (self.scope,))
+            cur.execute("DELETE FROM arteries.project_activity WHERE project_id = %s",
+                        (self.scope,))
         self.conn.commit()
+
+    def _activity_days(self, n):
+        """Promotion is consolidation: a claim has to survive some days of real
+        work before `durability` and `use` mean anything."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO arteries.project_activity "
+                "SELECT %s, current_date - g FROM generate_series(0, %s) g "
+                "ON CONFLICT DO NOTHING", (self.scope, n - 1))
+        self.conn.commit()
+
+    def _aged_claim(self, days_ago: int, fact="We chose Postgres over Neo4j.",
+                    kind="decision", access=3):
+        """A claim written `days_ago` days back, with activity recorded on every
+        day since. Maturity is activity days *since the claim was written*, so a
+        claim written today is one day old however long the project has run."""
+        from arteries.config import EMBED_DIM
+
+        self._activity_days(days_ago + 1)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO arteries.persistent "
+                "(fact, kind, domains, confidence, project_id, access_count, "
+                " valid_from, embedding) "
+                "VALUES (%s, %s, '[]'::jsonb, 0.9, %s, %s, "
+                "        now() - (%s || ' days')::interval, %s) RETURNING id",
+                (fact, kind, self.scope, access, days_ago, [0.1] * EMBED_DIM))
+            row_id = cur.fetchone()[0]
+        self.conn.commit()
+        return row_id
 
     def _persistent(self, fact, kind="fact", access=0, embedded=True):
         """A fixed vector rather than a real embedding: novelty is measured
@@ -100,6 +136,11 @@ class DatabaseTests(unittest.TestCase):
             row_id = cur.fetchone()[0]
         self.conn.commit()
         return row_id
+
+
+class DatabaseTests(_Fixture):
+    """Promotion against a real table: the scoring queries are most of the logic
+    and none of them run without one."""
 
     def test_novelty_is_one_against_an_empty_tier(self):
         """The first claim about anything is maximally incremental to a graph
@@ -140,7 +181,7 @@ class DatabaseTests(unittest.TestCase):
     def test_promotion_is_idempotent(self):
         """Promoting the same persistent row twice is what the parent_ids unique
         index exists to prevent."""
-        self._persistent("We chose Postgres over Neo4j for the graph.", "decision", 3)
+        self._aged_claim(evergreen.MIN_MATURITY_DAYS + 1)
         first = evergreen.promote_once(self.scope)
         second = evergreen.promote_once(self.scope)
         self.assertEqual(first["promoted"], 1)
@@ -149,6 +190,74 @@ class DatabaseTests(unittest.TestCase):
     def test_candidates_exclude_what_is_already_promoted(self):
         """One query for the real pass and for --dry-run, so a verdict means the
         same thing in both."""
-        self._persistent("We chose Postgres over Neo4j for the graph.", "decision", 3)
+        self._aged_claim(evergreen.MIN_MATURITY_DAYS + 1)
         evergreen.promote_once(self.scope)
+        self.assertEqual(evergreen.candidates(self.conn, self.scope, 10), [])
+
+
+class MaturityTests(_Fixture):
+    """Promotion is consolidation, not a fourth step of ingestion.
+
+    Two of the four terms are meaningless on a fresh claim. `durability` is "not
+    superseded within 14 days", which a claim written this turn satisfies by not
+    having existed long enough to be contradicted. `use` is access_count/3, and
+    a claim written this turn has been read zero times. A brand-new claim can
+    clear 0.6 on novelty and reach alone, with no evidence for half its score.
+    """
+
+    def test_a_fresh_claim_is_not_a_candidate(self):
+        self._activity_days(1)
+        self._persistent("We chose Postgres over Neo4j for the graph.", "decision", 3)
+        self.assertEqual(evergreen.candidates(self.conn, self.scope, 10), [])
+
+    def test_a_claim_that_survived_enough_days_is(self):
+        self._aged_claim(evergreen.MIN_MATURITY_DAYS + 1)
+        self.assertEqual(len(evergreen.candidates(self.conn, self.scope, 10)), 1)
+
+    def test_days_are_counted_as_activity_not_calendar(self):
+        """Three weeks away should not mature a claim into the graph any more
+        than it should age one out.
+
+        The clock has to start *before* the claim, or the pre-clock rule makes
+        it mature for a different and also correct reason.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute("INSERT INTO arteries.project_activity VALUES "
+                        "(%s, current_date - 90) ON CONFLICT DO NOTHING", (self.scope,))
+            cur.execute(
+                "INSERT INTO arteries.persistent "
+                "(fact, kind, domains, confidence, project_id, access_count, valid_from) "
+                "VALUES ('an old claim nobody worked on', 'decision', '[]'::jsonb, 0.9, "
+                "%s, 3, now() - interval '60 days')", (self.scope,))
+        self.conn.commit()
+        self._activity_days(2)      # two days of work, 60 calendar days later
+        self.assertEqual(evergreen.candidates(self.conn, self.scope, 10), [])
+
+    def test_a_claim_predating_the_clock_is_mature(self):
+        """The activity clock started after the store did. Months of real
+        survival should not be discounted because nothing was recording days --
+        that would measure the clock's age rather than the claim's."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO arteries.persistent "
+                "(fact, kind, domains, confidence, project_id, access_count, valid_from) "
+                "VALUES ('a claim from before the clock', 'decision', '[]'::jsonb, 0.9, "
+                "%s, 3, now() - interval '60 days')", (self.scope,))
+        self.conn.commit()
+        self._activity_days(2)          # clock starts today, claim is older
+        self.assertEqual(len(evergreen.candidates(self.conn, self.scope, 10)), 1)
+
+    def test_maturity_counts_from_the_claim_not_the_project(self):
+        """A project with a long history does not mature a claim written today.
+        The count is activity days *since* the claim, not activity days total."""
+        self._activity_days(evergreen.MIN_MATURITY_DAYS * 3)
+        self._persistent("written today, in an old project", "decision", 3)
+        self.assertEqual(evergreen.candidates(self.conn, self.scope, 10), [])
+
+    def test_what_the_write_filter_rejects_is_not_promoted(self):
+        """566 live claims were written before `worth_keeping` existed, and the
+        first dry run wanted to promote "User intends to write Plexus-related
+        context into a markdown file" into the graph."""
+        self._aged_claim(evergreen.MIN_MATURITY_DAYS + 1,
+                         fact="User intends to write the Plexus context file.")
         self.assertEqual(evergreen.candidates(self.conn, self.scope, 10), [])
