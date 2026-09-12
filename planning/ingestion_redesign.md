@@ -2502,3 +2502,73 @@ Two further things it exposed:
 `tests/test_migrate.py::DroppedColumnTests` now asserts that no source file names
 a dropped column and that `schema.sql` does not recreate one. Both would have
 failed before the drop.
+
+---
+
+## 29. One pool of model slots, and a race closed by arithmetic
+
+Two concurrency gaps, both fixed by removing the need to coordinate rather than
+by adding more coordination.
+
+### 29.1 Two caps against one server
+
+arteries bounded its compile passes at the server's parallelism with a Postgres
+advisory lock. heart bounded agents reaching the same server with an flock pool.
+Both were correct alone and wrong together: two caps of two against a two-slot
+server is four in-flight requests, which is the original overload with more
+bookkeeping.
+
+The coordination point has to satisfy three things, and they rule out the
+obvious options:
+
+| requirement | rules out |
+|---|---|
+| every process in the stack, any language | a Postgres advisory lock — heart is stdlib-only and cannot import psycopg2 |
+| no registry, no protocol | anything a new service has to be *added* to |
+| crash-safe | any application-level counter; a killed agent must not hold a slot |
+
+So: a directory of lock files per endpoint, and whoever holds one holds a slot.
+
+    $XDG_RUNTIME_DIR/model-slots/<host>_<port>/slot0 .. slotN-1
+
+Keyed by `host:port`, so one llama.cpp per GPU on two ports is two pools and one
+tensor-parallel server spanning both GPUs is one — which is right, because that
+is one queue. N comes from the server's own `/slots`, not from a constant in two
+repos that disagree after someone edits a systemd unit.
+
+**The convention is the contract, and it is duplicated on purpose.** arteries
+implements it in `slots.py`, heart in `runner._flock_pool` against the same path.
+A shared module would make two repos depend on each other to avoid twenty lines,
+and heart would have to stop being stdlib-only to use it. A test on each side
+pins the path, because a rename would silently split the pool and nothing else
+would fail.
+
+Verified across repos: heart holding both slots causes arteries to be refused,
+and releasing one lets it through.
+
+It refuses rather than queues. A caller with no slot has claimed no work, so its
+rows stay where they are and the next turn finds them. Waiting would park a
+process on a slot it cannot use for the length of someone else's generation call,
+which under load turns one overloaded server into a pile of stalled processes.
+
+### 29.2 Eviction racing consolidation
+
+Scoring a claim for promotion takes four queries, and eviction can tombstone it
+in that window -- leaving an evergreen row whose parent is retired. Not corrupt,
+but a lineage that never existed.
+
+The fix is not a lock. `_insert` now selects the values from the parent in the
+same statement that inserts them:
+
+```sql
+INSERT INTO arteries.evergreen (...)
+SELECT %s, p.fact, p.kind, ... FROM arteries.persistent p
+WHERE p.id = %s AND p.valid_until IS NULL
+ON CONFLICT DO NOTHING
+```
+
+The same snapshot that supplies the values decides whether there are any, so the
+window is zero rather than narrow. It is the same move as the intake dedupe: a
+read-then-write became one conditional write, enforced by the database instead of
+by hoping two statements land close together, and it costs nothing at any level
+of concurrency because there is nothing to contend on.

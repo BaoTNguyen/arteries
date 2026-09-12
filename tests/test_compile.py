@@ -1,12 +1,21 @@
 import asyncio
+import contextlib
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
 from arteries import compile as compiler
 
 
+@contextlib.contextmanager
+def _always_free(_endpoint, wait=False):
+    yield True
+
+
 class CompileOnceTests(unittest.TestCase):
     def test_cancelled_compile_releases_claimed_rows(self):
+        # The slot pool is a real filesystem lock and this test has a Mock
+        # connection; it is about cancellation, so the slot is simply granted.
+
         conn = Mock()
         claimed = [{"id": "00000000-0000-0000-0000-000000000001"}]
 
@@ -16,7 +25,7 @@ class CompileOnceTests(unittest.TestCase):
         # A Mock connection has no real cursor, and this test is about
         # cancellation rather than slot acquisition or liveness -- so both are
         # stated instead of being reached through a mock that cannot serve them.
-        with patch.object(compiler.psycopg2, "connect", return_value=conn),              patch.object(compiler, "_acquire_slot", return_value=0),              patch.object(compiler, "_release_slot"),              patch.object(compiler, "_generator_reachable", return_value=True),              patch.object(compiler, "_release_stale_claims"),              patch.object(compiler, "_claim_ephemeral", return_value=claimed),              patch.object(compiler, "_load_persistent_context", return_value=[]),              patch.object(compiler, "_llm_compile", side_effect=cancelled),              patch.object(compiler, "_release_claimed") as release_claimed:
+        with patch.object(compiler.psycopg2, "connect", return_value=conn),              patch.object(compiler.slots, "hold", _always_free),              patch.object(compiler, "_generator_reachable", return_value=True),              patch.object(compiler, "_release_stale_claims"),              patch.object(compiler, "_claim_ephemeral", return_value=claimed),              patch.object(compiler, "_load_persistent_context", return_value=[]),              patch.object(compiler, "_llm_compile", side_effect=cancelled),              patch.object(compiler, "_release_claimed") as release_claimed:
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(compiler.compile_once())
 
