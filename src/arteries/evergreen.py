@@ -37,7 +37,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import degrade, runlog
+from arteries import degrade, promote, runlog
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
 
 # Below this a claim stays persistent. 0.6 sits above what a claim scores on
@@ -48,6 +48,23 @@ EVERGREEN_THRESHOLD = float(os.getenv("ARTERIES_EVERGREEN_THRESHOLD", "0.6"))
 
 # A claim superseded inside two weeks was a working assumption, not knowledge.
 DURABILITY_DAYS = int(os.getenv("ARTERIES_DURABILITY_DAYS", "14"))
+
+# How many activity days a claim must survive before it is even scored.
+#
+# Two of the four terms are meaningless on a fresh claim. `durability` is "not
+# superseded within DURABILITY_DAYS", which a claim written this turn satisfies
+# by not having existed long enough to be contradicted -- not-yet-disproven
+# wearing the costume of survived. `use` is access_count/3, and a claim written
+# this turn has been read zero times.
+#
+# So a brand-new claim can reach the 0.6 threshold on novelty and reach alone,
+# with no evidence for half its score. Waiting is what makes the other half mean
+# something: promotion is consolidation, not a fourth step of ingestion.
+#
+# Activity days rather than calendar days, for the same reason eviction uses
+# them: three weeks away should not age a claim into the graph any more than it
+# should age one out.
+MIN_MATURITY_DAYS = int(os.getenv("ARTERIES_EVERGREEN_MATURITY_DAYS", "5"))
 
 WEIGHTS = {"novelty": 0.4, "reach": 0.2, "durability": 0.2, "use": 0.2}
 
@@ -159,7 +176,7 @@ def _durability(conn, row: dict[str, Any]) -> float:
 
 
 def candidates(conn, project_id: str, limit: int) -> list[dict[str, Any]]:
-    """Live persistent claims not already promoted.
+    """Live persistent claims old enough to score, not already promoted.
 
     One query, used by the real pass and by --dry-run, so a verdict printed by
     one means the same thing in the other. Written separately once, and the
@@ -173,18 +190,43 @@ def candidates(conn, project_id: str, limit: int) -> list[dict[str, Any]]:
                    p.access_count, p.valid_from, p.project_id,
                    p.episode_id, p.task_id
             FROM arteries.persistent p
-            WHERE p.project_id = %s
+            WHERE p.project_id = %(project)s
               AND p.valid_until IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM arteries.evergreen e
                   WHERE e.valid_until IS NULL AND p.id = ANY(e.parent_ids)
               )
+              -- Old enough for `durability` and `use` to carry information.
+              -- Counted against project_activity rather than the calendar, so a
+              -- fortnight away does not mature anything.
+              --
+              -- Or written before the clock existed. The clock started on
+              -- 2026-09-11 and the store has claims from August; those have
+              -- months of real survival behind them, and holding them back
+              -- because nothing was recording days yet would measure the
+              -- clock's age rather than the claim's.
+              AND (
+                  (SELECT count(*) FROM arteries.project_activity a
+                   WHERE a.project_id = p.project_id
+                     AND a.day >= p.valid_from::date) >= %(maturity)s
+                  OR p.valid_from::date < (
+                      SELECT min(day) FROM arteries.project_activity a2
+                      WHERE a2.project_id = p.project_id)
+              )
             ORDER BY p.access_count DESC, p.valid_from ASC
-            LIMIT %s
+            LIMIT %(limit)s
             """,
-            (project_id, limit),
+            {"project": project_id, "maturity": MIN_MATURITY_DAYS, "limit": limit},
         )
-        return [dict(r) for r in cur.fetchall()]
+        rows = [dict(r) for r in cur.fetchall()]
+
+    # The same filter the write path applies, applied again here. It is cheap,
+    # it is the same question, and the store predates it: 566 live claims were
+    # written before `worth_keeping` existed, and the first dry run wanted to
+    # promote "User intends to write Plexus-related context into a markdown
+    # file" into the graph. A claim that would not be written today should not
+    # be consolidated today, and nothing else in the pipeline re-asks.
+    return [r for r in rows if promote.worth_keeping(r.get("fact", "")) is None]
 
 
 def promote_once(project_id: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -366,7 +408,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             rows = candidates(conn, project, args.limit)
             if not rows:
-                print("nothing left to score -- every live claim is already promoted")
+                print(f"nothing to score: every live claim is either already "
+                      f"promoted or has not yet survived {MIN_MATURITY_DAYS} "
+                      f"activity days")
             for row in rows:
                 terms = measure(conn, row, scope_id)
                 value = score(**terms)
