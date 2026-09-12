@@ -73,6 +73,68 @@ ABANDONED_AFTER_MINUTES = int(os.getenv("ARTERIES_ABANDONED_AFTER_MINUTES", "60"
 # same outage. One cheap probe answers it before anything is claimed.
 HEALTH_TIMEOUT = float(os.getenv("ARTERIES_HEALTH_TIMEOUT", "1.0"))
 
+# How many compile passes may hold a generation slot at once.
+#
+# Every turn spawns a detached compile process and nothing bounded them. Five
+# agents finishing turns is five processes posting to a server with two slots,
+# and llama.cpp queues the surplus invisibly -- a queued request looks exactly
+# like a slow one, with no error and nothing to shed. heart caps agents reaching
+# the local endpoint, but these are spawned by the hook and bypass its runner.
+#
+# A Postgres advisory lock rather than a file lock or an in-process semaphore,
+# because two checkouts share the database and it is the only thing both can see.
+# Postgres drops a session lock the instant its holder dies, so a killed compile
+# never wedges a slot -- the same property heart's flock pool relies on.
+COMPILE_SLOTS = int(os.getenv("ARTERIES_COMPILE_SLOTS", "0") or 0)
+_SLOT_KEY = "arteries.compile.slot"
+
+
+def _generation_slots() -> int:
+    """The server's parallelism, asked rather than guessed. Falls back to 2."""
+    if COMPILE_SLOTS > 0:
+        return COMPILE_SLOTS
+    try:
+        import httpx
+
+        base = GENERATE_URL.split("/v1/")[0]
+        reported = httpx.get(f"{base}/slots", timeout=HEALTH_TIMEOUT).json()
+        if isinstance(reported, list) and reported:
+            return len(reported)
+    except Exception:
+        pass
+    return 2
+
+
+def _acquire_slot(conn) -> int | None:
+    """Take one of N slots, or None. Never waits.
+
+    Not a queue on purpose. A pass that cannot get a slot has claimed nothing,
+    so its rows are still `uncompiled` and the next turn finds them --
+    back-pressure that defers work rather than dropping it. Waiting would mean a
+    detached process holding a database connection for the length of someone
+    else's generation call.
+    """
+    with conn.cursor() as cur:
+        for slot in range(_generation_slots()):
+            cur.execute("SELECT pg_try_advisory_lock(hashtext(%s), %s)",
+                        (_SLOT_KEY, slot))
+            if cur.fetchone()[0]:
+                return slot
+    return None
+
+
+def _release_slot(conn, slot: int | None) -> None:
+    if slot is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(hashtext(%s), %s)",
+                        (_SLOT_KEY, slot))
+    except Exception:
+        # The session is ending anyway, and Postgres releases session locks when
+        # it does. Raising here would mask whatever actually went wrong.
+        pass
+
 COMPILE_SYSTEM = """You are a memory compiler. You receive raw conversation extracts (ephemeral memories) and existing long-term memories (persistent). Your job:
 
 1. Distill the ephemeral records into concise, factual statements worth remembering long-term.
@@ -164,7 +226,10 @@ async def compile_once() -> dict[str, Any]:
         return {"status": "generator_unreachable", "claimed": 0}
 
     conn = psycopg2.connect(**DB_CONFIG)
+    slot = _acquire_slot(conn)
     try:
+        if slot is None:
+            return {"status": "no_generation_slot", "claimed": 0}
         _release_stale_claims(conn)
         claimed = _claim_ephemeral(conn)
         if not claimed:
@@ -219,6 +284,7 @@ async def compile_once() -> dict[str, Any]:
         runlog.log_event("memory.compile.completed", "arteries", stats, project_id=PROJECT_ID, agent_id=AGENT_PROCESS_ID)
         return stats
     finally:
+        _release_slot(conn, slot)
         conn.close()
 
 
