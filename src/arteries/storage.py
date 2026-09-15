@@ -298,13 +298,21 @@ def insert_persistent(
     scope: str | None = None,
     embedding: list[float] | None = None,
     source_meta: dict[str, Any] | None = None,
+    episode_id: str | None = None,
+    task_id: str | None = None,
+    kind: str = "fact",
 ) -> str:
+    # episode_id/task_id are columns the table has always had and nothing set:
+    # evergreen.candidates selects them, retrieval can filter on them, and every
+    # row written through here carried NULL. A fact that came out of a run
+    # should say which run.
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO arteries.persistent
-                (fact, embedding, domains, confidence, project_id, source_meta)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb)
+                (fact, embedding, domains, confidence, project_id, source_meta,
+                 episode_id, task_id, kind)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -317,6 +325,9 @@ def insert_persistent(
                 # `art remember --scope user`. Only its storage moved.
                 psycopg2.extras.Json({**(source_meta or {}),
                                       **({"origin": scope} if scope else {})}),
+                episode_id,
+                task_id,
+                kind,
             ),
         )
         conn.commit()

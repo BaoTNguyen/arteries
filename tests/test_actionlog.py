@@ -179,3 +179,137 @@ class TestIngestUnscoredEpisodes(unittest.TestCase):
                  mock.patch.object(actionlog, "journal_append"):
                 actionlog.ingest_episodes(src)
         self.assertEqual([e["episode_id"] for e in seen], ["worker-a"])
+
+
+class TestIngestClosesEpisodes(unittest.TestCase):
+    """arteries.episodes was write-only: 299 of 299 rows read `running`, 287 of
+    them older than an hour, `ended_at` never set. The terminal fact was already
+    arriving here -- episode.json carries the outcome -- and nothing wrote it
+    down."""
+
+    def _episodes(self, tmp: Path, records: list[dict]) -> str:
+        path = tmp / "episodes.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in records))
+        return str(path)
+
+    def _ingest(self, records):
+        closed = []
+        with tempfile.TemporaryDirectory() as d:
+            src = self._episodes(Path(d), records)
+            with mock.patch.object(actionlog, "log_reward"), \
+                 mock.patch.object(actionlog, "_corpus_feedback"), \
+                 mock.patch.object(actionlog, "journal_append") as journal, \
+                 mock.patch.object(actionlog, "close_episodes",
+                                   side_effect=lambda c: closed.extend(c)):
+                actionlog.ingest_episodes(src)
+        return closed, journal
+
+    def test_a_scored_episode_is_closed_with_its_outcome(self):
+        closed, _ = self._ingest([
+            {"episode_id": "ep-1", "outcome": "pass", "reward": {"total": 0.9}}])
+        self.assertEqual(closed, [("ep-1", "pass", 0.9)])
+
+    def test_an_unscored_episode_still_ended(self):
+        """Skipped for scoring is not the same as still running. This was the
+        half that kept 287 rows open."""
+        closed, _ = self._ingest([
+            {"episode_id": "ep-2", "outcome": "blocked", "reward": {"total": None}}])
+        self.assertEqual(closed, [("ep-2", "blocked", None)])
+
+    def test_the_unscored_backlog_is_journalled_once_per_run_not_once_per_episode(self):
+        """O(runs x backlog) for a fact that cannot change: an unscored episode
+        can never become scored, so a backlog of 29 re-journalled itself on
+        every invocation -- 344 of the day's ~700 events."""
+        _, journal = self._ingest([
+            {"episode_id": f"ep-{i}", "outcome": "unverified", "reward": {"total": None}}
+            for i in range(29)])
+        self.assertEqual(journal.call_count, 1)
+        kwargs = journal.call_args.kwargs
+        self.assertEqual(kwargs["episodes"], 29)
+        self.assertEqual(kwargs["outcomes"], {"unverified": 29})
+
+    def test_nothing_unscored_says_nothing(self):
+        _, journal = self._ingest([
+            {"episode_id": "ep-1", "outcome": "pass", "reward": {"total": 1.0}}])
+        self.assertEqual(journal.call_count, 0)
+
+
+class TestEpisodeFacts(unittest.TestCase):
+    """An episode's record goes straight to persistent. There is nothing loose
+    to compile: episode.json is already the compiled form, and a model call to
+    re-say it would add cost, a failure mode at wrap-up, and room to invent."""
+
+    EP = {
+        "episode_id": "20260915-102848-a5d32c22",
+        "task_id": "work-20260915",
+        "repo_path": "/home/me/Projects/arteries",
+        "base_commit": "44b2c3b7094450c064b7471f9819533ed3b0d2a6",
+        "agent": "claude:haiku",
+        "outcome": "fail",
+        "diff_lines": 38,
+        "verifier_results": {"pytest": {"passed": False}, "ruff": {"passed": True}},
+        "scope_refused_paths": ["src/app.py"],
+        "reward": {"total": 0.2143, "components": {"public_tests": 0.0}},
+    }
+
+    def test_the_fact_is_mechanical(self):
+        line = actionlog.episode_fact(self.EP)
+        self.assertIn("fail", line)
+        self.assertIn("reward 0.2143", line)
+        self.assertIn("agent claude:haiku", line)
+        self.assertIn("38 diff lines", line)
+        self.assertIn("pytest failed", line)
+        self.assertIn("ruff passed", line)
+        self.assertIn("refused 1 path(s)", line)
+        self.assertIn("on arteries", line)      # the repo's name, not its path
+        self.assertNotIn("/home/me", line)
+
+    def test_an_unscored_episode_says_so_rather_than_reading_zero(self):
+        line = actionlog.episode_fact({**self.EP, "reward": {"total": None}})
+        self.assertIn("unscored", line)
+        self.assertNotIn("reward 0", line)
+
+    def test_a_row_names_its_episode(self):
+        """persistent.episode_id and task_id are columns the table always had
+        and nothing ever set."""
+        captured = {}
+        with mock.patch("arteries.storage.insert_persistent",
+                        side_effect=lambda **kw: captured.update(kw) or "row-1"), \
+             mock.patch.object(actionlog, "psycopg2") as pg:
+            pg.connect.return_value.__enter__.return_value.cursor.return_value \
+              .__enter__.return_value.fetchone.return_value = None
+            row = actionlog.record_episode(self.EP)
+        self.assertEqual(row, "row-1")
+        self.assertEqual(captured["episode_id"], self.EP["episode_id"])
+        self.assertEqual(captured["task_id"], "work-20260915")
+        self.assertEqual(captured["kind"], "episode")
+        self.assertIsNone(captured["embedding"], "backfilled, never blocking a wrap-up")
+
+    def test_recording_the_same_episode_twice_writes_one_row(self):
+        with mock.patch("arteries.storage.insert_persistent") as insert, \
+             mock.patch.object(actionlog, "psycopg2") as pg:
+            pg.connect.return_value.__enter__.return_value.cursor.return_value \
+              .__enter__.return_value.fetchone.return_value = (1,)
+            self.assertIsNone(actionlog.record_episode(self.EP))
+        insert.assert_not_called()
+
+
+def test_an_already_scored_episode_still_gets_its_record(monkeypatch, tmp_path):
+    """The reward skip used to come first, so only episodes new to a pass were
+    ever recorded and the whole history stayed invisible to memory."""
+    src = tmp_path / "eps.jsonl"
+    src.write_text(json.dumps({"episode_id": "old-1", "outcome": "pass",
+                               "reward": {"total": 1.0}}))
+    seen = []
+    with mock.patch.object(actionlog, "log_reward"), \
+         mock.patch.object(actionlog, "_corpus_feedback"), \
+         mock.patch.object(actionlog, "journal_append"), \
+         mock.patch.object(actionlog, "close_episodes"), \
+         mock.patch.object(actionlog, "record_episode", side_effect=seen.append), \
+         mock.patch.object(actionlog, "psycopg2") as pg:
+        cur = pg.connect.return_value.__enter__.return_value.cursor.return_value \
+                .__enter__.return_value
+        cur.fetchall.side_effect = [[("old-1",)], []]   # scored already, never recorded
+        count = actionlog.ingest_episodes(str(src))
+    assert count == 0, "the reward is not ingested twice"
+    assert [e["episode_id"] for e in seen] == ["old-1"], "but the record is written"
