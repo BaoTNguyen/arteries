@@ -104,10 +104,50 @@ def resolve(cwd: str | Path | None = None, *, db_config: dict | None = None) -> 
         if path == m.repo_path or path.is_relative_to(m.repo_path)
     ]
     if not matches:
+        # A git worktree of a tracked repo is that repo, at a different path.
+        # heart runs every agent in one -- ~/.cache/heart-ws/<hash> -- so without
+        # this, the turns of the only workload this system exists to learn from
+        # were all skipped as untracked. Measured: nine skipped turns from three
+        # sessions, zero memories.
+        #
+        # Not a loosening of the guard. `--git-common-dir` resolves a worktree to
+        # the repository it belongs to and resolves to nothing for a directory
+        # that is not one, so the only paths this admits are checkouts of repos
+        # someone already registered. A benchmark exporting an unregistered
+        # ARTERIES_PROJECT still gets nothing, which is what the guard is for.
+        main_repo = _worktree_parent(path)
+        if main_repo is not None and main_repo != path:
+            return resolve(main_repo, db_config=db_config)
         return None
     # Longest match wins, so a tracked repo nested inside another resolves to
     # the inner one.
     return max(matches, key=lambda m: len(m.repo_path.parts))
+
+
+def _worktree_parent(path: Path) -> Path | None:
+    """The repository a worktree belongs to, or None.
+
+    `--git-common-dir` is the shared `.git` of the whole repository: inside a
+    linked worktree it points at the main checkout's, and inside an ordinary
+    checkout it points at that checkout's own. Its parent is therefore the
+    repository root either way, which is exactly the path `members` records.
+
+    Never raises. Scope resolution gates every write, and a git invocation
+    failing should mean "not tracked" rather than "no memory this turn".
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, timeout=5, check=True)
+    except Exception:
+        return None
+    common = out.stdout.strip()
+    if not common:
+        return None
+    return Path(common).resolve().parent
 
 
 def current_project(*, db_config: dict | None = None) -> str:
