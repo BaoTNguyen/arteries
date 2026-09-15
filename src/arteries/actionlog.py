@@ -218,19 +218,37 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
         else:
             episodes = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
-    ingested = set()
+    ingested: set = set()
+    recorded: set = set()
     try:
         with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
             cur.execute("SELECT DISTINCT episode_id FROM arteries.rewards WHERE reward_type = 'episode'")
             ingested = {row[0] for row in cur.fetchall()}
+            # one query rather than an exists-check per episode: a runs
+            # directory is hundreds of episodes and this pass reads all of them
+            cur.execute("""SELECT episode_id FROM arteries.persistent
+                            WHERE kind = 'episode' AND episode_id IS NOT NULL
+                              AND valid_until IS NULL""")
+            recorded = {row[0] for row in cur.fetchall()}
     except Exception:
         pass  # ponytail: no dedup in jsonl-fallback mode; re-ingest after db is back
 
     count = skipped = 0
+    unscored: dict[str, int] = {}
+    _closed: list[tuple[str, str | None, float | None]] = []
     saved = {k: os.environ.get(k) for k in ("ARTERIES_EPISODE_ID", "ARTERIES_TASK_ID")}
     try:
         for ep in episodes:
-            if not ep.get("episode_id") or ep["episode_id"] in ingested:
+            if not ep.get("episode_id"):
+                continue
+            # Before the reward skip, not after. An episode whose reward is
+            # already ingested still needs its record written once -- otherwise
+            # only episodes new to this pass ever got one, and the entire
+            # history stayed invisible to memory.
+            if ep["episode_id"] not in recorded:
+                record_episode(ep)
+                recorded.add(ep["episode_id"])
+            if ep["episode_id"] in ingested:
                 continue
             os.environ["ARTERIES_EPISODE_ID"] = ep["episode_id"]
             os.environ["ARTERIES_TASK_ID"] = ep.get("task_id") or ""
@@ -250,9 +268,10 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
                 # to default only on a MISSING key, so a present null reached
                 # float() and raised -- which aborted the loop, leaving every
                 # later episode in the directory permanently unread.
-                journal_append("arteries", "reward.unscored", reward_source="heart",
-                               outcome=ep.get("outcome"))
+                unscored[ep.get("outcome") or "unknown"] = 1 + unscored.get(
+                    ep.get("outcome") or "unknown", 0)
                 skipped += 1
+                _closed.append((ep["episode_id"], ep.get("outcome"), None))
                 _corpus_feedback(ep)  # capillaries still wants the outcome
                 continue
             log_reward(
@@ -267,15 +286,149 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
                 cost_usd=usage.get("cost_usd"),
             )
             _corpus_feedback(ep)
+            _closed.append((ep["episode_id"], ep.get("outcome"), total))
             count += 1
     finally:
         for k, v in saved.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    close_episodes(_closed)
     if skipped:
         # one line, because silence here is how you fail to notice that most of
         # a week's episodes carried no score at all
         print(f"skipped {skipped} unscored episode(s)", file=sys.stderr)
+        # One event for the run, not one per episode. It used to be per episode,
+        # and an unscored episode can never become scored -- so a backlog of 29
+        # re-journalled itself on every invocation and grew the day's journal to
+        # 344 `reward.unscored` events out of ~700. O(runs x backlog) for a fact
+        # that does not change. The tally keeps what the event was for.
+        journal_append("arteries", "reward.unscored", reward_source="heart",
+                       episodes=skipped, outcomes=unscored)
     return count
+
+
+def episode_fact(ep: dict) -> str:
+    """One line of what an episode did. Mechanical only.
+
+    Every clause is read off episode.json -- outcome, reward, which verifiers
+    ran and what they said, how big the diff was, which agent. No summary of
+    the agent's reasoning and no judgment about whether the work was good: the
+    reward already scores that, and a model's account of its own failed run is
+    the last thing that should harden into memory.
+    """
+    reward = ep.get("reward") or {}
+    total = reward.get("total")
+    parts = [f"heart episode {ep.get('episode_id')}"]
+    if task := ep.get("task_id"):
+        parts.append(f"({task})")
+    if repo := ep.get("repo_path"):
+        parts.append(f"on {Path(repo).name}")
+    if base := ep.get("base_commit"):
+        parts.append(f"@{base[:12]}")
+    line = " ".join(parts) + f": {ep.get('outcome') or 'unknown'}"
+    line += f", reward {total:.4g}" if isinstance(total, (int, float)) else ", unscored"
+    if agent := ep.get("agent"):
+        line += f"; agent {agent}"
+    if (lines := ep.get("diff_lines")) is not None:
+        line += f"; {lines} diff lines"
+    verdicts = [f"{name} {'passed' if r.get('passed') else 'failed'}"
+                for name, r in (ep.get("verifier_results") or {}).items()]
+    if verdicts:
+        line += "; verifiers: " + ", ".join(sorted(verdicts))
+    if refused := ep.get("scope_refused_paths"):
+        line += f"; refused {len(refused)} path(s)"
+    return line
+
+
+def record_episode(ep: dict) -> str | None:
+    """Write what an episode did straight to persistent. Returns the row id.
+
+    Straight to persistent, with no ephemeral row in between, because the
+    compile pass exists to turn a session's loose turns into a durable claim and
+    there is nothing loose here: episode.json is already the compiled form. A
+    model call to re-say it would add cost, a failure mode at wrap-up, and an
+    opportunity to invent.
+
+    Written for every episode, not just sandboxed ones -- the sandbox is a scope
+    boundary, not a category of run.
+
+    Idempotent on episode_id, so a re-ingest of the same runs directory does not
+    accumulate one row per pass.
+    """
+    eid = ep.get("episode_id")
+    if not eid:
+        return None
+    try:
+        from arteries import storage
+
+        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
+            cur.execute("""SELECT 1 FROM arteries.persistent
+                            WHERE episode_id = %s AND kind = 'episode'
+                              AND valid_until IS NULL LIMIT 1""", (eid,))
+            if cur.fetchone():
+                return None
+        return storage.insert_persistent(
+            project_id=os.getenv("ARTERIES_PROJECT") or PROJECT_ID,
+            fact=episode_fact(ep),
+            domains=["episode"],
+            # embedding deferred: `art doctor` backfills null embeddings, and a
+            # wrap-up that needs the embedding service up is a wrap-up that
+            # fails when it is down
+            embedding=None,
+            source_meta={"source": "heart", "outcome": ep.get("outcome"),
+                         "reward": (ep.get("reward") or {}).get("total"),
+                         "components": (ep.get("reward") or {}).get("components") or {},
+                         "agent": ep.get("agent"), "repo_path": ep.get("repo_path"),
+                         "base_commit": ep.get("base_commit"),
+                         "diff_lines": ep.get("diff_lines"),
+                         "usage": ep.get("usage") or {}},
+            episode_id=eid,
+            task_id=ep.get("task_id"),
+            kind="episode",
+        )
+    except Exception:
+        # the reward rows and the closed status already landed; a memory row is
+        # never worth failing an ingest over
+        return None
+
+
+def close_episodes(closures: list[tuple[str, str | None, float | None]]) -> int:
+    """Mark episodes finished. Returns how many rows moved off `running`.
+
+    arteries.episodes was write-only: `_upsert_episode` creates a row the first
+    time a decision or reward carries an episode id, and nothing ever updated
+    it. 299 of 299 rows read `running`, 287 of them older than an hour, and
+    `ended_at` was never set -- so any question of the form "what finished, and
+    how" was unanswerable from the database, while retention and activity logic
+    read a column with one value in it.
+
+    Here rather than in heart because heart never talks to Postgres. The
+    terminal fact already arrives on this side: `art rewards` reads
+    episode.json, which carries the outcome and the reward. Closing on ingest
+    means the row closes exactly when the fact that closes it is read, scored or
+    not -- an episode skipped as unscored is still an episode that ended.
+
+    `WHERE ended_at IS NULL` so a re-ingest cannot rewrite history, the same
+    guard runlog.close_run has always used.
+    """
+    rows = [(outcome or "finished", json.dumps({"reward_total": total}), eid)
+            for eid, outcome, total in closures if eid]
+    if not rows:
+        return 0
+    try:
+        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
+            psycopg2.extras.execute_batch(cur, """
+                UPDATE arteries.episodes
+                   SET status = %s,
+                       ended_at = now(),
+                       metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb
+                 WHERE id = %s AND ended_at IS NULL
+            """, rows)
+            conn.commit()
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    except Exception:
+        # the reward rows are already written; a closed status is a read-side
+        # convenience, never worth failing an ingest over
+        return 0
 
 
 def _run(repo_path: str | Path | None) -> dict[str, Any]:
