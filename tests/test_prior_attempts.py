@@ -66,4 +66,12 @@ def test_the_packet_can_report_what_went_into_it():
     packet.build_packet(message="probe", budget=400, provenance=provenance)
     assert isinstance(provenance, list)
     for record in provenance:
-        assert {"tier", "id", "score"} <= set(record)
+        assert {"tier", "id"} <= set(record)
+        # `score` or `rank`, not both: after rank fusion the number a row
+        # carries is not comparable across runs with different arm sizes, so
+        # that path records position instead. Either answers "how did this get
+        # here", which is what training on retrieval outcome needs.
+        assert {"score", "rank"} & set(record), record
+    # and it must actually have looked at something -- this assertion passed
+    # vacuously for as long as the fused path returned nothing
+    assert provenance, "no memories retrieved; the check below proved nothing"
