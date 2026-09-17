@@ -442,7 +442,7 @@ CREATE INDEX IF NOT EXISTS idx_packets_session
 CREATE TABLE IF NOT EXISTS arteries.memory_edges (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id      TEXT NOT NULL,
-    src_kind        TEXT NOT NULL,   -- ephemeral|persistent|evergreen|entity|chunk|document
+    src_kind        TEXT NOT NULL,   -- ephemeral|persistent|evergreen|entity|chunk|document|literal
     src_id          TEXT NOT NULL,
     dst_kind        TEXT NOT NULL,
     dst_id          TEXT NOT NULL,
