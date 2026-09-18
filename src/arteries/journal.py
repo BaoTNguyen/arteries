@@ -21,6 +21,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import psycopg2
+import psycopg2.extras
+
+from arteries.config import DB_CONFIG, PROJECT_ID as _PROJECT
+
 
 def journal_dir() -> Path:
     # The directory is deliberately unchanged by the rename: the files on disk
@@ -178,9 +183,6 @@ def _known_run_ids(ids: set) -> set:
     """Which of these run ids exist in agent_runs. Empty on any failure, which
     detaches every id -- the events still land, just without the join."""
     try:
-        import psycopg2
-
-        from arteries.config import DB_CONFIG
         with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
             cur.execute("SELECT id::text FROM arteries.agent_runs WHERE id::text = ANY(%s)",
                         (list(ids),))
@@ -251,11 +253,6 @@ def _store(events: list[dict]) -> int:
     if not events:
         return 0
     try:
-        import psycopg2
-        import psycopg2.extras
-
-        from arteries.config import DB_CONFIG
-        from arteries.config import PROJECT_ID as _PROJECT
         events = _detach_unknown_runs(events)
         rows = [
             (e["id"], e.get("run_id"),

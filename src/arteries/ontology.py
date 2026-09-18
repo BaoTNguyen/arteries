@@ -30,6 +30,7 @@ from pathlib import Path
 import psycopg2
 import psycopg2.extras
 
+from arteries import degrade
 from arteries.config import DB_CONFIG
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ def load(path: str | Path, source: str | None = None, db_config: dict | None = N
     your .ttl and re-running is the expected workflow.
     """
     try:
+        # Local: rdflib is the `ontology` extra, and only this command needs it.
         from rdflib import RDF, RDFS, Graph, OWL, URIRef
         from rdflib.namespace import SKOS
     except ImportError as exc:  # pragma: no cover - depends on optional extra
@@ -245,7 +247,6 @@ def _lookup(db_config: dict | None = None,
                     table[key] = (uri, kind, label)
             _cache[cache_key] = table
     except Exception as exc:
-        from arteries import degrade
         degrade.note(exc, "ontology lookup")
         _cache[cache_key] = {}
     finally:

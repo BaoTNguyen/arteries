@@ -24,6 +24,8 @@ import logging
 import socket
 from typing import Any
 
+from arteries import runlog
+
 logger = logging.getLogger(__name__)
 
 # Failures that mean the world is unavailable, not that the code is wrong.
@@ -72,7 +74,6 @@ def note(exc: BaseException, what: str, **context: Any) -> str:
     # quiet, because quiet is how it ships.
     logger.error("BUG caught while degrading %s: %s", what, kind, exc_info=True)
     try:
-        from arteries import runlog
         runlog.log_event("internal.bug_swallowed", "arteries",
                          {"where": what, "error_type": kind,
                           "error": (str(exc) or repr(exc))[:300], **context})

@@ -22,6 +22,7 @@ import io
 import logging
 import os
 import re
+import subprocess
 import sys
 
 from arteries import actionlog, degrade, memory_select, runlog, scope, storage, triage
@@ -336,7 +337,6 @@ def _spawn_detached_compile(message: str = "") -> None:
     running after the hook returns. It inherits cwd + ARTERIES_* env, which is
     all compile_once needs.
     """
-    import subprocess
     env = dict(os.environ)
     if message:
         env["ARTERIES_WARM_MESSAGE"] = message[:4000]

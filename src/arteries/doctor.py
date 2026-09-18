@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,8 @@ import psycopg2
 
 from arteries import runlog, scope
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG
+from arteries.embed import embed_texts_sync
+from arteries.packet import PACKET_SCHEMA_VERSION
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -161,8 +164,6 @@ def unreached(root: Path | None = None) -> list[str]:
     Deliberately crude: a name-level grep, not a call graph. It over-reports
     rather than under-reports, and _REACHED_INDIRECTLY carries the exceptions.
     """
-    import re
-
     root = root or Path(__file__).resolve().parent
     sources = {p: p.read_text() for p in sorted(root.glob("*.py"))}
     # Shell entry points count as callers. `scripts/watch.sh` has called into
@@ -189,10 +190,6 @@ def unreached(root: Path | None = None) -> list[str]:
 
 def integrity(project: str) -> dict[str, Any]:
     """Cheap consistency checks that need no repair to be worth reporting."""
-    import psycopg2
-
-    from arteries.config import DB_CONFIG
-
     out: dict[str, Any] = {}
     try:
         with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
@@ -303,8 +300,6 @@ def _compact_prompt_stale() -> bool:
     generated file carries `packet-schema: vN`; this compares it.
     """
     try:
-        from arteries.packet import PACKET_SCHEMA_VERSION
-
         prompt = Path.cwd() / ".arteries" / "codex" / "compact_prompt.txt"
         if not prompt.is_file():
             return False
@@ -319,12 +314,6 @@ def fix(project: str) -> dict[str, Any]:
     Was `art backfill-embeddings`. A repair belongs next to the check that
     reports it needs doing, not as its own top-level verb.
     """
-    import psycopg2
-    import psycopg2.extras
-
-    from arteries.config import DB_CONFIG
-    from arteries.embed import embed_texts_sync
-
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:

@@ -50,8 +50,7 @@ class MarkerTests(unittest.TestCase):
                 patch.object(hook_observe, "read_stdin_json", return_value={}), \
                 patch.object(hook_observe, "_message", return_value="a question"), \
                 patch.object(hook_observe, "_transcript", return_value=None), \
-                patch.object(hook_observe, "normalize"), \
-                patch.object(hook_observe, "apply_event_env"), \
+                patch.object(hook_observe, "normalize_from_args"), \
                 redirect_stdout(buf):
             hook_observe.main([])
         self.assertIn(RETRIEVED_OPEN, buf.getvalue(), "arteries.hook_observe")

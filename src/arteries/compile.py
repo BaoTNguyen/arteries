@@ -21,14 +21,14 @@ import asyncio
 import json
 import os
 import uuid
+from collections import Counter
 from typing import Any
 
 import httpx
 import psycopg2
 import psycopg2.extras
-from collections import Counter
 
-from arteries import evidence, graph, promote, runlog, scope, slots
+from arteries import embed, evidence, graph, promote, runlog, scope, slots
 from arteries.config import (AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL,
                              PROJECT_ID, SESSION_ID)
 from arteries.scope import SCOPE_CTE
@@ -148,8 +148,6 @@ def _generator_reachable() -> bool:
     events describing the same dead socket. `/health` is llama-server's own
     endpoint and answers in milliseconds when it answers at all.
     """
-    import httpx
-
     base = GENERATE_URL.split("/v1/")[0]
     try:
         return httpx.get(f"{base}/health", timeout=HEALTH_TIMEOUT).status_code == 200
@@ -397,8 +395,7 @@ def _load_persistent_context(conn, batch: list[dict] | None = None,
 
     vec = None
     if batch:
-        from arteries.embed import embed_text_sync
-        vec = embed_text_sync(" ".join(r["fact"] for r in batch)[:4000])
+        vec = embed.embed_text_sync(" ".join(r["fact"] for r in batch)[:4000])
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         if vec:
@@ -685,8 +682,6 @@ def _write_results(conn, result: dict, claimed_ids: list,
     claim silently lands in whatever ARTERIES_PROJECT happened to be set to.
     """
     project_id = project_id or PROJECT_ID
-    from arteries.embed import embed_texts_sync
-
     new_count = 0
     superseded_count = 0
 
@@ -711,7 +706,7 @@ def _write_results(conn, result: dict, claimed_ids: list,
             project_id=project_id, agent_id=AGENT_PROCESS_ID)
     memories = [m for m, why in judged if why is None]
 
-    vectors = embed_texts_sync([m["fact"] for m in memories])
+    vectors = embed.embed_texts_sync([m["fact"] for m in memories])
     memories, vectors, duplicates = _reject_duplicates(conn, memories, vectors, project_id)
     if duplicates:
         runlog.log_event("memory.compile.duplicates_rejected", "arteries",

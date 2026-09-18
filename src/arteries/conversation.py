@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from arteries.eventjson import text_from_mapping
+from arteries.usage import _codex_rollout
 
 TAIL_BYTES = 256 * 1024
 WINDOW_TURNS = 8
@@ -31,7 +32,6 @@ def recent_user_turns(transcript: str | None = None, limit: int = WINDOW_TURNS) 
 def _recent_turns(transcript: str | None, limit: int, roles: set[str]) -> list[str]:
     path = transcript or os.getenv("ARTERIES_TRANSCRIPT")
     if not path and os.getenv("ARTERIES_CLI") == "codex":
-        from arteries.usage import _codex_rollout
         path = _codex_rollout(os.environ.get("ARTERIES_EVENT_CWD") or os.getcwd())
     if not path:
         return []

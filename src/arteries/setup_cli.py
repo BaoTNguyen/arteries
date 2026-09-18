@@ -6,8 +6,16 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+import psycopg2
+
+from arteries import scope as scope_mod
+from arteries.config import DB_CONFIG
+from arteries.packet import PACKET_SCHEMA_VERSION, STATE_SECTION_TITLES
+from arteries.setup_db import setup
 
 MARKER_START = "<!-- arteries:start -->"
 MARKER_END = "<!-- arteries:end -->"
@@ -111,7 +119,6 @@ def _ensure_schema() -> None:
     """Apply schema.sql. Absorbed from the old `art setup-db`, so a fresh repo
     is one command rather than two that had to be run in the right order."""
     try:
-        from arteries.setup_db import setup
         setup()
     except Exception as exc:
         print(f"WARN: schema setup skipped ({exc.__class__.__name__}); "
@@ -125,7 +132,6 @@ def _register_scope(ctx: Context, scope_id: str | None) -> None:
     it in, and a group is something you ask for.
     """
     try:
-        from arteries import scope as scope_mod
         existing = scope_mod.scope_for(ctx.project_name)
         if existing and not scope_id:
             print(f"OK: {ctx.project_name} already tracked in scope '{existing}'")
@@ -145,9 +151,6 @@ def _purge(args) -> int:
     database (config.py), so DROP DATABASE here would take capillaries' prompts,
     chunks, and skills with it. Dumps first; a failed dump aborts the drop.
     """
-    import subprocess
-    from arteries.config import DB_CONFIG
-
     cwd = args.cwd.resolve()
     print(f"purge plan for {cwd}:")
     for provider in PROVIDERS:
@@ -185,7 +188,6 @@ def _purge(args) -> int:
         return 1
     print(f"OK: dumped to {dump}")
 
-    import psycopg2
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         with conn.cursor() as cur:
@@ -871,8 +873,6 @@ def _codex_compact_prompt() -> str:
     sections come from `packet.SECTION_TITLES` now, and the stamped version is
     what `art doctor` compares against to notice drift.
     """
-    from arteries.packet import PACKET_SCHEMA_VERSION, STATE_SECTION_TITLES
-
     # STATE_SECTION_TITLES, not SECTION_TITLES: this prompt only ever fires on
     # compaction, and the renderer split (planning/compaction_v3.md §2) gave
     # that path its own layout.
