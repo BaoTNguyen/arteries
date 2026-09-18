@@ -14,8 +14,8 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
+from arteries import degrade, normalize, runlog, scope as scope_mod
 from arteries.config import DB_CONFIG
-from arteries import normalize
 from arteries.scope import SCOPE_CTE
 
 
@@ -451,8 +451,6 @@ def get_evergreen_by_relevance(project_id: str, query_embedding: list[float],
     that can surface a constraint recorded in arteries while someone is working
     in heart.
     """
-    from arteries import scope as scope_mod
-
     scope_id = scope_mod.scope_for(project_id) or project_id
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -517,8 +515,6 @@ def record_packet(project_id: str, member_ids: list[str],
             )
             conn.commit()
     except Exception as exc:
-        from arteries import degrade
-
         degrade.note(exc, "packet chaining")
 
 
@@ -540,8 +536,6 @@ def latest_packet(project_id: str, session_id: str | None = None) -> dict[str, A
             row = cur.fetchone()
             return dict(row) if row else None
     except Exception as exc:
-        from arteries import degrade
-
         degrade.note(exc, "packet history")
         return None
 
@@ -573,8 +567,6 @@ def tool_results_since(project_id: str, session_id: str | None,
             )
             return [dict(r) for r in cur.fetchall()]
     except Exception as exc:
-        from arteries import degrade
-
         degrade.note(exc, "tool result window")
         return []
 
@@ -605,8 +597,6 @@ def recent_supersede_edges(project_id: str, since: Any, limit: int = 20) -> list
             )
             return [dict(r) for r in cur.fetchall()]
     except Exception as exc:
-        from arteries import degrade
-
         degrade.note(exc, "supersede edges")
         return []
 
@@ -643,8 +633,6 @@ def near_duplicate_ephemeral_pairs(project_id: str, session_id: str | None,
             )
             return [dict(r) for r in cur.fetchall()]
     except Exception as exc:
-        from arteries import degrade
-
         degrade.note(exc, "near-duplicate ephemeral pairs")
         return []
 
@@ -661,8 +649,6 @@ def open_episodes(project_id: str, limit: int = 10) -> list[dict[str, Any]]:
             )
             return [dict(r) for r in cur.fetchall()]
     except Exception as exc:
-        from arteries import degrade
-
         degrade.note(exc, "open episodes")
         return []
 
@@ -690,8 +676,6 @@ def recent_packet_members(project_id: str, session_id: str | None = None,
             )
             return {member for (row,) in cur.fetchall() for member in (row or [])}
     except Exception as exc:
-        from arteries import degrade
-
         degrade.note(exc, "packet history")
         return set()
 
@@ -722,8 +706,6 @@ def get_corpus_suggestion(project_id: str, key: str,
 
 
 def put_corpus_suggestion(project_id: str, key: str, suggestion: dict) -> None:
-    from arteries import runlog
-
     runlog.log_event("corpus.suggestion.cached", "arteries",
                      {"key": key, "suggestion": suggestion},
                      project_id=project_id)
@@ -737,8 +719,6 @@ def get_evergreen_count(project_id: str) -> int:
     so reported a missing function as a missing database for months. A count is
     what the watch actually wanted.
     """
-    from arteries import scope as scope_mod
-
     scope_id = scope_mod.scope_for(project_id) or project_id
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -783,7 +763,6 @@ def touch_persistent(ids: list[str]) -> None:
             )
             conn.commit()
     except Exception as exc:
-        from arteries import degrade
         degrade.note(exc, "access_count reinforcement")
 
 

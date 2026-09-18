@@ -17,11 +17,12 @@ import argparse
 import json
 from collections.abc import Sequence
 
-from arteries import scope as scope_mod
 import psycopg2.extras
 
-from arteries import storage
+from arteries import degrade, evergreen, scope as scope_mod, storage
+from arteries.config import DB_CONFIG
 from arteries.docs import _infer_domains
+from arteries.embed import embed_text_sync
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -99,11 +100,6 @@ def _do_add(args) -> int:
         # straight in: promotion goes one level at a time, and an authored write
         # is exempt from that rule only because a human named the tier. The
         # lineage still has to be real.
-        import psycopg2
-
-        from arteries import evergreen
-        from arteries.config import DB_CONFIG
-
         project = scope_mod.current_project()
         conn = psycopg2.connect(**DB_CONFIG)
         try:
@@ -125,8 +121,6 @@ def _do_add(args) -> int:
             conn.commit()
             print(f"evergreen:  {str(eid)[:8]}  core")
         except Exception as exc:
-            from arteries import degrade
-
             degrade.note(exc, "core write")
         finally:
             conn.close()
@@ -205,15 +199,12 @@ def _resolve_id(prefix: str) -> str | None:
 
 def _embed(text: str) -> list[float] | None:
     try:
-        from arteries.embed import embed_text_sync
         return embed_text_sync(text)
     except Exception:
         return None
 
 
 def _update_embedding(persistent_id: str, vec: list[float]) -> None:
-    import psycopg2
-    from arteries.config import DB_CONFIG
     conn = psycopg2.connect(**DB_CONFIG)
     with conn.cursor() as cur:
         cur.execute(

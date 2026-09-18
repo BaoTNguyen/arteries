@@ -26,13 +26,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import re
 
 import httpx
 import psycopg2
 import psycopg2.extras
 
+from arteries import memory_select, route as router, scope, storage
 from arteries.config import COMPILE_MODEL, DB_CONFIG, GENERATE_URL
+from arteries.embed import embed_text_sync
 
 # Two populations, because they ask different things of retrieval and the answer
 # differs. capillaries names them "describing" and "naming" and measured a
@@ -164,9 +167,6 @@ def run(cases: list[dict], project: str, window: int) -> dict:
     Also reports what expansion costs: claims added per query, and how many of
     those were the target versus filler occupying context budget.
     """
-    from arteries import memory_select, route as router, storage
-    from arteries.embed import embed_text_sync
-
     # context_from_env() reads ARTERIES_PROJECT, which a human running `art
     # benchmark` has not set -- so it resolved to "default" while the queries ran
     # against the cwd-resolved project. The scope CTE then found no members and
@@ -237,8 +237,6 @@ def run(cases: list[dict], project: str, window: int) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from arteries import scope
-
     parser = argparse.ArgumentParser(prog="art benchmark", description=__doc__)
     parser.add_argument("--n", type=int, default=20, help="claims to sample")
     parser.add_argument("--window", type=int, nargs="+", default=[1, 3, 10],
@@ -251,8 +249,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--load", help="reuse a saved query set instead of generating")
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
-
-    import pathlib
 
     project = args.project or scope.current_project()
 

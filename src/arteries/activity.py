@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import psycopg2
 
+from arteries import degrade
 from arteries.config import DB_CONFIG
 
 
@@ -35,8 +36,6 @@ def touch(project_id: str, db_config: dict | None = None) -> None:
             )
             conn.commit()
     except Exception as exc:
-        from arteries import degrade
-
         degrade.note(exc, "activity clock")
 
 

@@ -16,6 +16,7 @@ Two rules the rest of the code depends on:
 
 from __future__ import annotations
 
+import argparse
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,8 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
+from arteries import scope
+from arteries.config import DB_CONFIG
 from arteries.scope import SCOPE_CTE
 
 logger = logging.getLogger(__name__)
@@ -53,6 +56,7 @@ def upsert_entity(cur, scope_id: str, raw_name: str, kind: str = "concept") -> E
     An unmatched name is kept with ontology_valid=false, never dropped -- a
     vocabulary you are still growing must not eat the facts it does not cover.
     """
+    # Local: ontology pulls in difflib and a database connection.
     from arteries import ontology
 
     name = (raw_name or "").strip()
@@ -194,7 +198,6 @@ def expand(conn, project_id: str, seeds: list[dict[str, Any]], *, hops: int = 1,
 
 
 def stats(project_id: str, db_config: dict | None = None) -> dict[str, Any]:
-    from arteries.config import DB_CONFIG
     conn = psycopg2.connect(**(db_config or DB_CONFIG))
     try:
         with conn.cursor() as cur:
@@ -210,11 +213,6 @@ def stats(project_id: str, db_config: dict | None = None) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import argparse
-
-    from arteries import scope
-    from arteries.config import DB_CONFIG
-
     parser = argparse.ArgumentParser(prog="art graph", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -240,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     project = scope.current_project()
 
     if args.cmd == "export":
+        # Local: export is a CLI errand, and gexf has no business on the retrieval path.
         from arteries import gexf
 
         nodes, edges = gexf.collect(project, seed=args.seed, hops=args.hops,
