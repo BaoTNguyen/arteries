@@ -9,7 +9,7 @@ import os
 from typing import Any
 
 from arteries import degrade, runlog
-from arteries.cli_normalize import apply_event_env, normalize
+from arteries.cli_normalize import add_event_args, normalize_from_args
 from arteries.config import PROJECT_ID
 from arteries.eventjson import (
     AGENT_TRANSCRIPT_KEYS,
@@ -34,22 +34,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="only ingest when the event carries an agent-specific transcript (SubagentStop safety)",
     )
-    parser.add_argument("--cli", default=os.getenv("ARTERIES_CLI", "generic"))
-    parser.add_argument("--event", default="assistant_response")
-    parser.add_argument("--project", default=os.getenv("ARTERIES_PROJECT", "default"))
-    parser.add_argument("--agent", default=os.getenv("ARTERIES_AGENT_ID"))
+    add_event_args(parser, event_default="assistant_response")
     args = parser.parse_args(argv)
 
     event = read_stdin_json() if args.stdin_json else {}
     if event:
-        normalized = normalize(
-            event,
-            cli=args.cli,
-            fallback_event=args.event,
-            project_id=args.project,
-            agent_id=args.agent,
-        )
-        apply_event_env(normalized)
+        normalize_from_args(event, args)
 
     if args.require_agent_transcript and not first_text(event, *AGENT_TRANSCRIPT_KEYS):
         return 0
