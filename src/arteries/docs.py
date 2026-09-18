@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from arteries import scope as scope_mod
-from arteries import storage
+from arteries import scope as scope_mod, storage
+from arteries.embed import embed_texts_sync
 
 DEFAULT_INCLUDE = ["AGENTS.md", "README.md", "*.md", "*.txt", "*.rst"]
 IGNORE_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build", "target"}
@@ -226,7 +226,6 @@ def import_review(review_path: Path, write: bool = False) -> dict[str, Any]:
         # Embed up front, in one call. Without a vector an imported fact is
         # invisible to get_persistent_by_relevance -- write-only memory, which
         # is worse than no memory because it looks like it worked.
-        from arteries.embed import embed_texts_sync
         vectors = dict(zip(
             (b["memory_id"] for b in accepted),
             embed_texts_sync([b["fact"] for b in accepted]),

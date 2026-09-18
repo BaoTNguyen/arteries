@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import logging
-
 import argparse
 import json
+import logging
 import os
 from typing import Any
 
-from arteries import runlog
-from arteries.config import PROJECT_ID
+from arteries import degrade, runlog
 from arteries.cli_normalize import apply_event_env, normalize
+from arteries.config import PROJECT_ID
 from arteries.eventjson import (
     AGENT_TRANSCRIPT_KEYS,
     TRANSCRIPT_KEYS,
@@ -20,7 +19,7 @@ from arteries.eventjson import (
     read_stdin_json,
     text_from_mapping,
 )
-from arteries.extract import store_assistant_response
+from arteries.extract import store_assistant_response, strip_report
 
 TAIL_BYTES = 256 * 1024
 
@@ -89,7 +88,6 @@ def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = F
             prior = recent_user_turns(limit=1)
             user_turn = prior[-1] if prior else ""
         except Exception as exc:
-            from arteries import degrade
             degrade.note(exc, "recent turn lookup")
     stored = store_assistant_response(text, user_turn)
     preview = text[:2000]
@@ -111,7 +109,6 @@ def capture_response(text: str, turn_id: str | None = None, prior_turn: bool = F
         # Only on a drop: the counters that say which filter did it. Costs
         # nothing on the 29% that store, and turns the other 71% from an
         # unexplained zero into a diagnosis.
-        from arteries.extract import strip_report
         try:
             report |= strip_report(text, user_turn)
         except Exception as exc:
