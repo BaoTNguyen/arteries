@@ -21,8 +21,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PARENT_AGENT_ID, PROJECT_ID
 from arteries import activity, degrade, normalize, storage
+from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PARENT_AGENT_ID, PROJECT_ID
+from arteries.embed import embed_text_sync, embed_texts_sync
 
 # Capillaries owns the domain taxonomy; prefer it so the two ends of the memory
 # channel can't drift. But extraction is a pure-memory op — it must not hard-fail
@@ -110,8 +111,6 @@ def extract_and_store(message: str, embedding: list[float] | None = None) -> int
     vectors: list = [embedding] * len(extractions)
     if len(extractions) > 1:
         try:
-            from arteries.embed import embed_texts_sync
-
             vectors = embed_texts_sync([e.fact for e in extractions])
         except Exception as exc:
             # Memory must not fail a turn. A shared vector is worse than one per
@@ -267,7 +266,6 @@ def store_assistant_response(text: str, user_turn: str = "") -> int:
     # to reuse. Without it every assistant row lands NULL and the coverage
     # signal in eval.py compares each turn only against the user's own earlier
     # questions -- which cannot show that an answer already exists.
-    from arteries.embed import embed_text_sync
     storage.insert_ephemeral(
         project_id=PROJECT_ID,
         agent_process_id=AGENT_PROCESS_ID,

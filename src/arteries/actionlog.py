@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +24,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import runlog
+from arteries import runlog, storage
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
 from arteries.journal import journal_append
 
@@ -180,8 +181,6 @@ def _corpus_feedback_post(body: dict) -> None:
     outcome, so it is the contract that does not break when those internals
     move.
     """
-    import urllib.request
-
     url = os.getenv("CAPILLARIES_URL", "http://127.0.0.1:8000") + "/agent/feedback"
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -358,8 +357,6 @@ def record_episode(ep: dict) -> str | None:
     if not eid:
         return None
     try:
-        from arteries import storage
-
         with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
             cur.execute("""SELECT 1 FROM arteries.persistent
                             WHERE episode_id = %s AND kind = 'episode'

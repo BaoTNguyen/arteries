@@ -21,17 +21,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
+import mimetypes
 import re
-from dataclasses import dataclass
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 import psycopg2
 import psycopg2.extras
 
-from arteries import graph, runlog, scope
-from arteries.config import DB_CONFIG
+from arteries import compile as compiler, evergreen, graph, runlog, scope
+from arteries.config import DB_CONFIG, FRONTIER_VISION_MODEL, VISION_MODEL, VISION_URL
+from arteries.embed import embed_texts_sync
 
 # Chunks are paragraph-grouped rather than fixed-width. A design document's unit
 # of meaning is the paragraph or the list under a heading, and splitting mid-
@@ -115,9 +119,6 @@ async def ingest_text(text: str, *, name: str, project: str,
     `name` is the identity the document is stored under -- reuse it and the
     digest guard works exactly as it does for a path.
     """
-    from arteries import compile as compiler
-    from arteries.embed import embed_texts_sync
-
     # Embedded images become descriptions before anything is chunked, so a
     # diagram's content lands in the same chunk as the prose around it.
     images: list[dict] = []
@@ -235,11 +236,9 @@ def _promote_core(conn, project: str, persistent_ids: list[str], chunk_id: str) 
     edge to the chunk it came from, so a core node in the graph still answers
     "which paragraph of which document said this".
     """
-    from arteries import evergreen, graph, scope as scope_mod
-
     if not persistent_ids:
         return 0
-    scope_id = scope_mod.scope_for(project) or project
+    scope_id = scope.scope_for(project) or project
     written = 0
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -372,10 +371,6 @@ VISION_PROMPT = (
 
 def vision_available() -> bool:
     """Whether the configured endpoint accepts images at all."""
-    import httpx
-
-    from arteries.config import VISION_URL
-
     try:
         props = httpx.get(VISION_URL.replace("/v1/chat/completions", "/props"),
                           timeout=3.0).json()
@@ -386,13 +381,6 @@ def vision_available() -> bool:
 
 def describe_image(path: Path) -> str | None:
     """Ask the vision endpoint what an image shows. None when it cannot."""
-    import base64
-    import mimetypes
-
-    import httpx
-
-    from arteries.config import VISION_MODEL, VISION_URL
-
     try:
         data = base64.b64encode(path.read_bytes()).decode()
         mime = mimetypes.guess_type(path.name)[0] or "image/png"
@@ -478,14 +466,10 @@ def find_image_refs(text: str, base_dir: Path) -> list[tuple[str, str, Path]]:
 
 def describe_with_frontier(path: Path, alt: str = "") -> str | None:
     """Describe one image with a frontier model. None if unavailable."""
-    import base64
-    import mimetypes
-
-    from arteries.config import FRONTIER_VISION_MODEL
-
     if not FRONTIER_VISION_MODEL:
         return None
     try:
+        # Local: the frontier path is optional and anthropic is not a declared dependency.
         import anthropic
     except ImportError:
         return None
@@ -539,7 +523,6 @@ def resolve_images(text: str, base_dir: Path) -> tuple[str, list[dict]]:
 
 
 def FRONTIER_ENABLED() -> bool:
-    from arteries.config import FRONTIER_VISION_MODEL
     return bool(FRONTIER_VISION_MODEL)
 
 

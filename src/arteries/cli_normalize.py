@@ -26,12 +26,37 @@ class NormalizedCliEvent:
     raw_event_name: str | None
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Normalize agent CLI hook payloads for Arteries.")
+def add_event_args(parser: argparse.ArgumentParser, *, event_default: str | None = None) -> None:
+    """The four flags every hook entry point takes, with their env defaults.
+
+    Three parsers spelled these out identically -- only the --event default
+    ever differs. Copies of a default are how ARTERIES_AGENT_ID ends up read
+    in two places and honoured in one.
+    """
     parser.add_argument("--cli", default=os.getenv("ARTERIES_CLI", "generic"))
-    parser.add_argument("--event", default=None, help="fallback event name when payload has none")
+    parser.add_argument("--event", default=event_default,
+                        help="fallback event name when payload has none")
     parser.add_argument("--project", default=os.getenv("ARTERIES_PROJECT", "default"))
     parser.add_argument("--agent", default=os.getenv("ARTERIES_AGENT_ID"))
+
+
+def normalize_from_args(payload: dict[str, Any], args: argparse.Namespace) -> NormalizedCliEvent:
+    """Normalize a payload against a parser built by add_event_args, and
+    export the result into the environment for anything downstream."""
+    normalized = normalize(
+        payload,
+        cli=args.cli,
+        fallback_event=args.event,
+        project_id=args.project,
+        agent_id=args.agent,
+    )
+    apply_event_env(normalized)
+    return normalized
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Normalize agent CLI hook payloads for Arteries.")
+    add_event_args(parser)
     parser.add_argument("--format", choices=("json", "shell"), default="json")
     parser.add_argument("--field", choices=("message", "transcript"), help="print a single normalized field")
     args = parser.parse_args(argv)

@@ -10,9 +10,11 @@ import logging
 import os
 from dataclasses import dataclass
 
-from arteries import actionlog, degrade, rank, route, storage
+import psycopg2
+
+from arteries import actionlog, degrade, graph, rank, route, storage
 from arteries.cli_caps import CliCapabilities, get_capabilities
-from arteries.config import AGENT_PROCESS_ID, EPHEMERAL_MODE, PERSISTENT_READ, PROJECT_ID, RELEVANCE_THRESHOLD
+from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, EPHEMERAL_MODE, PERSISTENT_READ, PROJECT_ID, RELEVANCE_THRESHOLD
 from arteries.embed import embed_text_sync
 from arteries.extract import get_ephemeral_buffer
 
@@ -204,11 +206,6 @@ def _expand(seeds: list[dict], context: AgentContext, limit: int) -> list[dict]:
     if not seeds:
         return []
     try:
-        import psycopg2
-
-        from arteries import graph
-        from arteries.config import DB_CONFIG
-
         conn = psycopg2.connect(**DB_CONFIG)
         try:
             # Whole seed rows, not just ids: expand scores each neighbour
