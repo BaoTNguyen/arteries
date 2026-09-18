@@ -90,7 +90,7 @@ def get_ephemeral(
         cur.execute(
             """
             SELECT id, fact, domains, source_ts, status, source, episode_id,
-                   task_id, compiled_at
+                   task_id, compiled_at, seen_count
             FROM arteries.ephemeral
             WHERE project_id = %(project)s
               AND (agent_process_id = %(agent)s
@@ -183,6 +183,31 @@ def get_persistent(
             LIMIT %(limit)s
             """,
             {"project": project_id, "origin": scope, "limit": limit},
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def get_persistent_by_kind(
+    project_id: str,
+    kinds: tuple[str, ...],
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Live persistent rows of the given kinds, newest first. Enumerated, not
+    ranked -- for continuity-packet fields (constraints, decisions) that ask
+    "what do we hold of this kind", not "what matches this query"
+    (planning/compaction_v3.md §3)."""
+    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            SCOPE_CTE + """
+            SELECT p.id, p.fact, p.domains, p.confidence, p.kind, p.source_ts
+            FROM arteries.persistent p
+            WHERE p.project_id IN (SELECT project_id FROM scope)
+              AND p.valid_until IS NULL
+              AND p.kind = ANY(%(kinds)s)
+            ORDER BY p.source_ts DESC
+            LIMIT %(limit)s
+            """,
+            {"project": project_id, "kinds": list(kinds), "limit": limit},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -454,29 +479,192 @@ def get_evergreen_by_relevance(project_id: str, query_embedding: list[float],
 
 def record_packet(project_id: str, member_ids: list[str],
                   session_id: str | None = None,
-                  agent_process_id: str | None = None) -> None:
+                  agent_process_id: str | None = None,
+                  previous_id: str | None = None,
+                  covers_from: Any = None,
+                  covers_to: Any = None,
+                  resume_from: str | None = None,
+                  body: str | None = None) -> None:
     """Remember what went into a packet, so the next one can differ from it.
+
+    The chaining columns (`previous_id`, `covers_from`/`covers_to`,
+    `resume_from`, `body`) are unused until the renderer split
+    (planning/compaction_v3.md §2) writes real values -- `record_packet` just
+    accepts and stores them from here on so that landing costs no second
+    migration and no signature change.
 
     Best effort: a packet that fails to record itself is a packet the next turn
     repeats, which is the old behaviour and not worth failing a turn over.
+
+    A state packet (planning/compaction_v3.md §2) has no ranked members -- its
+    fields are enumerated, not selected -- so `body` alone is enough reason to
+    record the row; chaining needs the row to exist even when member_ids is
+    empty.
     """
-    if not member_ids:
+    if not member_ids and not body:
         return
     try:
         with _conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO arteries.packets "
-                "(project_id, session_id, agent_process_id, member_ids) "
-                "VALUES (%s, %s, %s, %s)",
+                "(project_id, session_id, agent_process_id, member_ids, "
+                " previous_id, covers_from, covers_to, resume_from, body) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (project_id,
                  session_id if session_id is not None else _env_session_id(),
-                 agent_process_id, member_ids),
+                 agent_process_id, member_ids,
+                 previous_id, covers_from, covers_to, resume_from, body),
             )
             conn.commit()
     except Exception as exc:
         from arteries import degrade
 
         degrade.note(exc, "packet chaining")
+
+
+def latest_packet(project_id: str, session_id: str | None = None) -> dict[str, Any] | None:
+    """Most recent packet for this (project, session), or None on a cold
+    start. `covers_to` is what the next packet's `covers_from` chains against
+    (planning/compaction_v3.md §5)."""
+    session_id = session_id if session_id is not None else _env_session_id()
+    if not session_id:
+        return None
+    try:
+        with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, covers_to FROM arteries.packets "
+                "WHERE project_id = %s AND session_id = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (project_id, session_id),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+    except Exception as exc:
+        from arteries import degrade
+
+        degrade.note(exc, "packet history")
+        return None
+
+
+def tool_results_since(project_id: str, session_id: str | None,
+                       since: Any, until: Any) -> list[dict[str, Any]]:
+    """`tool.result` events (hooks/arteries-tool.js) in (since, until] for this
+    session. Joins through agent_runs because the event carries `run_id`, not
+    `session_id` -- `runlog._session_run` uses the same join.
+
+    No session known -> no events, rather than every session's: a state field
+    scoped to "everyone, ever" is not a continuity field."""
+    if not session_id:
+        return []
+    try:
+        with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT e.payload, e.created_at
+                FROM arteries.agent_events e
+                JOIN arteries.agent_runs r ON r.id = e.run_id
+                WHERE e.project_id = %s
+                  AND r.metadata->>'session_id' = %s
+                  AND e.event_type = 'tool.result'
+                  AND e.created_at > %s AND e.created_at <= %s
+                ORDER BY e.created_at
+                """,
+                (project_id, session_id, since, until),
+            )
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        from arteries import degrade
+
+        degrade.note(exc, "tool result window")
+        return []
+
+
+def recent_supersede_edges(project_id: str, since: Any, limit: int = 20) -> list[dict[str, Any]]:
+    """`supersedes`/`contradicts` edges over persistent rows, written at
+    promotion (compile.py) for previous sessions -- detector 1 of
+    planning/compaction_v3.md §4.2. `since` bounds it to edges new since the
+    last packet, which is what makes a retraction line render once rather than
+    resurfacing every compaction for the rest of the project's life."""
+    try:
+        with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT e.rel, e.metadata, e.created_at,
+                       new_p.fact AS new_fact, old_p.fact AS old_fact
+                FROM arteries.memory_edges e
+                JOIN arteries.persistent new_p ON new_p.id::text = e.src_id
+                JOIN arteries.persistent old_p ON old_p.id::text = e.dst_id
+                WHERE e.project_id = %s
+                  AND e.src_kind = 'persistent' AND e.dst_kind = 'persistent'
+                  AND e.rel IN ('supersedes', 'contradicts')
+                  AND e.created_at > %s
+                ORDER BY e.created_at DESC
+                LIMIT %s
+                """,
+                (project_id, since, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        from arteries import degrade
+
+        degrade.note(exc, "supersede edges")
+        return []
+
+
+def near_duplicate_ephemeral_pairs(project_id: str, session_id: str | None,
+                                   threshold: float = 0.85,
+                                   limit: int = 20) -> list[dict[str, Any]]:
+    """Pairs of this session's ephemeral atoms similar enough that a differing
+    literal between them is a value overwrite rather than two unrelated facts
+    (planning/compaction_v3.md §4.2 detector 3). Cosine in SQL rather than
+    fetching embeddings into Python -- pgvector already does this comparison
+    for every other ranked query here."""
+    if not session_id:
+        return []
+    try:
+        with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT a.fact AS fact_a, a.source_ts AS ts_a, a.source AS source_a,
+                       b.fact AS fact_b, b.source_ts AS ts_b, b.source AS source_b,
+                       1 - (a.embedding <=> b.embedding) AS similarity
+                FROM arteries.ephemeral a
+                JOIN arteries.ephemeral b ON a.id < b.id
+                WHERE a.project_id = %(project)s AND b.project_id = %(project)s
+                  AND a.session_id = %(session)s AND b.session_id = %(session)s
+                  AND a.valid_until IS NULL AND b.valid_until IS NULL
+                  AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+                  AND 1 - (a.embedding <=> b.embedding) >= %(threshold)s
+                ORDER BY similarity DESC
+                LIMIT %(limit)s
+                """,
+                {"project": project_id, "session": session_id,
+                 "threshold": threshold, "limit": limit},
+            )
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        from arteries import degrade
+
+        degrade.note(exc, "near-duplicate ephemeral pairs")
+        return []
+
+
+def open_episodes(project_id: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Episodes still `running` for this project -- `state.in_progress`."""
+    try:
+        with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, agent_id, task_id, created_at FROM arteries.episodes "
+                "WHERE project_id = %s AND status = 'running' "
+                "ORDER BY created_at DESC LIMIT %s",
+                (project_id, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        from arteries import degrade
+
+        degrade.note(exc, "open episodes")
+        return []
 
 
 def recent_packet_members(project_id: str, session_id: str | None = None,
