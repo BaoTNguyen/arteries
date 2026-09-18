@@ -61,6 +61,18 @@ def normalize(
     cli_name = (cli or "generic").lower()
     raw_event = _event_name(payload, fallback_event)
     event = _canonical_event(raw_event)
+    # Claude Code fires one hook_event_name ("SessionStart") for four distinct
+    # matchers -- startup, resume, clear, compact -- and tells them apart with
+    # a separate `source` field the matcher itself is written against
+    # (hooks.json: "matcher": "startup|resume|clear|compact"). Every other
+    # canonicalization path here reads hook_event_name because that alone
+    # already names the event (Codex's PreCompact, pi's session_before_compact
+    # fallback); only this one needs a second field, and only for the one
+    # value ("compact") that changes what a packet build should render
+    # (planning/compaction_v3.md §2). The other three sources still fall
+    # through to "session_start" exactly as before.
+    if event == "session_start" and str(payload.get("source") or "").strip().lower() == "compact":
+        event = "compact"
     cwd = _first_text(payload, "cwd", "working_directory", "project_dir", "projectDirectory")
     session_id = _first_text(payload, "session_id", "sessionId", "session", "session_file", "sessionFile")
     parent = _first_text(payload, "parent_agent_id", "parentAgentId", "parent_session_id", "parentSessionId")

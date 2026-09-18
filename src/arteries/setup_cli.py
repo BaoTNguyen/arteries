@@ -430,7 +430,14 @@ else
 fi
 format="${{ARTERIES_PACKET_FORMAT:-markdown}}"
 message="${{1:-context-pressure}}"
-eval "$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli "$ARTERIES_CLI" --event "$message" --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --format shell)"
+# --event is the cli_normalize fallback, used only when the CLI's own payload
+# names no event -- it is "compact", fixed, not "$message". This script is
+# never wired to anything but a compact-triggered hook, and "$message" is a
+# descriptive label ("claude-compact", "codex-precompact") that _canonical_event
+# does not recognise, so passing it here silently defeated the renderer split
+# (planning/compaction_v3.md §2) for every CLI whose own payload also fails to
+# self-report a recognisable event name.
+eval "$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli "$ARTERIES_CLI" --event compact --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --format shell)"
 printf '%s' "$event_json" | python3 -m arteries.packet --format "$format" --message "$message" --stdin-json --budget "${{ARTERIES_PACKET_BUDGET:-20000}}"
 '''
     pi_compact = f'''#!/usr/bin/env bash
@@ -864,9 +871,12 @@ def _codex_compact_prompt() -> str:
     sections come from `packet.SECTION_TITLES` now, and the stamped version is
     what `art doctor` compares against to notice drift.
     """
-    from arteries.packet import PACKET_SCHEMA_VERSION, SECTION_TITLES
+    from arteries.packet import PACKET_SCHEMA_VERSION, STATE_SECTION_TITLES
 
-    sections = ", ".join(SECTION_TITLES[:-1]) + f", and {SECTION_TITLES[-1]}"
+    # STATE_SECTION_TITLES, not SECTION_TITLES: this prompt only ever fires on
+    # compaction, and the renderer split (planning/compaction_v3.md §2) gave
+    # that path its own layout.
+    sections = ", ".join(STATE_SECTION_TITLES[:-1]) + f", and {STATE_SECTION_TITLES[-1]}"
     return f"""When compacting this coding session, preserve continuity for Arteries.
 
 packet-schema: v{PACKET_SCHEMA_VERSION}

@@ -26,6 +26,14 @@ class SetupCliTests(unittest.TestCase):
             self.assertTrue((root / ".arteries/hooks/hook-assistant-observe.sh").exists())
             self.assertTrue((root / ".arteries/hooks/hook-compact-packet.sh").exists())
             self.assertTrue((root / ".arteries/hooks/pi-compact-json.sh").exists())
+            hook_compact = (root / ".arteries/hooks/hook-compact-packet.sh").read_text(encoding="utf-8")
+            # A fixed fallback, not the descriptive $message positional --
+            # "claude-compact"/"codex-precompact" don't canonicalize to
+            # "compact" (_canonical_event has no entry for them), which
+            # silently defeated the renderer split for any CLI whose own
+            # payload doesn't already self-report a recognisable event name.
+            self.assertIn("--event compact", hook_compact)
+            self.assertNotIn('--event "$message"', hook_compact)
             self.assertTrue((root / ".pi/extensions/arteries.ts").exists())
             config = json.loads((root / ".arteries/config.json").read_text())
             self.assertEqual(config["project"], "demo")

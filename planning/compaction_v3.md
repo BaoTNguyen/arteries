@@ -215,12 +215,22 @@ case: `compact-packet.sh` leaves `RERANKER_DEVICE` unset, `.arteries/env` sets i
 `cuda:1` — cosine 0.91, differing literals, detector 3 fires, subject guard drops it.
 Both are true.
 
-### 4.5 Lifetime
+### 4.5 Lifetime — decided: one packet, no packet-level tracking
 
-Two packets, then it stops. Loser gets `valid_until = now()` at promotion; a
-`supersedes` edge with `metadata.reason` records why; the retraction line renders for
-the rest of the session and in the next packet. A permanent retraction list grows
-without bound and eventually costs more budget than the re-derivation it prevents.
+Renders once — the packet a mid-session detector fires in — and never again from the
+packet's own memory. Loser gets `valid_until = now()` at promotion; a `supersedes`
+edge with `metadata.reason` records why. From that point the correction is a fact in
+`arteries.persistent` like any other, subject to the same promotion/supersession
+machinery as everything else — the packet does not additionally track "have I shown
+this correction before," because `persistent` already is that record. A packet asks
+persistent what's currently true; it does not maintain a second, parallel memory of
+what it said last time.
+
+(Superseded: an earlier draft of this section had the retraction line render for two
+packets, mirroring `recent_packet_members(packets=2)`'s demotion window. Rejected —
+demotion is about slot staleness; a wrongly-believed fact needing correction is a
+different question, and the existing persistent/promotion pipeline already answers it
+without a new counter.)
 
 ---
 

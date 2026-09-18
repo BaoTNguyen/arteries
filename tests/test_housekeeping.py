@@ -71,8 +71,11 @@ class CompactPromptTests(unittest.TestCase):
     and nothing says so, because a prompt cannot fail."""
 
     def test_the_prompt_is_generated_from_the_packet_sections(self):
+        """STATE_SECTION_TITLES, not SECTION_TITLES: this prompt only ever
+        fires on compaction, and the renderer split
+        (planning/compaction_v3.md §2) gave that path its own layout."""
         prompt = _codex_compact_prompt()
-        for title in packet.SECTION_TITLES:
+        for title in packet.STATE_SECTION_TITLES:
             self.assertIn(title, prompt)
 
     def test_the_prompt_carries_the_schema_version(self):

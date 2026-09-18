@@ -52,6 +52,32 @@ class CliNormalizeTests(unittest.TestCase):
         self.assertEqual(event.cli, "pi")
         self.assertEqual(event.agent_role, "parent")
 
+    def test_claude_session_start_compact_source_normalizes_to_compact(self):
+        """Claude Code fires one hook_event_name (SessionStart) for four
+        matchers and tells them apart with `source` -- the field
+        hooks.json's own matcher string ("startup|resume|clear|compact") is
+        written against. Without reading it, the compact-specific SessionStart
+        hook (setup_cli.py's `_claude_hooks`) canonicalizes identically to
+        plain startup, and planning/compaction_v3.md's renderer split never
+        fires for the CLI most sessions actually run."""
+        event = normalize(
+            {"hook_event_name": "SessionStart", "source": "compact",
+             "session_id": "s1"},
+            cli="claude",
+            project_id="demo",
+            agent_id="demo-hook",
+        )
+
+        self.assertEqual(event.event, "compact")
+
+    def test_claude_session_start_startup_source_is_unaffected(self):
+        for source in ("startup", "resume", "clear"):
+            event = normalize(
+                {"hook_event_name": "SessionStart", "source": source},
+                cli="claude", project_id="demo", agent_id="demo-hook",
+            )
+            self.assertEqual(event.event, "session_start")
+
     def test_hermes_common_subagent_fields_are_supported_conservatively(self):
         event = normalize(
             {"event": "subagent_start", "agent_id": "child", "parent_agent_id": "parent"},

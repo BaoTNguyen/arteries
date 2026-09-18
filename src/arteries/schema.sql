@@ -430,6 +430,13 @@ CREATE TABLE IF NOT EXISTS arteries.packets (
     session_id  TEXT,
     agent_process_id TEXT,
     member_ids  TEXT[] NOT NULL DEFAULT '{}',
+    -- Chaining (migrations/018_packet_chaining.sql). Unused until the
+    -- renderer split in planning/compaction_v3.md §2 writes real values.
+    previous_id UUID REFERENCES arteries.packets(id),
+    covers_from TIMESTAMPTZ,
+    covers_to   TIMESTAMPTZ,
+    resume_from TEXT,
+    body        TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
