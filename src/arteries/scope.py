@@ -22,13 +22,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
 
-from arteries.config import DB_CONFIG
+from arteries import degrade
+from arteries.config import DB_CONFIG, PROJECT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +75,6 @@ def _query(sql: str, params: tuple | dict = (), *, db_config: dict | None = None
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
     except Exception as exc:
-        from arteries import degrade
         degrade.note(exc, "scope lookup")
         return []
     finally:
@@ -135,8 +136,6 @@ def _worktree_parent(path: Path) -> Path | None:
     Never raises. Scope resolution gates every write, and a git invocation
     failing should mean "not tracked" rather than "no memory this turn".
     """
-    import subprocess
-
     try:
         out = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--path-format=absolute",
@@ -157,7 +156,6 @@ def current_project(*, db_config: dict | None = None) -> str:
     config.PROJECT_ID would fall back to "default". Path resolution already knows
     the answer, so use it and keep the env var as the override.
     """
-    from arteries.config import PROJECT_ID
     if os.environ.get("ARTERIES_PROJECT"):
         return os.environ["ARTERIES_PROJECT"]
     m = resolve(db_config=db_config)

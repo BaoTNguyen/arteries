@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import io
 import json
+import os
+import sys
 from collections.abc import Sequence
 
-from arteries import benchmark, doctor, docs, graph, ingest, inspect, observe, ontology, packet, remember, runs, scope, setup_cli, trace
+import psycopg2
+import psycopg2.extras
+
+from arteries import actionlog, benchmark, degrade, docs, doctor, graph, ingest, inspect, journal, observe, ontology, packet, remember, runs, scope, setup_cli, storage, trace
+from arteries.compile import compile_once
+from arteries.config import AGENT_PROCESS_ID, DB_CONFIG
 from arteries.eval import evaluate
+from arteries.evergreen import main as evergreen_main
+from arteries.evict import main as evict_main
+from arteries.migrate import main as migrate_main
+from arteries.subagent import subagent_env
 
 
 COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe",
@@ -72,7 +85,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if ns.command == "inspect":
         return inspect.main(ns.args)
     if ns.command == "journal":
-        from arteries import journal
         sub = ns.args[0] if ns.args else "drain"
         if sub == "drain":
             print(json.dumps(journal.drain(), indent=2, sort_keys=True))
@@ -109,15 +121,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if ns.command == "search":
         return _search(ns.args)
     if ns.command == "evict":
-        from arteries.evict import main as evict_main
         return evict_main(ns.args)
 
     if ns.command == "evergreen":
-        from arteries.evergreen import main as evergreen_main
         return evergreen_main(ns.args)
 
     if ns.command == "migrate":
-        from arteries.migrate import main as migrate_main
         return migrate_main(ns.args)
 
     if ns.command == "compile":
@@ -134,8 +143,6 @@ def _cli_env(ns: argparse.Namespace) -> None:
     already reads (config.PROJECT_ID and friends resolve at import), so a flag
     has to be set before anything downstream is touched.
     """
-    import os
-
     for flag, var in (("cli", "ARTERIES_CLI"), ("project", "ARTERIES_PROJECT"),
                       ("agent", "ARTERIES_AGENT_ID"), ("repo", "ARTERIES_REPO"),
                       ("transcript", "ARTERIES_TRANSCRIPT")):
@@ -163,8 +170,6 @@ def _observe(args: Sequence[str]) -> int:
     need that layer. Prints nothing when the gate abstains, so it is safe to
     splice into a prompt unconditionally.
     """
-    import sys
-
     p = argparse.ArgumentParser(prog="art observe", description="Observe one turn from any CLI.")
     p.add_argument("prompt", nargs="*", help="prompt text; read from stdin when omitted")
     _identity_args(p)
@@ -190,17 +195,9 @@ def _activate(args: Sequence[str]) -> int:
     ns = p.parse_args(args)
     _cli_env(ns)
 
-    import os
-
-    from arteries import scope
-    from arteries.config import AGENT_PROCESS_ID
-
     project = scope.current_project()
     agent = os.environ.get("ARTERIES_AGENT_ID", AGENT_PROCESS_ID)
     # the run id goes to stdout, and stdout here is context the host will show
-    import contextlib
-    import io
-
     with contextlib.suppress(Exception), contextlib.redirect_stdout(io.StringIO()):
         runs.main(["start", "--project", project, "--agent", agent,
                    "--cli", os.environ.get("ARTERIES_CLI", "generic"),
@@ -213,10 +210,8 @@ def _activate(args: Sequence[str]) -> int:
 
     # never let a memory read stop a session from starting
     try:
-        from arteries import storage
         rows = storage.get_persistent(project, limit=8)
     except Exception as exc:
-        from arteries import degrade
         degrade.note(exc, "session-start memory", project=project)
         rows = []
     if rows:
@@ -232,9 +227,6 @@ def _spawn(args: list[str]) -> int:
     The child writes ephemeral tagged with this agent as parent; the parent's
     compilation pass claims those records and applies the [SUBAGENT] bar.
     """
-    import os
-    import sys
-
     if args and args[0] in ("-h", "--help"):
         print(_spawn.__doc__.strip())
         print("\nusage: art spawn -- <command> [args...]")
@@ -244,9 +236,6 @@ def _spawn(args: list[str]) -> int:
     if not args:
         print("usage: art spawn -- <command> [args...]", file=sys.stderr)
         return 2
-
-    from arteries.config import AGENT_PROCESS_ID
-    from arteries.subagent import subagent_env
 
     env = {**os.environ, **subagent_env(AGENT_PROCESS_ID)}
     env.setdefault("ARTERIES_MEMORY", "subagent")
@@ -270,17 +259,12 @@ def _identity(args: Sequence[str]) -> int:
     p.add_argument("--json", action="store_true", dest="as_json")
     ns = p.parse_args(args)
 
-    import json as _json
-
-    from arteries.config import AGENT_PROCESS_ID
-    from arteries.subagent import subagent_env
-
     env = subagent_env(ns.parent or AGENT_PROCESS_ID)
     env.setdefault("ARTERIES_MEMORY", "subagent")
     env.setdefault("ARTERIES_AGENT_ROLE", ns.role)
 
     if ns.as_json:
-        print(_json.dumps(env, indent=2, sort_keys=True))
+        print(json.dumps(env, indent=2, sort_keys=True))
     else:
         for k, v in sorted(env.items()):
             print(f"export {k}={v}")
@@ -291,7 +275,6 @@ def _compile(args: list[str]) -> int:
     """Run one compilation pass now, for the agent in ARTERIES_AGENT_ID. An
     orchestrator uses this to flush its subagents' ephemeral up to project memory
     after they exit (their own async compile never runs in a one-shot child)."""
-    from arteries.compile import compile_once
     print(asyncio.run(compile_once()))
     return 0
 
@@ -303,12 +286,6 @@ def _search(args: Sequence[str]) -> int:
     p.add_argument("--limit", type=int, default=15)
     ns = p.parse_args(args)
     query = " ".join(ns.query)
-
-    import psycopg2
-    import psycopg2.extras
-
-    from arteries import scope
-    from arteries.config import DB_CONFIG
 
     project = ns.project or scope.current_project()
     tsv = ("to_tsvector('english', coalesce(payload->>'message_preview','') || ' ' || "
@@ -349,13 +326,9 @@ def _decisions(args: Sequence[str]) -> int:
     p.add_argument("--json", action="store_true")
     ns = p.parse_args(args)
 
-    import json as _json
-
-    from arteries import actionlog
-
     rows = actionlog.recent_decisions(project_id=ns.project, episode=ns.episode, limit=ns.limit)
     if ns.json:
-        print(_json.dumps(rows, indent=2, default=str))
+        print(json.dumps(rows, indent=2, default=str))
         return 0
     if not rows:
         print("no decisions recorded")
@@ -376,8 +349,6 @@ def _rewards(args: Sequence[str]) -> int:
     p.add_argument("path", nargs="?",
                    help="JSONL file or runs directory; omit to read stdin")
     ns = p.parse_args(args)
-
-    from arteries import actionlog
 
     n = actionlog.ingest_episodes(ns.path)
     print(f"ingested {n} episode rewards")

@@ -37,8 +37,10 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import tempfile
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -81,9 +83,6 @@ def slot_count(endpoint: str, timeout: float = 1.0) -> int:
 
     slots = DEFAULT_SLOTS
     try:
-        import json
-        import urllib.request
-
         base = f"{parts.scheme or 'http'}://{key}"
         with urllib.request.urlopen(f"{base}/slots", timeout=timeout) as resp:
             reported = json.load(resp)

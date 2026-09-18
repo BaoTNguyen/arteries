@@ -8,7 +8,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from arteries import runlog
+from arteries import runlog, scope
 from arteries.config import AGENT_PROCESS_ID
 
 
@@ -19,7 +19,6 @@ def _project(ns) -> str:
     anyone not running under a hook, so `art runs recent` reported on a project
     that holds nothing.
     """
-    from arteries import scope
     return ns.project or scope.current_project()
 
 
