@@ -23,6 +23,7 @@ case joins.
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 # Reused unchanged from extract.py rather than re-tuned. It is the gate that
@@ -171,6 +172,4 @@ def normalize_fact(text: str) -> str:
 
 def fact_hash(text: str) -> str:
     """Stable 32-char digest of the normalized claim."""
-    import hashlib
-
     return hashlib.sha256(normalize_fact(text).encode()).hexdigest()[:32]

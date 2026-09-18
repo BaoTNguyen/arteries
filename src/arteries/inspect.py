@@ -6,8 +6,11 @@ import argparse
 import json
 from collections.abc import Sequence
 
+import psycopg2
+import psycopg2.extras
+
 from arteries import graph, runlog, scope, storage
-from arteries.config import AGENT_PROCESS_ID
+from arteries.config import AGENT_PROCESS_ID, DB_CONFIG
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -45,11 +48,6 @@ if __name__ == "__main__":
 
 def _entities(project: str, limit: int = 10) -> list[dict]:
     """Top entities for this project's scope, by how often claims mention them."""
-    import psycopg2
-    import psycopg2.extras
-
-    from arteries.config import DB_CONFIG
-
     with psycopg2.connect(**DB_CONFIG) as conn, \
          conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(

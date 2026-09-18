@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import hashlib
 import json
 import os
 import re
 import secrets
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from arteries import actionlog, degrade, evidence, extract, memory_select, rank, runlog, storage, triage
-from arteries import frame as frame_mod
+from arteries import actionlog, degrade, evidence, extract, frame as frame_mod, memory_select, rank, runlog, storage, triage
 from arteries.cli_caps import get_capabilities
+from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries.conversation import recent_assistant_turns
 from arteries.embed import embed_text_sync
-from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries.eventjson import event_messages, payload_text, read_stdin_json, text_from_mapping
 
 
@@ -103,8 +105,6 @@ CORPUS_CACHE_SECONDS = int(os.getenv("ARTERIES_CORPUS_CACHE_SECONDS", "900"))
 
 
 def _suggestion_key(message: str) -> str:
-    import hashlib
-
     return hashlib.sha256(_norm(message).encode()).hexdigest()[:32]
 
 
@@ -186,9 +186,6 @@ def _corpus_suggestion(message: str, embedding: list[float] | None,
     # episode has nothing to attach to, so the feedback half of the loop cannot
     # exist. `source` is deliberately unset: it is an eligibility filter, and
     # naming the caller there filtered all 1033 prompts out.
-    import dataclasses
-    import urllib.request
-
     try:
         frame = frame_mod.get_current_frame(message, embedding)
         body = json.dumps({"situation": message,
@@ -240,11 +237,7 @@ def _frame_dict(message: str) -> dict[str, Any]:
     Best-effort by the same rule as the packet itself: a retrieval that cannot
     be enriched is worth doing unenriched, not worth failing a turn over.
     """
-    import dataclasses
-
     try:
-        from arteries import frame as frame_mod
-
         return dataclasses.asdict(frame_mod.get_current_frame(message))
     except Exception:
         return {}

@@ -31,13 +31,17 @@ is the gate, but nothing skips a level unattended.
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import json
 import os
+import pathlib
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
 
-from arteries import degrade, promote, runlog
+from arteries import degrade, promote, runlog, scope
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
 
 # Below this a claim stays persistent. 0.6 sits above what a claim scores on
@@ -235,8 +239,6 @@ def promote_once(project_id: str | None = None, limit: int = 20) -> dict[str, An
     Reads exactly one table and writes exactly one, which is how the one-level
     rule is enforced rather than merely stated.
     """
-    from arteries import scope
-
     project_id = project_id or PROJECT_ID
     scope_id = scope.scope_for(project_id) or project_id
     conn = psycopg2.connect(**DB_CONFIG)
@@ -340,12 +342,6 @@ def _default_specs(agents: bool = False) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     """`art evergreen` -- promote, seed, and look at the tier."""
-    import argparse
-    import json
-    import pathlib
-
-    from arteries import scope as scope_mod
-
     parser = argparse.ArgumentParser(prog="art evergreen", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -371,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     project = args.project or PROJECT_ID
-    scope_id = scope_mod.scope_for(project) or project
+    scope_id = scope.scope_for(project) or project
 
     if args.command == "seed":
         # Discovery plus `art ingest --core`, not a second extractor.
@@ -382,9 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         # entities, `derived_from` edges back to the chunk and document, and a
         # digest so re-seeding an unchanged file is a no-op. Two extractors for
         # one job, and the worse one was the default.
-        import asyncio
-        import pathlib
-
+        # Local: ingest imports evergreen back, so at the top this would be a cycle.
         from arteries import ingest
 
         patterns = args.paths or _default_specs(args.agents)

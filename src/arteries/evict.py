@@ -24,6 +24,8 @@ Three exemptions, and they are the whole design:
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 from typing import Any
 
@@ -115,9 +117,6 @@ def run(project_id: str | None = None, limit: int = 100,
 
 
 def main(argv: list[str] | None = None) -> int:
-    import argparse
-    import json
-
     parser = argparse.ArgumentParser(prog="art evict", description=__doc__)
     parser.add_argument("--project", default=None)
     parser.add_argument("--limit", type=int, default=100)
