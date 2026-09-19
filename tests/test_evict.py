@@ -8,6 +8,8 @@ so decay is what bounds the error the filter misses.
 
 import unittest
 
+from dbprobe import DB_REACHABLE
+
 import psycopg2
 import pytest
 
@@ -17,6 +19,7 @@ from arteries.config import DB_CONFIG
 PROJECT = "evict-test"
 
 
+@unittest.skipUnless(DB_REACHABLE, "no reachable Postgres; eviction is measured against the database clock")
 class ClockTests(unittest.TestCase):
     """Activity days, not calendar days: time away must not age out a working
     set that was never wrong."""
