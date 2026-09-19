@@ -8,6 +8,8 @@ there. This is the tier those all assumed.
 
 import unittest
 
+from dbprobe import DB_REACHABLE
+
 from arteries import evergreen
 
 
@@ -138,6 +140,7 @@ class _Fixture(unittest.TestCase):
         return row_id
 
 
+@unittest.skipUnless(DB_REACHABLE, "no reachable Postgres; the evergreen tier is a database contract")
 class DatabaseTests(_Fixture):
     """Promotion against a real table: the scoring queries are most of the logic
     and none of them run without one."""
@@ -195,6 +198,7 @@ class DatabaseTests(_Fixture):
         self.assertEqual(evergreen.candidates(self.conn, self.scope, 10), [])
 
 
+@unittest.skipUnless(DB_REACHABLE, "no reachable Postgres; maturity is scored in SQL")
 class MaturityTests(_Fixture):
     """Promotion is consolidation, not a fourth step of ingestion.
 
