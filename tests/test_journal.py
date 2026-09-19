@@ -9,6 +9,8 @@ import json
 import os
 import tempfile
 import unittest
+
+from dbprobe import DB_REACHABLE
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -48,6 +50,7 @@ class DrainTests(unittest.TestCase):
         (box / "20260825.ndjson").write_text(json.dumps(event) + "\n")
         return event
 
+    @unittest.skipUnless(DB_REACHABLE, "no reachable Postgres; drain writes what it merges")
     def test_drain_merges_and_empties_every_inbox(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._inbox_line(tmp, "run-a")

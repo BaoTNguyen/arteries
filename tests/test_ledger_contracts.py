@@ -25,16 +25,7 @@ from arteries import actionlog
 from arteries.config import DB_CONFIG
 
 
-def _db_reachable() -> bool:
-    try:
-        conn = psycopg2.connect(connect_timeout=2, **DB_CONFIG)
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-DB_REACHABLE = _db_reachable()
+from dbprobe import DB_REACHABLE
 
 # Mirrors heart's src/heart/episode.py episode.json output (confirmed against
 # a real run under ~/.local/share/heart/runs), trimmed to the fields
