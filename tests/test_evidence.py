@@ -10,6 +10,8 @@ import io
 import json
 import sys
 import unittest
+
+from dbprobe import DB_REACHABLE
 from unittest.mock import patch
 
 from arteries import evidence
@@ -110,6 +112,7 @@ class ObservationTests(unittest.TestCase):
             self.assertEqual(observe_tool.main(), 0)
 
 
+@unittest.skipUnless(DB_REACHABLE, "no reachable Postgres; the write path ends in Postgres")
 class WritePathEvidenceTests(unittest.TestCase):
     """`_write_results` must run against a real batch.
 

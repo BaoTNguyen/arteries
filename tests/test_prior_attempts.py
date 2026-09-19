@@ -8,6 +8,8 @@ import os
 
 import pytest
 
+from dbprobe import DB_REACHABLE
+
 from arteries import memory_select as ms
 
 
@@ -56,6 +58,7 @@ def test_nothing_is_excluded_outside_an_episode(monkeypatch):
     assert not ms._prior_attempt_at_this_task(_row("ep-1", "task-T"))
 
 
+@pytest.mark.skipif(not DB_REACHABLE, reason="no reachable Postgres; the packet is assembled from stored memories")
 def test_the_packet_can_report_what_went_into_it():
     """Ids exist through selection and were dropped at the MemoryItem boundary,
     so a caller saw the text and never what produced it. Training retrieval on
