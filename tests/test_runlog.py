@@ -16,18 +16,7 @@ from arteries.config import DB_CONFIG
 pytestmark = pytest.mark.writes_events
 
 
-def _db_reachable() -> bool:
-    try:
-        conn = psycopg2.connect(connect_timeout=2, **DB_CONFIG)
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-# Mirrors test_ledger_contracts. Two copies of an eight-line probe beat a
-# shared helper nothing else would import.
-DB_REACHABLE = _db_reachable()
+from dbprobe import DB_REACHABLE
 
 
 class RunlogTests(unittest.TestCase):
