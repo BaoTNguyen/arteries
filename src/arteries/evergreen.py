@@ -196,6 +196,9 @@ def candidates(conn, project_id: str, limit: int) -> list[dict[str, Any]]:
             FROM arteries.persistent p
             WHERE p.project_id = %(project)s
               AND p.valid_until IS NULL
+              -- evergreen is read across every project in the scope; a claim
+              -- still untrusted has not earned that reach (see trust.py)
+              AND coalesce(p.source_meta->>'trust', '') <> 'untrusted'
               AND NOT EXISTS (
                   SELECT 1 FROM arteries.evergreen e
                   WHERE e.valid_until IS NULL AND p.id = ANY(e.parent_ids)
@@ -299,6 +302,7 @@ def _insert(conn, row: dict[str, Any], scope_id: str, value: float) -> bool:
                    p.project_id, ARRAY[p.id], p.episode_id, p.task_id, %s
             FROM arteries.persistent p
             WHERE p.id = %s AND p.valid_until IS NULL
+              AND coalesce(p.source_meta->>'trust', '') <> 'untrusted'
             ON CONFLICT DO NOTHING
             RETURNING id
             """,
