@@ -28,7 +28,7 @@ import httpx
 import psycopg2
 import psycopg2.extras
 
-from arteries import embed, evidence, graph, promote, runlog, scope, slots
+from arteries import degrade, embed, evidence, graph, promote, runlog, scope, slots, trust
 from arteries.config import (AGENT_PROCESS_ID, COMPILE_MODEL, DB_CONFIG, GENERATE_URL,
                              PROJECT_ID, SESSION_ID)
 from arteries.scope import SCOPE_CTE
@@ -182,7 +182,13 @@ async def _compile_pass() -> dict[str, Any]:
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         _release_stale_claims(conn)
-        claimed = _claim_ephemeral(conn)
+        try:
+            trust.retire_expired(conn)
+        except Exception as exc:
+            # housekeeping: reads already hide an expired row the moment it
+            # expires, so a failed sweep costs tidiness, never a turn
+            degrade.note(exc, "retire expired untrusted")
+        claimed = _one_trust_class(conn, _claim_ephemeral(conn))
         if not claimed:
             return {"status": "nothing_to_compile", "claimed": 0}
 
@@ -300,7 +306,7 @@ def _claim_ephemeral(conn) -> list[dict]:
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, fact, domains, source_ts, parent_agent_id, source
+            RETURNING id, fact, domains, source_ts, parent_agent_id, source, trust
             """,
             (PROJECT_ID, AGENT_PROCESS_ID, AGENT_PROCESS_ID,
              SESSION_ID, SESSION_ID, ABANDONED_AFTER_MINUTES,
@@ -308,6 +314,29 @@ def _claim_ephemeral(conn) -> list[dict]:
         )
         conn.commit()
         return [dict(r) for r in cur.fetchall()]
+
+
+def _one_trust_class(conn, claimed: list[dict]) -> list[dict]:
+    """Keep the batch to one trust class; hand the rest back unpenalised.
+
+    The model is asked which records each fact came from, and provenance
+    follows its answer. In a mixed batch, an injected record could have its
+    claim attributed to a trusted one -- laundered clean by the step that was
+    meant to trace it. One class per batch makes that impossible rather than
+    unlikely. The others go back to `uncompiled` with no attempt counted: they
+    did nothing wrong, and the next pass takes them.
+    """
+    if not claimed:
+        return claimed
+    first = claimed[0].get("trust")
+    keep = [r for r in claimed if r.get("trust") == first]
+    later = [r["id"] for r in claimed if r.get("trust") != first]
+    if later:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE arteries.ephemeral SET status = 'uncompiled', claimed_at = NULL "
+                        "WHERE id = ANY(%s::uuid[])", ([str(i) for i in later],))
+        conn.commit()
+    return keep
 
 
 def _release_claimed(conn, ids: list) -> None:
@@ -396,6 +425,14 @@ def _load_persistent_context(conn, batch: list[dict] | None = None,
     vec = None
     if batch:
         vec = embed.embed_text_sync(" ".join(r["fact"] for r in batch)[:4000])
+    # A trusted batch is compiled against trusted memory only: shown an
+    # untrusted claim as "existing context", a model restates, merges or
+    # confirms it, and the result is written as trusted.
+    untrusted = trust.agent_run() or any(
+        (r.get("trust") if isinstance(r, dict) else None) == trust.UNTRUSTED
+        for r in (batch or []))
+    only_trusted = "" if untrusted else (
+        "AND coalesce(p.source_meta->>'trust', '') <> '" + trust.UNTRUSTED + "'")
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         if vec:
@@ -406,6 +443,7 @@ def _load_persistent_context(conn, batch: list[dict] | None = None,
                 FROM arteries.persistent p
                 WHERE p.project_id IN (SELECT project_id FROM scope)
                   AND p.valid_until IS NULL AND p.embedding IS NOT NULL
+                """ + only_trusted + """
                 ORDER BY p.embedding <=> %(q)s::vector
                 LIMIT %(limit)s
                 """,
@@ -419,12 +457,47 @@ def _load_persistent_context(conn, batch: list[dict] | None = None,
                 FROM arteries.persistent p
                 WHERE p.project_id IN (SELECT project_id FROM scope)
                   AND p.valid_until IS NULL
+                """ + only_trusted + """
                 ORDER BY p.source_ts DESC
                 LIMIT %(limit)s
                 """,
                 {"project": project_id or PROJECT_ID, "limit": MAX_PERSISTENT_CONTEXT},
             )
         return [dict(r) for r in cur.fetchall()]
+
+
+def _drop_corroborated(conn, memories: list[dict], vectors: list,
+                       project_id: str) -> tuple[list, list, list]:
+    """Untrusted facts a trusted claim already makes, removed before writing.
+
+    The trusted claim says it already, so the untrusted copy adds a second,
+    weaker source for the same thing and nothing else. Only trusted neighbours
+    count -- corroboration by another untrusted row would be an injection
+    agreeing with itself.
+    """
+    kept, kept_vecs, known = [], [], []
+    with conn.cursor() as cur:
+        for mem, vec in zip(memories, vectors):
+            if vec is None:
+                kept.append(mem)
+                kept_vecs.append(vec)
+                continue
+            cur.execute(
+                SCOPE_CTE + """
+                SELECT 1 - (p.embedding <=> %(q)s::vector)
+                FROM arteries.persistent p
+                WHERE p.project_id IN (SELECT project_id FROM scope)
+                  AND p.valid_until IS NULL AND p.embedding IS NOT NULL
+                  AND coalesce(p.source_meta->>'trust', '') <> %(untrusted)s
+                ORDER BY p.embedding <=> %(q)s::vector LIMIT 1""",
+                {"q": vec, "project": project_id, "untrusted": trust.UNTRUSTED})
+            row = cur.fetchone()
+            if row and row[0] >= trust.CORROBORATE_SIM:
+                known.append(mem["fact"][:120])
+                continue
+            kept.append(mem)
+            kept_vecs.append(vec)
+    return kept, kept_vecs, known
 
 
 def _reject_duplicates(conn, memories: list[dict], vectors: list,
@@ -684,6 +757,19 @@ def _write_results(conn, result: dict, claimed_ids: list,
     project_id = project_id or PROJECT_ID
     new_count = 0
     superseded_count = 0
+    # One class per batch (_one_trust_class), so any untrusted input means the
+    # whole batch is; an agent run is untrusted whatever it compiles.
+    untrusted = trust.agent_run()
+    if claimed_ids and not untrusted:
+        with conn.cursor() as cur:
+            cur.execute("SELECT coalesce(bool_or(trust = %s), false) FROM arteries.ephemeral "
+                        "WHERE id = ANY(%s::uuid[])",
+                        (trust.UNTRUSTED, [str(i) for i in claimed_ids]))
+            untrusted = bool(cur.fetchone()[0])
+    # Resolved here, not left waiting (trust.py): what survives the two drops
+    # below is written short-lived.
+    source_meta = json.dumps({"trust": trust.UNTRUSTED, "expires": trust.expiry()}
+                             if untrusted else {})
 
     # Embed every fact in one request, before the transaction opens. This used
     # to be one HTTP call per fact issued *inside* the write transaction, which
@@ -705,6 +791,15 @@ def _write_results(conn, result: dict, claimed_ids: list,
              "rejected": [m.get("fact", "")[:120] for m, _why in refused[:5]]},
             project_id=project_id, agent_id=AGENT_PROCESS_ID)
     memories = [m for m, why in judged if why is None]
+    if untrusted:
+        steered = [(m, trust.steering(m.get("fact", ""))) for m in memories]
+        if dropped := [(m, why) for m, why in steered if why]:
+            runlog.log_event(
+                "memory.compile.untrusted_dropped", "arteries",
+                {"count": len(dropped), "by_rule": dict(Counter(w for _m, w in dropped)),
+                 "dropped": [m.get("fact", "")[:120] for m, _w in dropped[:5]]},
+                project_id=project_id, agent_id=AGENT_PROCESS_ID)
+        memories = [m for m, why in steered if not why]
 
     vectors = embed.embed_texts_sync([m["fact"] for m in memories])
     memories, vectors, duplicates = _reject_duplicates(conn, memories, vectors, project_id)
@@ -712,6 +807,12 @@ def _write_results(conn, result: dict, claimed_ids: list,
         runlog.log_event("memory.compile.duplicates_rejected", "arteries",
                          {"count": len(duplicates), "rejected": duplicates[:5]},
                          project_id=project_id, agent_id=AGENT_PROCESS_ID)
+    if untrusted and memories:
+        memories, vectors, known = _drop_corroborated(conn, memories, vectors, project_id)
+        if known:
+            runlog.log_event("memory.compile.untrusted_corroborated", "arteries",
+                             {"count": len(known), "facts": known[:5]},
+                             project_id=project_id, agent_id=AGENT_PROCESS_ID)
 
     scope_id = scope.scope_for(project_id) or project_id
     # The strongest evidence in the batch. A batch is one turn's worth of claims
@@ -760,8 +861,8 @@ def _write_results(conn, result: dict, claimed_ids: list,
                 """
                 INSERT INTO arteries.persistent
                     (fact, domains, confidence, project_id, parent_ids, embedding,
-                     kind, evidence, episode_id, task_id)
-                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s, %s,
+                     kind, evidence, source_meta, episode_id, task_id)
+                VALUES (%s, %s::jsonb, %s, %s, %s::uuid[], %s::vector, %s, %s, %s::jsonb,
                     -- carried up from the ephemerals this was distilled from,
                     -- but only when they agree. A fact compiled from several
                     -- tasks is by construction not about any one of them, so
@@ -786,6 +887,7 @@ def _write_results(conn, result: dict, claimed_ids: list,
                     vec,
                     mem.get("kind", "fact"),
                     batch_evidence,
+                    source_meta,
                     sources,
                     sources,
                 ),
@@ -845,12 +947,23 @@ def _write_results(conn, result: dict, claimed_ids: list,
             # tabs", which also makes the eviction exemption for preferences
             # worthless -- the row survives age and is overwritten instead.
             cur.execute(
-                "SELECT evidence FROM arteries.persistent "
+                "SELECT evidence, source_meta->>'trust' FROM arteries.persistent "
                 "WHERE id = %s AND project_id = %s AND valid_until IS NULL",
                 (pid, project_id),
             )
             existing = cur.fetchone()
             old_evidence = existing[0] if existing else None
+            # Untrusted may disagree with trusted, never retire it: an injected
+            # claim that could supersede would delete the true one it contradicts.
+            if existing and untrusted and existing[1] != trust.UNTRUSTED:
+                runlog.log_event(
+                    "memory.compile.supersede_refused", "arteries",
+                    {"persistent_id": str(pid), "reason": "untrusted batch, trusted claim"},
+                    project_id=project_id, agent_id=AGENT_PROCESS_ID)
+                if new_ids:
+                    graph.add_edge(cur, project_id, "persistent", new_ids[0],
+                                   "contradicts", "persistent", str(pid))
+                continue
             if existing and not evidence.can_supersede(batch_evidence, old_evidence):
                 runlog.log_event(
                     "memory.compile.supersede_refused", "arteries",

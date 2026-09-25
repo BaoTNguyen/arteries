@@ -220,3 +220,7 @@ __marimo__/
 .arteries/
 .codex/config.toml
 .claude/settings.local.json
+
+# Session recordings (terminal.typescript): whatever crossed a terminal,
+# credentials included. Local only, as in heart and plexus.
+.marrow/

@@ -24,7 +24,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import scope
+from arteries import scope, trust
 from arteries.config import DB_CONFIG
 from arteries.scope import SCOPE_CTE
 
@@ -185,11 +185,12 @@ def expand(conn, project_id: str, seeds: list[dict[str, Any]], *, hops: int = 1,
             JOIN arteries.persistent p ON p.id = r.nid::uuid
             WHERE p.project_id IN (SELECT project_id FROM scope)
               AND p.valid_until IS NULL
-              AND NOT (p.id::text = ANY(%(seeds)s))
+              AND NOT (p.id::text = ANY(%(seeds)s))""" + trust.visible() + """
             ORDER BY p.id, r.score DESC
             LIMIT %(limit)s
             """,
-            {"project": project_id, "seeds": seed_ids, "decay": decay, "limit": limit},
+            {"project": project_id, "seeds": seed_ids, "decay": decay, "limit": limit,
+             **trust.reader_params()},
         )
         rows = [dict(r) for r in cur.fetchall()]
     for row in rows:

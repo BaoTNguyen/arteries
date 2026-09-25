@@ -36,15 +36,25 @@ const response = event.tool_response || event.toolResponse || {};
 const exitCode = Number(response.exit_code ?? response.exitCode ?? 0);
 const failed = exitCode !== 0 || Boolean(response.error) || response.is_error === true;
 const mutating = /write|edit|create|delete|remove|move|rename|notebook/i.test(tool);
+// A web fetch is recorded whatever its outcome: it is how arteries knows the
+// session read the open web, and the assistant's later words in it are marked
+// untrusted (trust.py). The host only -- never the query or the full URL.
+const web = /^(webfetch|websearch|web_fetch|web_search)$/i.test(tool);
 
-if (!failed && !mutating) process.exit(0);
+if (!failed && !mutating && !web) process.exit(0);
 
-const target = input.file_path || input.path || input.notebook_path ||
-  (typeof input.command === 'string' ? input.command.slice(0, 200) : '') || '';
+let host = '';
+if (web && typeof input.url === 'string') {
+  try { host = new URL(input.url).host; } catch { host = ''; }
+}
+const target = web ? (host || 'search') :
+  (input.file_path || input.path || input.notebook_path ||
+   (typeof input.command === 'string' ? input.command.slice(0, 200) : '') || '');
 
 try {
   execFileSync('python3', ['-m', 'arteries.observe_tool'], {
-    input: JSON.stringify({ tool, exit_code: exitCode, failed, target }),
+    input: JSON.stringify({ tool, exit_code: exitCode, failed, target,
+                            session_id: event.session_id || undefined }),
     timeout: 3000,
     stdio: ['pipe', 'ignore', 'ignore'],
   });

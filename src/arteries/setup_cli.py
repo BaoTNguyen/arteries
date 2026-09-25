@@ -347,6 +347,19 @@ message="${{1:-event}}"
 eval "$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli "$ARTERIES_CLI" --event "$message" --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --format shell)"
 python3 -m arteries.runs start --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --cli "$ARTERIES_CLI" --repo "$ARTERIES_REPO" >/dev/null 2>&1 || true
 '''
+    # PostToolUse, registered for web tools only: which sessions read the open
+    # web is the one fact trust.py needs, and every other tool call would pay a
+    # Python start-up for nothing. Never fails a turn.
+    hook_tool = f'''#!/usr/bin/env bash
+set -uo pipefail
+
+{env}
+if [[ -t 0 ]]; then
+  exit 0
+fi
+cat | python3 -m arteries.observe_tool >/dev/null 2>&1 || true
+exit 0
+'''
     assistant_observe = f'''#!/usr/bin/env bash
 set -euo pipefail
 
@@ -496,6 +509,7 @@ bash "$script_dir/hooks/activate.sh"
         hooks / "generic-observe.sh": generic,
         hooks / "hook-observe.sh": hook_observe,
         hooks / "hook-event.sh": hook_event,
+        hooks / "hook-tool.sh": hook_tool,
         hooks / "assistant-observe.sh": assistant_observe,
         hooks / "hook-assistant-observe.sh": hook_assistant,
         hooks / "activate.sh": activate,
@@ -651,6 +665,7 @@ def _runtime_ok(ctx: Context) -> bool:
         "hooks/generic-observe.sh",
         "hooks/hook-observe.sh",
         "hooks/hook-event.sh",
+        "hooks/hook-tool.sh",
         "hooks/assistant-observe.sh",
         "hooks/hook-assistant-observe.sh",
         "hooks/activate.sh",
@@ -698,6 +713,15 @@ def _claude_hooks(ctx: Context) -> dict:
                 "type": "command",
                 "command": f"ARTERIES_CLI=claude bash {hooks}/hook-observe.sh",
                 "timeout": 10,
+                "statusMessage": "arteries",
+            }],
+        }],
+        "PostToolUse": [{
+            "matcher": "WebFetch|WebSearch",
+            "hooks": [{
+                "type": "command",
+                "command": f"ARTERIES_CLI=claude bash {hooks}/hook-tool.sh",
+                "timeout": 5,
                 "statusMessage": "arteries",
             }],
         }],

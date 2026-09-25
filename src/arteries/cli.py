@@ -14,7 +14,7 @@ from collections.abc import Sequence
 import psycopg2
 import psycopg2.extras
 
-from arteries import actionlog, benchmark, degrade, docs, doctor, graph, ingest, inspect, journal, observe, ontology, packet, remember, runs, scope, setup_cli, storage, trace
+from arteries import actionlog, benchmark, degrade, docs, doctor, graph, ingest, inspect, journal, observe, ontology, packet, remember, runs, scope, setup_cli, storage, trace, trust
 from arteries.compile import compile_once
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG
 from arteries.eval import evaluate
@@ -27,7 +27,7 @@ from arteries.subagent import subagent_env
 COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe",
             "activate", "ingest", "rewards", "benchmark", "eval", "inspect", "runs", "journal",
             "doctor", "packet", "trace", "decisions", "remember", "spawn", "search",
-            "compile", "migrate", "evergreen", "evict")
+            "compile", "migrate", "evergreen", "evict", "trust")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -103,6 +103,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return runs.main(ns.args)
     if ns.command == "doctor":
         return doctor.main(ns.args)
+    if ns.command == "trust":
+        return trust.main(ns.args)
     if ns.command == "packet":
         return packet.main(list(ns.args))
     if ns.command == "trace":
