@@ -14,7 +14,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import degrade, normalize, runlog, scope as scope_mod
+from arteries import degrade, normalize, runlog, scope as scope_mod, trust
 from arteries.config import DB_CONFIG
 from arteries.scope import SCOPE_CTE
 
@@ -116,15 +116,19 @@ def insert_ephemeral(
     episode_id: str | None = None,
     task_id: str | None = None,
     session_id: str | None = None,
+    trust_level: str | None = None,
 ) -> str:
+    session_id = session_id if session_id is not None else _env_session_id()
     with _conn() as conn, conn.cursor() as cur:
+        if trust_level is None:
+            trust_level = _capture_trust(cur, source, session_id)
         cur.execute(
             """
             INSERT INTO arteries.ephemeral
                 (fact, embedding, domains, project_id,
                  agent_process_id, parent_agent_id, source, episode_id, task_id,
-                 session_id, fact_hash, last_seen)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                 session_id, fact_hash, trust, last_seen)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             -- The dedupe. Two sessions racing the same sentence resolve inside
             -- idx_eph_dedupe: no lock, no read-then-write, and the loser gets a
             -- counter bump rather than a second row. The predicate has to repeat
@@ -132,7 +136,10 @@ def insert_ephemeral(
             ON CONFLICT (project_id, coalesce(session_id, ''), fact_hash)
                 WHERE valid_until IS NULL AND fact_hash IS NOT NULL
             DO UPDATE SET seen_count = arteries.ephemeral.seen_count + 1,
-                          last_seen  = now()
+                          last_seen  = now(),
+                          -- the same sentence arriving from an untrusted turn
+                          -- taints the row; a trusted repeat never cleans one
+                          trust = coalesce(EXCLUDED.trust, arteries.ephemeral.trust)
             RETURNING id
             """,
             (
@@ -145,12 +152,40 @@ def insert_ephemeral(
                 source,
                 episode_id if episode_id is not None else _env_episode_id(),
                 task_id if task_id is not None else _env_task_id(),
-                session_id if session_id is not None else _env_session_id(),
+                session_id,
                 normalize.fact_hash(fact),
+                trust_level,
             ),
         )
         conn.commit()
         return str(cur.fetchone()[0])
+
+
+def _capture_trust(cur, source: str, session_id: str | None) -> str | None:
+    """Untrusted when an unattended agent wrote it, or when it is the
+    assistant's words in a session that has fetched from the web. A user's own
+    typed turn stays trusted either way: they wrote it."""
+    if trust.agent_run():
+        return trust.UNTRUSTED
+    if source != "assistant" or not session_id:
+        return None
+    try:
+        cur.execute(
+            """SELECT EXISTS (
+                   SELECT 1 FROM arteries.agent_events e
+                   LEFT JOIN arteries.agent_runs r ON r.id = e.run_id
+                   WHERE (e.payload->>'session_id' = %s
+                          OR r.metadata->>'session_id' = %s)
+                     AND e.event_type = 'tool.result'
+                     AND lower(e.payload->>'tool') = ANY(%s))""",
+            (session_id, session_id, list(trust.WEB_TOOLS)))
+        return trust.UNTRUSTED if cur.fetchone()[0] else None
+    except Exception as exc:
+        # Not knowing is not "clean". A failed check marks the row untrusted:
+        # the cost is a memory held back until promoted, not an injection kept.
+        cur.connection.rollback()
+        degrade.note(exc, "session web check")
+        return trust.UNTRUSTED
 
 
 # -- Persistent ---------------------------------------------------------------
@@ -178,11 +213,12 @@ def get_persistent(
             FROM arteries.persistent p
             WHERE p.project_id IN (SELECT project_id FROM scope)
               AND p.valid_until IS NULL
-              {origin_filter}
+              {origin_filter}{trust.visible()}
             ORDER BY p.source_ts DESC
             LIMIT %(limit)s
             """,
-            {"project": project_id, "origin": scope, "limit": limit},
+            {"project": project_id, "origin": scope, "limit": limit,
+             **trust.reader_params()},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -203,11 +239,12 @@ def get_persistent_by_kind(
             FROM arteries.persistent p
             WHERE p.project_id IN (SELECT project_id FROM scope)
               AND p.valid_until IS NULL
-              AND p.kind = ANY(%(kinds)s)
+              AND p.kind = ANY(%(kinds)s)""" + trust.visible() + """
             ORDER BY p.source_ts DESC
             LIMIT %(limit)s
             """,
-            {"project": project_id, "kinds": list(kinds), "limit": limit},
+            {"project": project_id, "kinds": list(kinds), "limit": limit,
+             **trust.reader_params()},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -229,12 +266,12 @@ def get_persistent_by_relevance(
             WHERE p.project_id IN (SELECT project_id FROM scope)
               AND p.valid_until IS NULL
               AND p.embedding IS NOT NULL
-              AND 1 - (p.embedding <=> %(q)s::vector) >= %(threshold)s
+              AND 1 - (p.embedding <=> %(q)s::vector) >= %(threshold)s""" + trust.visible() + """
             ORDER BY p.embedding <=> %(q)s::vector
             LIMIT %(limit)s
             """,
             {"q": query_embedding, "project": project_id,
-             "threshold": threshold, "limit": limit},
+             "threshold": threshold, "limit": limit, **trust.reader_params()},
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -291,11 +328,12 @@ def get_persistent_by_text(project_id: str, query: str,
                 FROM arteries.persistent p
                 WHERE p.project_id IN (SELECT project_id FROM scope)
                   AND p.valid_until IS NULL
-                  AND p.search_tsv @@ to_tsquery('english', %(terms)s)
+                  AND p.search_tsv @@ to_tsquery('english', %(terms)s)""" + trust.visible() + """
                 ORDER BY lexical_rank DESC
                 LIMIT %(limit)s
                 """,
-                {"terms": terms, "project": project_id, "limit": limit},
+                {"terms": terms, "project": project_id, "limit": limit,
+                 **trust.reader_params()},
             )
             return [dict(r) for r in cur.fetchall()]
 
@@ -463,14 +501,17 @@ def get_evergreen_by_relevance(project_id: str, query_embedding: list[float],
               AND valid_until IS NULL
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> %(q)s::vector) >= %(threshold)s
+              -- evergreen is scope-wide by design; a web-lane agent gets only
+              -- what its own project contributed (see trust.py)
+              AND (NOT %(trust_web)s OR source_project_id = %(project)s)
             ORDER BY
               -- Core first at equal relevance: a project's own specification
               -- outranks a claim that merely scored well against it.
               core DESC, embedding <=> %(q)s::vector
             LIMIT %(limit)s
             """,
-            {"q": query_embedding, "scope": scope_id,
-             "threshold": threshold, "limit": limit},
+            {"q": query_embedding, "scope": scope_id, "project": project_id,
+             "threshold": threshold, "limit": limit, **trust.reader_params()},
         )
         return [dict(r) for r in cur.fetchall()]
 

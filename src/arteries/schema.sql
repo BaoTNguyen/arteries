@@ -104,6 +104,10 @@ CREATE INDEX IF NOT EXISTS idx_eph_domains
 -- answer, and an RL loop trains a retriever to fetch its own previous solution.
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS episode_id TEXT;
 ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS task_id TEXT;
+-- Provenance, not quality: 'untrusted' when an unattended agent or a session
+-- that fetched from the web produced the text (see trust.py). NULL is trusted.
+-- persistent carries the same bit in source_meta->>'trust'.
+ALTER TABLE arteries.ephemeral ADD COLUMN IF NOT EXISTS trust TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_eph_task
     ON arteries.ephemeral (project_id, task_id) WHERE task_id IS NOT NULL;
