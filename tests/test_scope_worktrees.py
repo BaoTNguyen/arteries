@@ -34,6 +34,21 @@ class WorktreeResolutionTests(unittest.TestCase):
                 subprocess.run(["git", "-C", str(REPO), "worktree", "remove",
                                 "--force", str(worktree)], capture_output=True)
 
+    def test_a_submodule_resolves_to_its_checkout(self):
+        """Cloned through the vascular umbrella, every repo is a submodule whose
+        git dir is `<super>/.git/modules/<name>`; its parent is not the repo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sub, sup = Path(tmp) / "sub", Path(tmp) / "super"
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                   "-c", "protocol.file.allow=always"]
+            for cmd in (["init", "-q", str(sub)],
+                        ["-C", str(sub), "commit", "-q", "--allow-empty", "-m", "x"],
+                        ["init", "-q", str(sup)],
+                        ["-C", str(sup), "submodule", "add", "-q", str(sub), "child"]):
+                subprocess.run(git + cmd, capture_output=True, check=True)
+            child = (sup / "child").resolve()
+            self.assertEqual(scope._worktree_parent(child), child)
+
     def test_a_directory_that_is_not_a_repo_resolves_to_nothing(self):
         """The guard this sits behind exists because a benchmark exporting an
         unregistered ARTERIES_PROJECT got write access from inside a registered

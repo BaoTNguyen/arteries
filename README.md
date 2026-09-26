@@ -88,11 +88,13 @@ Arteries owns:
 The two repos should usually sit next to each other:
 
 ```text
-/home/bao-tn/Coding/Projects/arteries
-/home/bao-tn/Coding/Projects/capillaries
+~/code/arteries
+~/code/capillaries
 ```
 
 The scripts assume that sibling layout unless you pass `--capillaries-root`.
+`~/code` stands in for wherever you clone; `git clone --recursive
+https://github.com/BaoTNguyen/vascular` gives you the same layout in one step.
 
 The two import each other, in opposite directions and at different weights.
 Arteries imports capillaries' retrieval entry points (`find`, `gate`);
@@ -134,7 +136,7 @@ GENERATE_URL=http://127.0.0.1:8001/v1/chat/completions
 Initialize the arteries schema once:
 
 ```bash
-cd /home/bao-tn/Coding/Projects/arteries
+cd ~/code/arteries
 art setup <provider>   # applies the schema too
 ```
 
@@ -354,7 +356,7 @@ art inspect --project project-name --agent project-name-hook
 From this repo without installing, use the wrapper:
 
 ```bash
-cd /home/bao-tn/Coding/Projects/arteries
+cd ~/code/arteries
 bash scripts/art.sh setup --list
 ```
 
@@ -367,18 +369,18 @@ Go to the project you want the agent to work in, then run the setup command for 
 List supported adapters:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup --list
+bash ~/code/arteries/scripts/art.sh setup --list
 ```
 
 Install one adapter:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add codex
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add claude
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add pi
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add opencode
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add cursor
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add hermes
+bash ~/code/arteries/scripts/art.sh setup add codex
+bash ~/code/arteries/scripts/art.sh setup add claude
+bash ~/code/arteries/scripts/art.sh setup add pi
+bash ~/code/arteries/scripts/art.sh setup add opencode
+bash ~/code/arteries/scripts/art.sh setup add cursor
+bash ~/code/arteries/scripts/art.sh setup add hermes
 ```
 
 ### Adding a CLI that has no adapter
@@ -389,7 +391,7 @@ assumes no vendor hook format, so nothing has to be written for a CLI to be
 supported.
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add generic
+bash ~/code/arteries/scripts/art.sh setup add generic
 ```
 
 That writes `.arteries/bin/art`, a wrapper carrying `PYTHONPATH` and project
@@ -461,10 +463,10 @@ re-emit across every repo at once:
 
 ```bash
 # preview: list each repo and the providers detected in it
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup sync ~/Coding/Projects --check
+bash ~/code/arteries/scripts/art.sh setup sync ~/code --check
 
 # reinstall and verify every provider already wired into every repo
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup sync ~/Coding/Projects
+bash ~/code/arteries/scripts/art.sh setup sync ~/code
 ```
 
 `sync` detects providers by artifact, not by what `.arteries/config.json`
@@ -478,31 +480,31 @@ run from CI or a git hook.
 The older shorthand still works:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup codex
+bash ~/code/arteries/scripts/art.sh setup codex
 ```
 
 Verify or remove a single adapter at any time:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup check cursor
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup remove cursor
+bash ~/code/arteries/scripts/art.sh setup check cursor
+bash ~/code/arteries/scripts/art.sh setup remove cursor
 
 # Equivalent legacy flag style:
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup cursor --check
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup cursor --remove
+bash ~/code/arteries/scripts/art.sh setup cursor --check
+bash ~/code/arteries/scripts/art.sh setup cursor --remove
 ```
 
 If capillaries is not a sibling of arteries, pass it explicitly:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add codex   --capillaries-root /path/to/capillaries
+bash ~/code/arteries/scripts/art.sh setup add codex   --capillaries-root /path/to/capillaries
 ```
 
 Use a stable project name when activity from multiple CLIs should land in the same trace:
 
 ```bash
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add codex --project career-ops
-bash /home/bao-tn/Coding/Projects/arteries/scripts/art.sh setup add cursor --project career-ops
+bash ~/code/arteries/scripts/art.sh setup add codex --project career-ops
+bash ~/code/arteries/scripts/art.sh setup add cursor --project career-ops
 ```
 
 Smoke test the shared runtime:
@@ -598,7 +600,7 @@ A **scope** is a set of repos that read each other's persistent memory. Five
 harness repos behave as one brain; a standalone project keeps its own.
 
 ```bash
-art scope add harness ~/Coding/Projects/{arteries,capillaries,heart,plexus,marrow}
+art scope add harness ~/code/{arteries,capillaries,heart,plexus,marrow}
 art scope show          # which group covers this directory
 art scope move marrow standalone
 ```
@@ -789,9 +791,9 @@ Trace labels this explicitly:
 You can inspect another project from the arteries repo:
 
 ```bash
-cd /home/bao-tn/Coding/Projects/arteries
+cd ~/code/arteries
 bash scripts/art.sh trace \
-  --repo /home/bao-tn/Coding/Projects/career-ops \
+  --repo ~/code/career-ops \
   --events 100 \
   --memories 20 \
   --prompt-preview 1000 \
@@ -838,7 +840,7 @@ Summarize recent activity:
 ```bash
 bash scripts/art.sh runs summary \
   --project career-ops \
-  --repo /home/bao-tn/Coding/Projects/career-ops \
+  --repo ~/code/career-ops \
   --limit 100
 ```
 
@@ -846,7 +848,7 @@ Show one run:
 
 ```bash
 bash scripts/art.sh runs show <run-id> \
-  --repo /home/bao-tn/Coding/Projects/career-ops
+  --repo ~/code/career-ops
 ```
 
 Watch a project in a terminal:
