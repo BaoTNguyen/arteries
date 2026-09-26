@@ -100,11 +100,8 @@ The two import each other, in opposite directions and at different weights.
 Arteries imports capillaries' retrieval entry points (`find`, `gate`);
 capillaries imports exactly one arteries module, `arteries.memory_types` —
 stdlib dataclasses, no psycopg2, no database. So capillaries needs arteries on
-the path, but never touches its storage. Install both editable, either order:
-
-```bash
-pip install -e ../arteries && pip install -e ../capillaries
-```
+the path, but never touches its storage. `uv sync` here installs both; from
+capillaries' side, add arteries with `uv pip install -e ../arteries`.
 
 The contract types live with the producer on purpose. They were in capillaries
 until arteries could not define its own output without importing the consumer
@@ -142,8 +139,7 @@ art setup <provider>   # applies the schema too
 
 ## Development environment
 
-Work inside a virtualenv at `.venv`. uv is the primary path, matching
-capillaries:
+Work inside a virtualenv at `.venv`, built by uv, matching capillaries:
 
 ```bash
 uv sync --extra ontology
@@ -161,17 +157,8 @@ uv lock
 uv run pytest tests/ -q
 ```
 
-Plain pip still works for anyone without uv:
-
-```bash
-python3 -m venv --system-site-packages .venv
-.venv/bin/pip install -e ../capillaries      # sibling first, it is not on PyPI
-.venv/bin/pip install -e '.[ontology]'
-```
-
-`--system-site-packages` on the pip path avoids rebuilding capillaries' ML
-stack (dspy, scikit-learn, pandas, the reranker) per checkout. uv does not need
-the flag; its cache hardlinks instead of copying.
+uv's cache hardlinks packages instead of copying them, so capillaries' ML
+stack (dspy, scikit-learn, pandas, the reranker) isn't rebuilt per checkout.
 
 Every script in `scripts/` sources `scripts/_env.sh`, which prefers
 `.venv/bin/python` and falls back to `python3` with `PYTHONPATH` set. So both
@@ -195,18 +182,15 @@ Arteries declares two hard dependencies and one optional extra:
 | `psycopg2` | `dependencies` | everything touching Postgres | |
 | `httpx` | `dependencies` | `embed.py`, `compile.py` | |
 | `rdflib` | `[ontology]` extra | `ontology.load` only | never imported at runtime; grounding reads the cached T-Box out of Postgres and matches with stdlib `difflib` |
-| `pytest` | `dev` group | tests | `uv sync` installs it; pip ignores groups |
+| `pytest` | `dev` group | tests | `uv sync` installs it |
 
-`uv sync --extra ontology` gets all of the above. `pip install -e '.[ontology]'`
-gets everything except the `dev` group, which is where capillaries lives — see
-below.
+`uv sync --extra ontology` gets all of the above, capillaries included.
 
-Capillaries is a hard requirement that pip cannot resolve — it is not on PyPI,
-so naming it in `dependencies` would fetch a stranger's package. It is declared
-in the `dev` dependency group with `[tool.uv.sources]` pinning it to
-`../capillaries`, which gives uv a real declaration while leaving
-`pip install -e .` working, since PEP 735 groups are opt-in. On the pip path,
-install the sibling yourself. Arteries imports four things from it:
+Capillaries is a hard requirement, but it is not on PyPI, so naming it in
+`dependencies` would put a bare name in the package metadata that resolves to a
+stranger's package. It is declared in the `dev` dependency group instead, with
+`[tool.uv.sources]` pinning it to `../capillaries`. Arteries imports four
+things from it:
 
 | Import | Where | Degrades if missing? |
 | --- | --- | --- |
