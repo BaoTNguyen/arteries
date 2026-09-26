@@ -91,7 +91,7 @@ def load(path: str | Path, source: str | None = None, db_config: dict | None = N
         from rdflib.namespace import SKOS
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise SystemExit(
-            "loading an ontology needs rdflib: pip install 'arteries[ontology]'\n"
+            "loading an ontology needs rdflib: uv sync --extra ontology\n"
             "(only this command needs it; resolution at runtime does not)"
         ) from exc
 
