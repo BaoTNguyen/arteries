@@ -146,7 +146,20 @@ def _worktree_parent(path: Path) -> Path | None:
     common = out.stdout.strip()
     if not common:
         return None
-    return Path(common).resolve().parent
+    common_dir = Path(common).resolve()
+    if common_dir.name == ".git":
+        return common_dir.parent
+    # A submodule's git dir lives in the superproject (`.git/modules/<name>`),
+    # so its parent is `.git/modules`, not the checkout. The checkout is what
+    # the module's core.worktree names, relative to that git dir. This is the
+    # layout every repo has when cloned through the vascular umbrella.
+    try:
+        wt = subprocess.run(
+            ["git", "--git-dir", str(common_dir), "config", "core.worktree"],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        wt = ""
+    return (common_dir / wt).resolve() if wt else common_dir.parent
 
 
 def current_project(*, db_config: dict | None = None) -> str:
