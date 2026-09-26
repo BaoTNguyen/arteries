@@ -2,8 +2,11 @@ import json
 import re
 import os
 import tempfile
-import tomllib
 import unittest
+try:
+    import tomllib  # 3.11+; arteries itself supports 3.10, only these asserts need it
+except ModuleNotFoundError:
+    tomllib = None
 from pathlib import Path
 from unittest import mock
 
@@ -98,6 +101,8 @@ class SetupCliTests(unittest.TestCase):
             self.assertIn(setup_cli.MARKER_START, agents)
             self.assertIn("# Existing", agents)
             self.assertIn(setup_cli.CODEX_MARKER_START, config_toml)
+            if tomllib is None:
+                self.skipTest("tomllib needs Python 3.11")
             parsed_config = tomllib.loads(config_toml)
             self.assertEqual(
                 parsed_config["experimental_compact_prompt_file"],
@@ -139,6 +144,8 @@ codex_hooks = true
 
             self.assertEqual(setup_cli.main(["codex", "--cwd", str(root), "--no-db"]), 0)
             config_toml = config.read_text(encoding="utf-8")
+            if tomllib is None:
+                self.skipTest("tomllib needs Python 3.11")
             parsed_config = tomllib.loads(config_toml)
 
             self.assertNotIn("python3 -m arteries.setup_cli", config_toml)
