@@ -354,6 +354,9 @@ requires-dist = [
 ]
 provides-extras = ["optimizer", "lightweight", "advanced", "obsidian", "dev"]
 
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
 [[package]]
 name = "certifi"
 version = "2026.7.22"
