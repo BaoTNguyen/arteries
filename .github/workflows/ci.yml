@@ -10,7 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: arteries
 
@@ -19,21 +19,19 @@ jobs:
       # a PR into main is judged against capillaries' main, work on dev against
       # capillaries' dev — so a change that needs an unlanded capillaries change
       # goes green on dev and red on the PR, which is when you want to hear it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: BaoTNguyen/capillaries
           ref: ${{ github.base_ref == 'main' && 'main' || 'dev' }}
           path: capillaries
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v10.2.0   # no floating major tags after v7
         with:
           python-version: '3.12'
 
-      # capillaries goes in editable so its own pyproject supplies the transitive
-      # deps arteries reaches through it (httpx, frontmatter, numpy). Listing them
-      # here instead would be a second copy that drifts the first time capillaries
-      # adds one.
-      - run: pip install -e ./capillaries -e ./arteries pytest
-
+      # uv resolves capillaries from ../capillaries through [tool.uv.sources],
+      # the same way a local checkout does, so its own pyproject supplies the
+      # transitive deps arteries reaches through it. Not --locked: uv.lock
+      # records capillaries' metadata, which moves whenever capillaries does.
       - working-directory: arteries
-        run: python -m pytest -q
+        run: uv sync && uv run pytest -q
