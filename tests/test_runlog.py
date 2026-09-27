@@ -93,9 +93,13 @@ class RunlogDiscardTests(unittest.TestCase):
 
     def test_without_discard_the_write_is_attempted(self):
         env = {k: v for k, v in os.environ.items() if k != "ARTERIES_RUNLOG"}
+        # the file writers are stubbed too: unstubbed, they create .arteries/runs
+        # in the checkout, which the sandbox verifier mounts read-only
         with patch.dict(os.environ, env, clear=True), \
                 patch.object(runlog, "_write_db_run"), \
                 patch.object(runlog, "_write_db_event") as db_event, \
+                patch.object(runlog, "_write_jsonl"), \
+                patch.object(runlog, "_write_current_run"), \
                 patch.object(runlog, "journal_append"):
             runlog.log_event("turn.observed", "test", {})
 
