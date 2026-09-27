@@ -23,16 +23,17 @@ class WorktreeResolutionTests(unittest.TestCase):
         self.assertEqual(common, REPO)
 
     def test_a_linked_worktree_resolves_to_the_main_checkout(self):
+        # a scratch repo, not this checkout: `worktree add` writes into .git,
+        # which the sandbox verifier mounts read-only
         with tempfile.TemporaryDirectory() as tmp:
-            worktree = Path(tmp) / "wt"
-            subprocess.run(["git", "-C", str(REPO), "worktree", "add", "--detach",
-                            str(worktree), "HEAD"],
-                           capture_output=True, check=True)
-            try:
-                self.assertEqual(scope._worktree_parent(worktree), REPO)
-            finally:
-                subprocess.run(["git", "-C", str(REPO), "worktree", "remove",
-                                "--force", str(worktree)], capture_output=True)
+            repo, worktree = Path(tmp) / "repo", Path(tmp) / "wt"
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+            for cmd in (["init", "-q", str(repo)],
+                        ["-C", str(repo), "commit", "-q", "--allow-empty", "-m", "x"],
+                        ["-C", str(repo), "worktree", "add", "-q", "--detach",
+                         str(worktree), "HEAD"]):
+                subprocess.run(git + cmd, capture_output=True, check=True)
+            self.assertEqual(scope._worktree_parent(worktree), repo.resolve())
 
     def test_a_submodule_resolves_to_its_checkout(self):
         """Cloned through the vascular umbrella, every repo is a submodule whose
