@@ -172,6 +172,8 @@ def unreached(root: Path | None = None) -> list[str]:
     scripts = root.parent.parent / "scripts"
     if scripts.is_dir():
         sources.update({p: p.read_text() for p in sorted(scripts.glob("*.sh"))})
+    # vascular_paths is the stack-wide vendored module, byte-identical in every repo, and later work calls some of it first (repo_dir), so arteries' own call graph says nothing about it.
+    sources = {p: t for p, t in sources.items() if p.name != "vascular_paths.py"}
     orphans = []
     for path, text in sources.items():
         for match in re.finditer(r"^def ([a-z][a-z0-9_]*)\(", text, re.M):
