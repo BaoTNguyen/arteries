@@ -3,7 +3,9 @@
 Every public function is exercised. ENV vars that override locations are
 explicitly tested so the module's own documentation stays true.
 """
+import hashlib
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -129,6 +131,38 @@ class NoImportSideEffectsTests(unittest.TestCase):
         finally:
             if saved is not None:
                 sys.modules["arteries.vascular_paths"] = saved
+
+
+class ArteriesStateTests(unittest.TestCase):
+    """arteries resolves its out-of-checkout state through vascular_paths."""
+
+    def _env(self, **overrides):
+        env = {k: v for k, v in os.environ.items() if k != "EVENT_JOURNAL_DIR"}
+        env.update(overrides)
+        return env
+
+    def test_state_lands_under_VASCULAR_HOME(self):
+        import arteries.journal
+        import arteries.usage
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, self._env(VASCULAR_HOME=tmp), clear=True):
+                self.assertEqual(arteries.journal.journal_dir(),
+                                 Path(tmp) / "state" / "heart" / "events")
+                self.assertEqual(arteries.usage._state_path().parent,
+                                 Path(tmp) / "state" / "arteries")
+
+    def test_EVENT_JOURNAL_DIR_overrides_VASCULAR_HOME(self):
+        import arteries.journal
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            env = self._env(VASCULAR_HOME=tmp, EVENT_JOURNAL_DIR=other)
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(arteries.journal.journal_dir(), Path(other))
+
+    def test_vendored_copy_is_unmodified(self):
+        import arteries.vascular_paths
+        data = Path(arteries.vascular_paths.__file__).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(),
+                         "e2da9c91a10831ed001c198a74deec77272b634542766a094e52a872b37836c4")
 
 
 if __name__ == "__main__":
