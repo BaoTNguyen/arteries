@@ -14,13 +14,16 @@ from pathlib import Path
 
 from arteries import scope
 
-REPO = Path(__file__).resolve().parent.parent
 
 
 class WorktreeResolutionTests(unittest.TestCase):
     def test_a_worktree_resolves_to_its_repository(self):
-        common = scope._worktree_parent(REPO)
-        self.assertEqual(common, REPO)
+        # a scratch repo, not this checkout: the sandbox verifier runs the suite
+        # in a worktree without the repo's git dir, so git can't see this one
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, check=True)
+            self.assertEqual(scope._worktree_parent(repo), repo.resolve())
 
     def test_a_linked_worktree_resolves_to_the_main_checkout(self):
         # a scratch repo, not this checkout: `worktree add` writes into .git,
