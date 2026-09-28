@@ -35,6 +35,8 @@ import json
 import os
 from pathlib import Path
 
+from arteries import vascular_paths
+
 # what a caller gets back; also the payload keys heart and plexus already price
 USAGE_KEYS = ("tokens_in", "tokens_out", "cache_read",
               "cache_write_5m", "cache_write_1h")
@@ -70,9 +72,7 @@ def reported_usage(source: dict | None = None) -> dict:
 
 
 def _state_path() -> Path:
-    base = Path(os.environ.get("XDG_STATE_HOME",
-                               Path.home() / ".local" / "state")) / "arteries"
-    return base / "usage-offsets.json"
+    return vascular_paths.path("state", "arteries", "usage-offsets.json")
 
 
 def _load_state() -> dict:

@@ -12,19 +12,23 @@ point of the change rather than in production. Change all of them together and
 the rename is complete by construction.
 """
 import os
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from arteries.journal import journal_dir
 
 JOURNAL_ENV = "EVENT_JOURNAL_DIR"
-JOURNAL_DEFAULT = Path.home() / ".local" / "share" / "heart" / "events"
+# Relative to VASCULAR_HOME, which defaults to ~/.vascular.
+JOURNAL_DEFAULT = Path("state") / "heart" / "events"
 
 
 def test_the_default_path_matches_the_contract():
-    env = {k: v for k, v in os.environ.items() if k != JOURNAL_ENV}
-    with patch.dict(os.environ, env, clear=True):
-        assert journal_dir() == JOURNAL_DEFAULT
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {k: v for k, v in os.environ.items() if k != JOURNAL_ENV}
+        env["VASCULAR_HOME"] = tmp
+        with patch.dict(os.environ, env, clear=True):
+            assert journal_dir() == Path(tmp) / JOURNAL_DEFAULT
 
 
 def test_the_environment_variable_overrides_it():

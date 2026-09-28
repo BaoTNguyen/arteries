@@ -28,7 +28,7 @@ from arteries.config import DB_CONFIG
 from dbprobe import DB_REACHABLE
 
 # Mirrors heart's src/heart/episode.py episode.json output (confirmed against
-# a real run under ~/.local/share/heart/runs), trimmed to the fields
+# a real run under ~/.vascular/state/heart/runs), trimmed to the fields
 # actionlog.ingest_heart_episodes actually reads: episode_id, task_id,
 # outcome, reward.total, reward.components, usage.{tokens_in,tokens_out,cost_usd}.
 # Extra fields are kept to prove ingest ignores what it doesn't need.
