@@ -236,12 +236,12 @@ class TestRenderState:
 
     def test_near_miss_guard_drops_different_subjects(self, monkeypatch):
         """The v2 worked example, kept as the regression case: a script
-        deliberately leaves RERANKER_DEVICE unset, .arteries/env sets it to
+        deliberately leaves RERANKER_DEVICE unset, .vascular/arteries/env sets it to
         cuda:1 -- cosine high, differing literal, but different files, both
         true (planning/compaction_v3.md §4.4)."""
         monkeypatch.setattr(packet, "RETRACTION_DRY_RUN", False)
         self._embedded_pair("compact-packet.sh leaves RERANKER_DEVICE unset.",
-                            ".arteries/env sets RERANKER_DEVICE to cuda:1.")
+                            ".vascular/arteries/env sets RERANKER_DEVICE to cuda:1.")
         text = packet.render_state("auto compact", {})
         assert "## Retracted\n\n(none)" in text
         assert "## Unresolved\n\n(none)" in text

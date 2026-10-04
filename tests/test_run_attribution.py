@@ -57,11 +57,11 @@ def test_undeclared_caller_adopts_the_open_run(repo):
 
 def test_legacy_current_run_migrates_under_its_own_cli(repo):
     started = runlog.start_run(project_id="p", agent_id="a", cli="codex", repo_path=repo)
-    (repo / ".arteries" / "runs" / "current-codex.json").unlink()  # pre-upgrade layout
+    (repo / ".vascular" / "arteries" / "runs" / "current-codex.json").unlink()  # pre-upgrade layout
     assert _observe(repo, "codex")["run_id"] == started["run_id"]
-    assert (repo / ".arteries" / "runs" / "current-codex.json").exists()
+    assert (repo / ".vascular" / "arteries" / "runs" / "current-codex.json").exists()
 
 
 def test_legacy_pointer_still_written_for_external_readers(repo):
     runlog.start_run(project_id="p", agent_id="a", cli="codex", repo_path=repo)
-    assert (repo / ".arteries" / "current-run.json").exists()
+    assert (repo / ".vascular" / "arteries" / "current-run.json").exists()
