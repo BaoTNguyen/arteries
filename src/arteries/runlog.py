@@ -16,6 +16,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
+from arteries import vascular_paths
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
 from arteries.journal import journal_append
 
@@ -171,7 +172,7 @@ def current_run(
     # CLIs, and a shared current-run file meant whoever called `runs start` last
     # owned every subsequent turn — a Claude turn landing on a Codex run, priced
     # against the wrong rate card. Each CLI now resumes its own run.
-    for candidate in ((_current_run_path(repo, cli_name), repo / ".arteries" / "current-run.json")
+    for candidate in ((_current_run_path(repo, cli_name), vascular_paths.repo_dir(repo, "arteries") / "current-run.json")
                       if not session else ()):
         if not candidate.exists():
             continue
@@ -555,7 +556,7 @@ def _cli_slug(cli: str) -> str:
 
 
 def _current_run_path(repo: Path, cli: str) -> Path:
-    return repo / ".arteries" / "runs" / f"current-{_cli_slug(cli)}.json"
+    return vascular_paths.repo_dir(repo, "arteries") / "runs" / f"current-{_cli_slug(cli)}.json"
 
 
 def _write_current_run(repo: Path, run: dict[str, Any]) -> None:
@@ -567,7 +568,7 @@ def _write_current_run(repo: Path, run: dict[str, Any]) -> None:
     per_cli.write_text(blob, encoding="utf-8")
     # legacy pointer: whoever wrote last. Nothing routes turns through it any
     # more, but `art trace` and external readers still expect the old path.
-    legacy = repo / ".arteries" / "current-run.json"
+    legacy = vascular_paths.repo_dir(repo, "arteries") / "current-run.json"
     legacy.write_text(blob, encoding="utf-8")
 
 
@@ -614,7 +615,7 @@ def _write_db_event(event: dict[str, Any]) -> None:
 
 
 def _write_jsonl(run: dict[str, Any], event: dict[str, Any]) -> None:
-    root = Path(run.get("repo_path") or Path.cwd()) / ".arteries" / "runs"
+    root = vascular_paths.repo_dir(run.get("repo_path") or Path.cwd(), "arteries") / "runs"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{run['run_id']}.jsonl"
     with path.open("a", encoding="utf-8") as f:
@@ -622,7 +623,7 @@ def _write_jsonl(run: dict[str, Any], event: dict[str, Any]) -> None:
 
 
 def _recent_jsonl_events(project_id: str | None, limit: int, repo_path: str | Path | None = None) -> list[dict[str, Any]]:
-    roots = [_repo(repo_path) / ".arteries" / "runs"]
+    roots = [vascular_paths.repo_dir(_repo(repo_path), "arteries") / "runs"]
     events: list[dict[str, Any]] = []
     for root in roots:
         if not root.exists():

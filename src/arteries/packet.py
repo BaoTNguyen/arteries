@@ -298,7 +298,7 @@ def _is_compaction_trigger() -> bool:
     """Retrieval and compaction share one entry point and want different
     layouts (planning/compaction_v3.md §2). `cli_normalize.apply_event_env`
     already computes the canonical event name and exports it before every hook
-    invocation that can reach `art packet` -- `.arteries/hooks/*.sh` all run it
+    invocation that can reach `art packet` -- `.vascular/arteries/hooks/*.sh` all run it
     first -- so this reads a signal that already exists rather than adding one.
     A caller that never went through cli_normalize (heart's retrieval call,
     every existing test) has no `ARTERIES_EVENT` and gets the old behaviour."""
@@ -455,7 +455,7 @@ _NEGATION_MARKERS = ("no,", "no ", "actually", "that's wrong", "i meant", "not "
 def _subjects(fact: str) -> set[str]:
     """Crude "looks like a path or filename" -- any word containing a slash or
     a dot, stripped of trailing punctuation. Enough to tell the worked example
-    apart (RERANKER_DEVICE unset vs .arteries/env: cuda:1 -- different files,
+    apart (RERANKER_DEVICE unset vs .vascular/arteries/env: cuda:1 -- different files,
     both true) without a real entity extractor."""
     tokens = (t.strip(".,;:()") for t in re.findall(r"\S+", fact.lower()))
     return {t for t in tokens if "/" in t or "." in t}
