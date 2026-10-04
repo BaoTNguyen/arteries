@@ -50,4 +50,4 @@ bash <arteries-root>/scripts/art.sh trace --repo . --events 50 --memories 10
    - `schema_ok: false`: run `bash <arteries-root>/scripts/setup-db.sh`.
    - Service down: name the missing service and port.
    - Hooks missing: run `bash <arteries-root>/scripts/art.sh setup <provider>`.
-   - Codex config error: check that `experimental_compact_prompt_file` is top-level and points to `../.arteries/codex/compact_prompt.txt`.
+   - Codex config error: check that `experimental_compact_prompt_file` is top-level and points to `../.vascular/arteries/codex/compact_prompt.txt`.
