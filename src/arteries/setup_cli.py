@@ -25,6 +25,8 @@ CODEX_MARKER_END = "# arteries:end"
 LEGACY_CODEX_MARKER_START = "# arteries:start - managed by `python3 -m arteries.setup_cli codex`"
 HERMES_MARKER_START = "<!-- arteries:hermes:start -->"
 HERMES_MARKER_END = "<!-- arteries:hermes:end -->"
+# Where per-repo files lived before .vascular/arteries; only migrate_repo reads it.
+LEGACY_ARTERIES_DIR = ".arteries"
 PROVIDERS = ("generic", "pi", "codex", "claude", "opencode", "hermes", "cursor")
 PROVIDER_LEVELS = {
     "generic": "host-agnostic: `art observe` / `art activate` wrapper plus MCP config, no vendor hook format",
@@ -1638,18 +1640,37 @@ def installed_providers(repo: Path) -> list[str]:
     return found
 
 
+def migrate_repo(repo: Path, dry_run: bool = False) -> bool:
+    """Move a legacy per-repo folder to .vascular/arteries. True if it moved (or would)."""
+    legacy = repo / LEGACY_ARTERIES_DIR
+    target = vascular_paths.repo_dir(repo, "arteries")
+    if not legacy.is_dir() or target.exists():
+        return False
+    if not dry_run:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy), str(target))
+    return True
+
+
 def sync(root: Path, dry_run: bool = False) -> int:
-    """Reinstall every provider already wired into every repo under `root`.
+    """Reinstall every provider already wired into `root` and every repo under it.
 
     Generated hook commands carry absolute paths, so a repo keeps whatever the
-    installer emitted the day it ran. This re-emits them from current code.
+    installer emitted the day it ran. This re-emits them from current code,
+    after moving any legacy folder into .vascular/arteries.
     """
-    repos = sorted(p.parent for p in root.glob("*/.arteries") if p.is_dir())
+    repos = sorted(
+        p for p in [root, *root.glob("*")]
+        if (p / LEGACY_ARTERIES_DIR).is_dir() or vascular_paths.repo_dir(p, "arteries").is_dir()
+    )
     if not repos:
         print(f"no arteries repos under {root}")
         return 0
     failed = 0
     for repo in repos:
+        if migrate_repo(repo, dry_run=dry_run):
+            verb = "would move" if dry_run else "moved"
+            print(f"{repo.name}: {verb} {LEGACY_ARTERIES_DIR} -> .vascular/arteries")
         providers = installed_providers(repo)
         if not providers:
             print(f"{repo.name}: nothing wired, skipped")
