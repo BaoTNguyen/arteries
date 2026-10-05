@@ -158,6 +158,22 @@ class CliNormalizeTests(unittest.TestCase):
         self.assertIn("export ARTERIES_AGENT_ID=demo-hook", shell)
         self.assertEqual(message.strip(), "Build it")
 
+    def test_workspace_roots_and_conversation_id_fallbacks(self):
+        event = normalize(
+            {"prompt": "x", "workspace_roots": ["/tmp/a", "/tmp/b"], "conversation_id": "c1"},
+            cli="cursor",
+        )
+        self.assertEqual(event.cwd, "/tmp/a")
+        self.assertEqual(event.session_id, "c1")
+
+    def test_cwd_wins_over_workspace_roots(self):
+        event = normalize({"cwd": "/repo", "workspace_roots": ["/tmp/a"]}, cli="cursor")
+        self.assertEqual(event.cwd, "/repo")
+
+    def test_empty_or_non_list_workspace_roots_leave_cwd_none(self):
+        for roots in ([], "/tmp/a", None, {"0": "/tmp/a"}):
+            self.assertIsNone(normalize({"workspace_roots": roots}, cli="cursor").cwd, roots)
+
 
 if __name__ == "__main__":
     unittest.main()
