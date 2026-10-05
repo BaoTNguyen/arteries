@@ -19,9 +19,11 @@
 // needs an explicit rule that does not exist yet.
 
 const { execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 function read(stream) {
-  try { return JSON.parse(require('fs').readFileSync(0, 'utf8') || '{}'); }
+  try { return JSON.parse(fs.readFileSync(0, 'utf8') || '{}'); }
   catch { return {}; }
 }
 
@@ -43,6 +45,28 @@ const web = /^(webfetch|websearch|web_fetch|web_search)$/i.test(tool);
 
 if (!failed && !mutating && !web) process.exit(0);
 
+// The session's folder, never ours: CLAUDE_PLUGIN_ROOT or process.cwd() would
+// attribute the observation to the plugin checkout.
+const cwd = (typeof event.cwd === 'string' && event.cwd) ||
+  (Array.isArray(event.workspace_roots) &&
+   event.workspace_roots.find(r => typeof r === 'string' && r)) || '';
+if (!cwd) process.exit(0);
+
+const sessionId = event.session_id || event.conversation_id || undefined;
+const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
+const env = { ...process.env };
+env.ARTERIES_CLI = env.ARTERIES_CLI || (event.cursor_version ? 'cursor' : 'claude');
+env.ARTERIES_EVENT_CWD = cwd;
+if (sessionId) env.ARTERIES_SESSION_ID = String(sessionId);
+else delete env.ARTERIES_SESSION_ID;
+const srcPath = path.join(pluginRoot, 'src');
+const capSrc = process.env.CAPILLARIES_ROOT
+  ? path.join(process.env.CAPILLARIES_ROOT, 'src')
+  : path.join(pluginRoot, '..', 'capillaries', 'src');
+// ponytail: capillaries path is best-effort; arteries works without it
+const extra = fs.existsSync(capSrc) ? `${srcPath}:${capSrc}` : srcPath;
+env.PYTHONPATH = env.PYTHONPATH ? `${extra}:${env.PYTHONPATH}` : extra;
+
 let host = '';
 if (web && typeof input.url === 'string') {
   try { host = new URL(input.url).host; } catch { host = ''; }
@@ -54,9 +78,11 @@ const target = web ? (host || 'search') :
 try {
   execFileSync('python3', ['-m', 'arteries.observe_tool'], {
     input: JSON.stringify({ tool, exit_code: exitCode, failed, target,
-                            session_id: event.session_id || undefined }),
+                            session_id: sessionId }),
     timeout: 3000,
     stdio: ['pipe', 'ignore', 'ignore'],
+    env,
+    cwd,
   });
 } catch {
   // Memory must never fail a turn, and an observation least of all.
