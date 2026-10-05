@@ -20,6 +20,14 @@ from dbprobe import DB_REACHABLE
 
 
 class RunlogTests(unittest.TestCase):
+    def setUp(self):
+        # the fallback anchors on ARTERIES_REPO before cwd; heart sets it for
+        # every agent, so these tests wrote at the host repo path instead of tmp
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("ARTERIES_REPO", None)
+
     def test_log_event_falls_back_to_repo_jsonl(self):
         old_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmp:
