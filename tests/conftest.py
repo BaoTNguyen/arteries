@@ -13,6 +13,14 @@ import os
 # suite has a database of its own, all of it, not by opting in.
 os.environ.setdefault("DB_NAME", "arteries_test")
 
+# Child processes (`python -m arteries.cli_normalize`, the hook scripts) don't
+# inherit pytest's `pythonpath`, so they import whatever arteries is installed:
+# the original checkout from inside a worktree, or nothing in the sandbox
+# verifier. Export this checkout's src so they test the same code the suite does.
+_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    [_SRC] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p])
+
 import pytest
 
 

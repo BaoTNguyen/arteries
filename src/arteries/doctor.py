@@ -12,7 +12,7 @@ from typing import Any
 
 import psycopg2
 
-from arteries import runlog, scope
+from arteries import runlog, scope, vascular_paths
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG
 from arteries.embed import embed_texts_sync
 from arteries.packet import PACKET_SCHEMA_VERSION
@@ -172,6 +172,8 @@ def unreached(root: Path | None = None) -> list[str]:
     scripts = root.parent.parent / "scripts"
     if scripts.is_dir():
         sources.update({p: p.read_text() for p in sorted(scripts.glob("*.sh"))})
+    # vascular_paths is the stack-wide vendored module, byte-identical in every repo, and later work calls some of it first (repo_dir), so arteries' own call graph says nothing about it.
+    sources = {p: t for p, t in sources.items() if p.name != "vascular_paths.py"}
     orphans = []
     for path, text in sources.items():
         for match in re.finditer(r"^def ([a-z][a-z0-9_]*)\(", text, re.M):
@@ -300,7 +302,7 @@ def _compact_prompt_stale() -> bool:
     generated file carries `packet-schema: vN`; this compares it.
     """
     try:
-        prompt = Path.cwd() / ".arteries" / "codex" / "compact_prompt.txt"
+        prompt = vascular_paths.repo_dir(Path.cwd(), "arteries") / "codex" / "compact_prompt.txt"
         if not prompt.is_file():
             return False
         return f"packet-schema: v{PACKET_SCHEMA_VERSION}" not in prompt.read_text()
@@ -353,7 +355,7 @@ def fix(project: str) -> dict[str, Any]:
 
 
 def check(project: str, agent: str, cli: str, repo: Path) -> dict[str, Any]:
-    fallback = repo / ".arteries" / "runs"
+    fallback = vascular_paths.repo_dir(repo, "arteries") / "runs"
     checks: dict[str, Any] = {
         "project_id": project,
         "agent_id": str(agent),

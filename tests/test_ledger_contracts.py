@@ -4,7 +4,7 @@
   4. `art ingest <runs_dir|episodes.jsonl>` backfills arteries.rewards from
      heart's episode.json files, deduped by episode_id.
   5. When Postgres is unreachable, ledger writes degrade to a repo-local
-     JSONL fallback under .arteries/decisions/ and the emitted spine event
+     JSONL fallback under .vascular/arteries/decisions/ and the emitted spine event
      records where the write actually landed via a `store` field.
 
 These pin the *shape* of that contract (episode.json fields ingest reads,
@@ -28,7 +28,7 @@ from arteries.config import DB_CONFIG
 from dbprobe import DB_REACHABLE
 
 # Mirrors heart's src/heart/episode.py episode.json output (confirmed against
-# a real run under ~/.local/share/heart/runs), trimmed to the fields
+# a real run under ~/.vascular/state/heart/runs), trimmed to the fields
 # actionlog.ingest_heart_episodes actually reads: episode_id, task_id,
 # outcome, reward.total, reward.components, usage.{tokens_in,tokens_out,cost_usd}.
 # Extra fields are kept to prove ingest ignores what it doesn't need.
@@ -169,7 +169,7 @@ class IngestRoundTripDedupTests(unittest.TestCase):
     @unittest.skipIf(DB_REACHABLE, "Postgres is reachable on this host; DB path covered above")
     def test_ingest_round_trip_via_jsonl_fallback(self):
         """No DB on this host: ingest still runs, but the documented fallback
-        applies -- writes land in .arteries/decisions/ and dedup does NOT
+        applies -- writes land in .vascular/arteries/decisions/ and dedup does NOT
         happen across runs (actionlog._persist explicitly gives up on
         cross-run dedup in jsonl-fallback mode; see the `# ponytail:` note
         in ingest_heart_episodes)."""
@@ -179,7 +179,7 @@ class IngestRoundTripDedupTests(unittest.TestCase):
         n1 = actionlog.ingest_heart_episodes(runs)
         self.assertEqual(n1, 1)
 
-        jsonl_dir = self.root / "repo" / ".arteries" / "decisions"
+        jsonl_dir = self.root / "repo" / ".vascular" / "arteries" / "decisions"
         records = [
             json.loads(line)
             for p in jsonl_dir.glob("*.jsonl")
@@ -260,7 +260,7 @@ class DegradationDrillTests(unittest.TestCase):
 
         self.assertEqual(rec["episode_id"], "contract-test-degradation-1")
 
-        jsonl_files = list((self.root / "repo" / ".arteries" / "decisions").glob("*.jsonl"))
+        jsonl_files = list((self.root / "repo" / ".vascular" / "arteries" / "decisions").glob("*.jsonl"))
         self.assertEqual(len(jsonl_files), 1, "expected exactly one JSONL fallback file")
 
         jsonl_records = [json.loads(line) for line in jsonl_files[0].read_text().splitlines()]

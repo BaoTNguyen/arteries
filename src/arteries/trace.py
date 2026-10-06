@@ -12,15 +12,15 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import runlog, storage
+from arteries import runlog, storage, vascular_paths
 from arteries.config import DB_CONFIG
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Trace arteries activity for a target repo.")
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help="repo to inspect")
-    parser.add_argument("--project", help="project id; defaults to target .arteries/config.json or repo name")
-    parser.add_argument("--agent", help="agent id; defaults to target .arteries/config.json")
+    parser.add_argument("--project", help="project id; defaults to target .vascular/arteries/config.json or repo name")
+    parser.add_argument("--agent", help="agent id; defaults to target .vascular/arteries/config.json")
     parser.add_argument("--events", type=int, default=50, help="recent events to include")
     parser.add_argument("--memories", type=int, default=10, help="memory rows per tier to include")
     parser.add_argument("--prompt-preview", type=int, default=500, help="retrieved prompt preview characters")
@@ -192,7 +192,7 @@ def _nearest_match(reason: str) -> str | None:
 
 
 def _read_config(repo: Path) -> dict[str, Any]:
-    path = repo / ".arteries" / "config.json"
+    path = vascular_paths.repo_dir(repo, "arteries") / "config.json"
     if not path.exists():
         return {}
     try:
@@ -202,7 +202,7 @@ def _read_config(repo: Path) -> dict[str, Any]:
 
 
 def _read_current_run(repo: Path) -> dict[str, Any] | None:
-    path = repo / ".arteries" / "current-run.json"
+    path = vascular_paths.repo_dir(repo, "arteries") / "current-run.json"
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))

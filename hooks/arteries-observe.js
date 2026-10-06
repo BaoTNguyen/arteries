@@ -42,7 +42,13 @@ process.stdin.on('end', () => {
     const data = JSON.parse(input.replace(/^﻿/, ''));
     const prompt = (data.prompt || '').trim();
 
-    if (!prompt) {
+    // The session's folder, never ours: CLAUDE_PLUGIN_ROOT or process.cwd()
+    // would attribute the turn to the plugin checkout.
+    const cwd = (typeof data.cwd === 'string' && data.cwd) ||
+      (Array.isArray(data.workspace_roots) &&
+       data.workspace_roots.find(r => typeof r === 'string' && r)) || '';
+
+    if (!prompt || !cwd) {
       writeOutput('');
       return;
     }
@@ -52,9 +58,14 @@ process.stdin.on('end', () => {
     // MemoryFrame, and if retrieval is warranted, calls cap find
     // and returns the prompt text to inject. Returns empty if no
     // retrieval needed.
-    const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || process.cwd();
+    // pluginRoot only feeds PYTHONPATH; the child runs in the session folder.
+    const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
     const env = { ...process.env };
-    env.ARTERIES_CLI = env.ARTERIES_CLI || 'codex';
+    env.ARTERIES_CLI = env.ARTERIES_CLI || (data.cursor_version ? 'cursor' : 'claude');
+    env.ARTERIES_EVENT_CWD = cwd;
+    const sessionId = data.session_id || data.conversation_id;
+    if (sessionId) env.ARTERIES_SESSION_ID = String(sessionId);
+    else delete env.ARTERIES_SESSION_ID;
     env.ARTERIES_EVENT = env.ARTERIES_EVENT || 'UserPromptSubmit';
     const srcPath = path.join(pluginRoot, 'src');
     const capSrc = process.env.CAPILLARIES_ROOT
@@ -71,7 +82,7 @@ process.stdin.on('end', () => {
       // call, the database write and corpus retrieval all had to finish inside
       // half the budget or the write was killed mid-flight. 9000 leaves a second
       // for node's own start-up and teardown under the outer limit.
-      { timeout: 9000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env }
+      { timeout: 9000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], env, cwd }
     ).trim();
 
     if (result) {

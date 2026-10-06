@@ -38,3 +38,11 @@ where = ["src"]
 
 [project.scripts]
 art = "arteries.cli:main"
+
+[tool.pytest.ini_options]
+# Import this checkout's source, not an installed copy. The sandbox image has
+# heart pip-installed at /opt/heart, so without this a verifier ran heart's
+# suite against the image's stale heart and failed collection -- every
+# sandboxed heart feature was judged on code it didn't contain. Same reasoning
+# as capillaries' pin, for the same worktree case.
+pythonpath = ["src"]

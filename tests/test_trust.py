@@ -34,7 +34,7 @@ def test_setup_registers_the_web_tool_hook_and_only_for_web_tools(tmp_path):
     from arteries import setup_cli
 
     ctx = setup_cli.Context.__new__(setup_cli.Context)
-    with patch.object(setup_cli, "_hooks_dir", lambda _ctx: "/x/.arteries/hooks"):
+    with patch.object(setup_cli, "_hooks_dir", lambda _ctx: "/x/.vascular/arteries/hooks"):
         hooks = setup_cli._claude_hooks(ctx)
     (group,) = hooks["PostToolUse"]
     assert group["matcher"] == "WebFetch|WebSearch", "every other tool call would pay for nothing"

@@ -84,7 +84,7 @@ class CompactPromptTests(unittest.TestCase):
 
     def test_doctor_notices_a_stale_prompt(self):
         with TemporaryDirectory() as tmp:
-            path = Path(tmp) / ".arteries" / "codex"
+            path = Path(tmp) / ".vascular" / "arteries" / "codex"
             path.mkdir(parents=True)
             (path / "compact_prompt.txt").write_text("packet-schema: v1\nold layout")
             with patch.object(Path, "cwd", staticmethod(lambda: Path(tmp))):
@@ -92,7 +92,7 @@ class CompactPromptTests(unittest.TestCase):
 
     def test_a_current_prompt_is_not_flagged(self):
         with TemporaryDirectory() as tmp:
-            path = Path(tmp) / ".arteries" / "codex"
+            path = Path(tmp) / ".vascular" / "arteries" / "codex"
             path.mkdir(parents=True)
             (path / "compact_prompt.txt").write_text(_codex_compact_prompt())
             with patch.object(Path, "cwd", staticmethod(lambda: Path(tmp))):

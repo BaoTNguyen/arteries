@@ -49,13 +49,13 @@ class TestUsage(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self._old = os.environ.get("XDG_STATE_HOME")
-        os.environ["XDG_STATE_HOME"] = str(self.root / "state")
+        self._old = os.environ.get("VASCULAR_HOME")
+        os.environ["VASCULAR_HOME"] = str(self.root / "vascular")
         self.t = self.root / "transcript.jsonl"
 
     def tearDown(self):
-        os.environ.pop("XDG_STATE_HOME", None) if self._old is None \
-            else os.environ.__setitem__("XDG_STATE_HOME", self._old)
+        os.environ.pop("VASCULAR_HOME", None) if self._old is None \
+            else os.environ.__setitem__("VASCULAR_HOME", self._old)
         self.tmp.cleanup()
 
     def test_dedupes_content_blocks_of_one_call(self):

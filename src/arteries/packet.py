@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from arteries import actionlog, degrade, evidence, extract, frame as frame_mod, memory_select, rank, runlog, storage, triage
+from arteries import actionlog, degrade, evidence, extract, frame as frame_mod, memory_select, rank, runlog, storage, triage, trust
 from arteries.cli_caps import get_capabilities
 from arteries.config import AGENT_PROCESS_ID, PROJECT_ID
 from arteries.conversation import recent_assistant_turns
@@ -243,6 +243,12 @@ def _frame_dict(message: str) -> dict[str, Any]:
         return {}
 
 
+def _sandboxed_agent() -> bool:
+    """Unattended or sandboxed agent turn: its prompt must not carry other
+    sessions' conversation, so no recent pairs are drawn for it."""
+    return trust.agent_run() or trust.web_lane() or bool(os.getenv("ARTERIES_AGENT_ROLE", "").strip())
+
+
 def build_packet(message: str = "", event: dict[str, Any] | None = None,
                  budget: int = 20000,
                  provenance: list[dict[str, Any]] | None = None,
@@ -263,7 +269,8 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None,
     suggestion = _corpus_suggestion(message, _query_embedding(message), provenance)
     if gate_out is not None:
         gate_out.update({k: v for k, v in suggestion.items() if k != "text"})
-    recent_pairs = _load_recent_pairs(event)
+    sandboxed = _sandboxed_agent()
+    recent_pairs = [] if sandboxed else _load_recent_pairs(event)
     allocations = _allocations(budget)
     sections = [
         ("Current Context", _limit_lines(_current_context(message, event), allocations["context"])),
@@ -281,6 +288,8 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None,
             "Do not invent assistant answers when a CLI only captured user turns.",
         ], allocations["rules"])),
     ]
+    if sandboxed and not any(lines for title, lines in sections if title != "Use Rules"):
+        return ""
     text = "\n\n".join(_section(title, lines) for title, lines in sections if lines)
     return _limit(text, budget)
 
@@ -289,7 +298,7 @@ def _is_compaction_trigger() -> bool:
     """Retrieval and compaction share one entry point and want different
     layouts (planning/compaction_v3.md §2). `cli_normalize.apply_event_env`
     already computes the canonical event name and exports it before every hook
-    invocation that can reach `art packet` -- `.arteries/hooks/*.sh` all run it
+    invocation that can reach `art packet` -- `.vascular/arteries/hooks/*.sh` all run it
     first -- so this reads a signal that already exists rather than adding one.
     A caller that never went through cli_normalize (heart's retrieval call,
     every existing test) has no `ARTERIES_EVENT` and gets the old behaviour."""
@@ -446,7 +455,7 @@ _NEGATION_MARKERS = ("no,", "no ", "actually", "that's wrong", "i meant", "not "
 def _subjects(fact: str) -> set[str]:
     """Crude "looks like a path or filename" -- any word containing a slash or
     a dot, stripped of trailing punctuation. Enough to tell the worked example
-    apart (RERANKER_DEVICE unset vs .arteries/env: cuda:1 -- different files,
+    apart (RERANKER_DEVICE unset vs .vascular/arteries/env: cuda:1 -- different files,
     both true) without a real entity extractor."""
     tokens = (t.strip(".,;:()") for t in re.findall(r"\S+", fact.lower()))
     return {t for t in tokens if "/" in t or "." in t}
@@ -540,7 +549,7 @@ def render_state(message: str, event: dict[str, Any], budget: int = 20000) -> st
     events = storage.tool_results_since(PROJECT_ID, session_id, covers_from, covers_to)
     ephemerals = storage.get_ephemeral(PROJECT_ID, AGENT_PROCESS_ID, limit=50,
                                        session_id=session_id)
-    recent_pairs = _load_recent_pairs(event)
+    recent_pairs = [] if _sandboxed_agent() else _load_recent_pairs(event)
     canary = _canary()
 
     done = _state_done(events)
