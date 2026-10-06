@@ -56,7 +56,7 @@ class ActionlogTests(unittest.TestCase):
         self.assertEqual(rec["episode_id"], "ep-selftest-1")
         self.assertEqual(rec["metadata"]["task_id"], "task-selftest")
 
-        jsonl = list((self.root / "repo" / ".arteries" / "decisions").glob("*.jsonl"))
+        jsonl = list((self.root / "repo" / ".vascular" / "arteries" / "decisions").glob("*.jsonl"))
         self.assertEqual(len(jsonl), 1)
 
         rows = actionlog.recent_decisions(episode="ep-selftest-1")
@@ -100,7 +100,7 @@ class ActionlogTests(unittest.TestCase):
 
         records = [
             json.loads(line)
-            for p in (self.root / "repo" / ".arteries" / "decisions").glob("*.jsonl")
+            for p in (self.root / "repo" / ".vascular" / "arteries" / "decisions").glob("*.jsonl")
             for line in p.read_text().splitlines()
         ]
         rewards = [r for r in records if r["kind"] == "reward"]

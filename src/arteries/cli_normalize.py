@@ -98,8 +98,10 @@ def normalize(
     # through to "session_start" exactly as before.
     if event == "session_start" and str(payload.get("source") or "").strip().lower() == "compact":
         event = "compact"
-    cwd = _first_text(payload, "cwd", "working_directory", "project_dir", "projectDirectory")
-    session_id = _first_text(payload, "session_id", "sessionId", "session", "session_file", "sessionFile")
+    cwd = _first_text(payload, "cwd", "working_directory", "project_dir", "projectDirectory") or _first_root(payload)
+    session_id = _first_text(
+        payload, "session_id", "sessionId", "session", "session_file", "sessionFile", "conversation_id", "conversationId"
+    )
     parent = _first_text(payload, "parent_agent_id", "parentAgentId", "parent_session_id", "parentSessionId")
 
     role = _role(payload, event)
@@ -240,6 +242,13 @@ def _first_text(payload: dict[str, Any], *keys: str) -> str | None:
         value = nested_get(payload, key)
         if value is not None and value != "":
             return str(value)
+    return None
+
+
+def _first_root(payload: dict[str, Any]) -> str | None:
+    roots = payload.get("workspace_roots")
+    if isinstance(roots, list):
+        return next((r for r in roots if isinstance(r, str) and r), None)
     return None
 
 

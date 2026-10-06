@@ -2,7 +2,7 @@
 name: arteries-setup
 description: >
   Install arteries memory hooks into the current project for Claude Code, Codex,
-  or Pi. Wires repo-local .arteries runtime scripts plus provider-specific hook
+  or Pi. Wires repo-local .vascular/arteries runtime scripts plus provider-specific hook
   config so arteries can observe turns, build memory, retrieve prompts through
   capillaries, and produce compaction packets. Use when the user says "arteries
   setup", "install arteries", "wire up arteries", "add arteries to this
@@ -37,7 +37,7 @@ bash <arteries-root>/scripts/art.sh setup <provider> --check
 5. Run the smoke test:
 
 ```bash
-bash .arteries/smoke.sh "arteries setup test"
+bash .vascular/arteries/smoke.sh "arteries setup test"
 ```
 
 6. Report what was installed and whether the smoke test passed.

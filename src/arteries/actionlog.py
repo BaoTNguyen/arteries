@@ -3,7 +3,7 @@
 Events (runlog) record what happened. Decisions record the counterfactual —
 the available actions, the choice, and its cost — which is what RL credit
 assignment needs. Postgres when available, repo-local JSONL fallback
-(.arteries/decisions/), always teed to the heart event spine.
+(.vascular/arteries/decisions/), always teed to the heart event spine.
 
 Episode/task identity arrives via env (set by heart per episode):
     ARTERIES_EPISODE_ID
@@ -24,7 +24,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import runlog, storage
+from arteries import runlog, storage, vascular_paths
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
 from arteries.journal import journal_append
 
@@ -519,9 +519,9 @@ def _upsert_episode(cur, record: dict) -> None:
 
 
 def _write_jsonl(run: dict, kind: str, record: dict, repo_path: str | Path | None) -> None:
-    root = Path(
-        repo_path or run.get("repo_path") or os.getenv("ARTERIES_REPO") or Path.cwd()
-    ) / ".arteries" / "decisions"
+    root = vascular_paths.repo_dir(
+        repo_path or run.get("repo_path") or os.getenv("ARTERIES_REPO") or Path.cwd(), "arteries"
+    ) / "decisions"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
     with path.open("a", encoding="utf-8") as f:
@@ -531,9 +531,9 @@ def _write_jsonl(run: dict, kind: str, record: dict, repo_path: str | Path | Non
 def _recent_jsonl(
     project_id: str | None, episode: str | None, limit: int, repo_path: str | Path | None
 ) -> list[dict[str, Any]]:
-    root = Path(
-        repo_path or os.getenv("ARTERIES_REPO") or Path.cwd()
-    ) / ".arteries" / "decisions"
+    root = vascular_paths.repo_dir(
+        repo_path or os.getenv("ARTERIES_REPO") or Path.cwd(), "arteries"
+    ) / "decisions"
     records: list[dict[str, Any]] = []
     if not root.exists():
         return records

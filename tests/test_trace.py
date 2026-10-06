@@ -11,8 +11,8 @@ class TraceTests(unittest.TestCase):
     def test_trace_infers_project_agent_and_repo(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            config_dir = repo / ".arteries"
-            config_dir.mkdir()
+            config_dir = repo / ".vascular" / "arteries"
+            config_dir.mkdir(parents=True)
             (config_dir / "config.json").write_text(
                 json.dumps({
                     "project": "career-ops",

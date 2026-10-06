@@ -24,15 +24,13 @@ from pathlib import Path
 import psycopg2
 import psycopg2.extras
 
+from arteries import vascular_paths
 from arteries.config import DB_CONFIG, PROJECT_ID as _PROJECT
 
 
 def journal_dir() -> Path:
-    # The directory is deliberately unchanged by the rename: the files on disk
-    # are one continuous record, and moving them would strand every event
-    # written before today behind a path nothing reads.
-    return Path(os.environ.get("EVENT_JOURNAL_DIR",
-                               str(Path.home() / ".local" / "share" / "heart" / "events")))
+    # The shared definition lives in vascular_paths.
+    return vascular_paths.journal_dir()
 
 
 def inbox(run_id: str, root: str | Path | None = None) -> Path:

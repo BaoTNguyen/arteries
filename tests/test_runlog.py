@@ -20,6 +20,14 @@ from dbprobe import DB_REACHABLE
 
 
 class RunlogTests(unittest.TestCase):
+    def setUp(self):
+        # the fallback anchors on ARTERIES_REPO before cwd; heart sets it for
+        # every agent, so these tests wrote at the host repo path instead of tmp
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("ARTERIES_REPO", None)
+
     def test_log_event_falls_back_to_repo_jsonl(self):
         old_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmp:
@@ -33,7 +41,7 @@ class RunlogTests(unittest.TestCase):
                         project_id="test-project",
                     )
 
-                path = Path(".arteries") / "runs" / f"{event['run_id']}.jsonl"
+                path = Path(".vascular") / "arteries" / "runs" / f"{event['run_id']}.jsonl"
                 self.assertTrue(path.exists())
                 row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
                 self.assertEqual(row["event_type"], "turn.observed")
@@ -57,7 +65,7 @@ class RunlogTests(unittest.TestCase):
                     )
                     summary = runlog.summarize("test-project", repo_path=tmp)
 
-                current = json.loads(Path(".arteries/current-run.json").read_text(encoding="utf-8"))
+                current = json.loads(Path(".vascular/arteries/current-run.json").read_text(encoding="utf-8"))
                 self.assertEqual(current["run_id"], run["run_id"])
                 self.assertEqual(current["cli"], "codex")
                 self.assertEqual(summary["latest_run_id"], run["run_id"])
@@ -93,9 +101,13 @@ class RunlogDiscardTests(unittest.TestCase):
 
     def test_without_discard_the_write_is_attempted(self):
         env = {k: v for k, v in os.environ.items() if k != "ARTERIES_RUNLOG"}
+        # the file writers are stubbed too: unstubbed, they create .vascular/arteries/runs
+        # in the checkout, which the sandbox verifier mounts read-only
         with patch.dict(os.environ, env, clear=True), \
                 patch.object(runlog, "_write_db_run"), \
                 patch.object(runlog, "_write_db_event") as db_event, \
+                patch.object(runlog, "_write_jsonl"), \
+                patch.object(runlog, "_write_current_run"), \
                 patch.object(runlog, "journal_append"):
             runlog.log_event("turn.observed", "test", {})
 

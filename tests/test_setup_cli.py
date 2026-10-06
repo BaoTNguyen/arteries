@@ -21,15 +21,15 @@ class SetupCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.assertEqual(setup_cli.main(["pi", "--cwd", str(root), "--project", "demo", "--no-db"]), 0)
-            self.assertTrue((root / ".arteries/hooks/observe.sh").exists())
-            self.assertTrue((root / ".arteries/hooks/compact-packet.sh").exists())
-            self.assertTrue((root / ".arteries/hooks/hook-observe.sh").exists())
-            self.assertTrue((root / ".arteries/hooks/hook-event.sh").exists())
-            self.assertTrue((root / ".arteries/hooks/assistant-observe.sh").exists())
-            self.assertTrue((root / ".arteries/hooks/hook-assistant-observe.sh").exists())
-            self.assertTrue((root / ".arteries/hooks/hook-compact-packet.sh").exists())
-            self.assertTrue((root / ".arteries/hooks/pi-compact-json.sh").exists())
-            hook_compact = (root / ".arteries/hooks/hook-compact-packet.sh").read_text(encoding="utf-8")
+            self.assertTrue((root / ".vascular/arteries/hooks/observe.sh").exists())
+            self.assertTrue((root / ".vascular/arteries/hooks/compact-packet.sh").exists())
+            self.assertTrue((root / ".vascular/arteries/hooks/hook-observe.sh").exists())
+            self.assertTrue((root / ".vascular/arteries/hooks/hook-event.sh").exists())
+            self.assertTrue((root / ".vascular/arteries/hooks/assistant-observe.sh").exists())
+            self.assertTrue((root / ".vascular/arteries/hooks/hook-assistant-observe.sh").exists())
+            self.assertTrue((root / ".vascular/arteries/hooks/hook-compact-packet.sh").exists())
+            self.assertTrue((root / ".vascular/arteries/hooks/pi-compact-json.sh").exists())
+            hook_compact = (root / ".vascular/arteries/hooks/hook-compact-packet.sh").read_text(encoding="utf-8")
             # A fixed fallback, not the descriptive $message positional --
             # "claude-compact"/"codex-precompact" don't canonicalize to
             # "compact" (_canonical_event has no entry for them), which
@@ -38,7 +38,7 @@ class SetupCliTests(unittest.TestCase):
             self.assertIn("--event compact", hook_compact)
             self.assertNotIn('--event "$message"', hook_compact)
             self.assertTrue((root / ".pi/extensions/arteries.ts").exists())
-            config = json.loads((root / ".arteries/config.json").read_text())
+            config = json.loads((root / ".vascular/arteries/config.json").read_text())
             self.assertEqual(config["project"], "demo")
             self.assertEqual(config["agent_id"], "demo-hook")
             self.assertEqual(config["cli"], "pi")
@@ -46,12 +46,12 @@ class SetupCliTests(unittest.TestCase):
             self.assertIn("session_before_compact", extension)
             self.assertIn("pi-compact-json.sh", extension)
             self.assertIn("hook-assistant-observe.sh", extension)
-            hook_assistant = (root / ".arteries/hooks/hook-assistant-observe.sh").read_text(encoding="utf-8")
+            hook_assistant = (root / ".vascular/arteries/hooks/hook-assistant-observe.sh").read_text(encoding="utf-8")
             self.assertIn("python3 -m arteries.assistant --stdin-json", hook_assistant)
             self.assertNotIn("python3 -m arteries.cli_normalize", hook_assistant)
             self.assertEqual(setup_cli.main(["pi", "--cwd", str(root), "--check", "--no-db"]), 0)
             self.assertEqual(setup_cli.main(["pi", "--cwd", str(root), "--remove", "--no-db"]), 0)
-            self.assertFalse((root / ".arteries").exists())
+            self.assertFalse((root / ".vascular/arteries").exists())
             self.assertFalse((root / ".pi/extensions/arteries.ts").exists())
 
     def test_claude_install_check_remove_preserves_other_settings(self):
@@ -79,16 +79,31 @@ class SetupCliTests(unittest.TestCase):
             self.assertIn("SubagentStart", data["hooks"])
             self.assertIn("SubagentStop", data["hooks"])
             self.assertIn("hook-observe.sh", data["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"])
-            hook_observe = (root / ".arteries/hooks/hook-observe.sh").read_text(encoding="utf-8")
+            hook_observe = (root / ".vascular/arteries/hooks/hook-observe.sh").read_text(encoding="utf-8")
             self.assertIn("python3 -m arteries.hook_observe", hook_observe)
             self.assertNotIn("python3 -m arteries.cli_normalize", hook_observe)
-            config = json.loads((root / ".arteries/config.json").read_text())
+            config = json.loads((root / ".vascular/arteries/config.json").read_text())
             self.assertEqual(config["cli"], "claude")
             self.assertEqual(setup_cli.main(["claude", "--cwd", str(root), "--check", "--no-db"]), 0)
             self.assertEqual(setup_cli.main(["claude", "--cwd", str(root), "--remove", "--no-db"]), 0)
             data = json.loads(settings.read_text())
             self.assertNotIn("hooks", data)
             self.assertEqual(data["permissions"]["allow"], ["Bash(*)"])
+
+    def test_claude_reinstall_replaces_old_dot_arteries_hook_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = root / ".claude/settings.local.json"
+            settings.parent.mkdir()
+            old = f"bash {root}/.arteries/hooks/hook-observe.sh"
+            settings.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": old}]}]}}), encoding="utf-8")
+            self.assertEqual(setup_cli.installed_providers(root), ["claude"])
+
+            self.assertEqual(setup_cli.main(["claude", "--cwd", str(root), "--no-db"]), 0)
+            text = settings.read_text(encoding="utf-8")
+            self.assertNotIn("/.arteries/hooks/", text)
+            self.assertIn(f"{root}/.vascular/arteries/hooks/", text)
 
     def test_codex_install_is_marker_managed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,7 +121,7 @@ class SetupCliTests(unittest.TestCase):
             parsed_config = tomllib.loads(config_toml)
             self.assertEqual(
                 parsed_config["experimental_compact_prompt_file"],
-                "../.arteries/codex/compact_prompt.txt",
+                "../.vascular/arteries/codex/compact_prompt.txt",
             )
             self.assertTrue(parsed_config["features"]["hooks"])
             self.assertTrue(all(isinstance(value, bool) for value in parsed_config["features"].values()))
@@ -116,12 +131,12 @@ class SetupCliTests(unittest.TestCase):
             self.assertIn("hook-assistant-observe.sh", agents)
             compact_path = root / ".codex" / parsed_config["experimental_compact_prompt_file"]
             self.assertTrue(compact_path.resolve().exists())
-            config = json.loads((root / ".arteries/config.json").read_text())
+            config = json.loads((root / ".vascular/arteries/config.json").read_text())
             self.assertEqual(config["cli"], "codex")
             self.assertEqual(setup_cli.main(["codex", "--cwd", str(root), "--check", "--no-db"]), 0)
             self.assertEqual(setup_cli.main(["codex", "--cwd", str(root), "--remove", "--no-db"]), 0)
             self.assertNotIn(setup_cli.MARKER_START, (root / "AGENTS.md").read_text())
-            self.assertFalse((root / ".arteries").exists())
+            self.assertFalse((root / ".vascular/arteries").exists())
 
 
     def test_codex_install_merges_existing_features_and_removes_legacy_block(self):
@@ -155,7 +170,7 @@ codex_hooks = true
             self.assertNotIn("codex_hooks", parsed_config["features"])
             self.assertEqual(
                 parsed_config["experimental_compact_prompt_file"],
-                "../.arteries/codex/compact_prompt.txt",
+                "../.vascular/arteries/codex/compact_prompt.txt",
             )
 
     def test_opencode_install_check_remove(self):
@@ -170,7 +185,7 @@ codex_hooks = true
             self.assertEqual(setup_cli.main(["check", "opencode", "--cwd", str(root), "--no-db"]), 0)
             self.assertEqual(setup_cli.main(["remove", "opencode", "--cwd", str(root), "--no-db"]), 0)
             self.assertFalse(plugin.exists())
-            self.assertFalse((root / ".arteries").exists())
+            self.assertFalse((root / ".vascular/arteries").exists())
 
     def test_cursor_install_check_remove(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,7 +202,7 @@ codex_hooks = true
             self.assertEqual(setup_cli.main(["cursor", "--cwd", str(root), "--check", "--no-db"]), 0)
             self.assertEqual(setup_cli.main(["cursor", "--cwd", str(root), "--remove", "--no-db"]), 0)
             self.assertFalse(rule.exists())
-            self.assertFalse((root / ".arteries").exists())
+            self.assertFalse((root / ".vascular/arteries").exists())
 
     def test_hermes_install_check_remove(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,23 +218,23 @@ codex_hooks = true
             self.assertEqual(setup_cli.main(["hermes", "--cwd", str(root), "--check", "--no-db"]), 0)
             self.assertEqual(setup_cli.main(["hermes", "--cwd", str(root), "--remove", "--no-db"]), 0)
             self.assertNotIn(setup_cli.HERMES_MARKER_START, doc.read_text(encoding="utf-8"))
-            self.assertFalse((root / ".arteries").exists())
+            self.assertFalse((root / ".vascular/arteries").exists())
 
     def test_multiple_adapters_are_additive_and_remove_independently(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.assertEqual(setup_cli.main(["add", "codex", "--cwd", str(root), "--project", "demo", "--no-db"]), 0)
             self.assertEqual(setup_cli.main(["add", "cursor", "--cwd", str(root), "--project", "demo", "--no-db"]), 0)
-            config = json.loads((root / ".arteries/config.json").read_text(encoding="utf-8"))
+            config = json.loads((root / ".vascular/arteries/config.json").read_text(encoding="utf-8"))
             self.assertEqual(config["installed_clis"], ["codex", "cursor"])
 
             self.assertEqual(setup_cli.main(["remove", "cursor", "--cwd", str(root), "--no-db"]), 0)
-            self.assertTrue((root / ".arteries").exists())
+            self.assertTrue((root / ".vascular/arteries").exists())
             self.assertTrue((root / ".codex/config.toml").exists())
             self.assertFalse((root / ".cursor/rules/arteries.mdc").exists())
 
             self.assertEqual(setup_cli.main(["remove", "codex", "--cwd", str(root), "--no-db"]), 0)
-            self.assertFalse((root / ".arteries").exists())
+            self.assertFalse((root / ".vascular/arteries").exists())
 
     def test_setup_defaults_to_art_wrapper_caller_cwd(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -227,7 +242,7 @@ codex_hooks = true
             with mock.patch.dict(os.environ, {"ARTERIES_CALLER_CWD": str(root)}):
                 self.assertEqual(setup_cli.main(["pi", "--no-db"]), 0)
 
-            config = json.loads((root / ".arteries/config.json").read_text())
+            config = json.loads((root / ".vascular/arteries/config.json").read_text())
             self.assertEqual(config["project"], root.name)
             self.assertEqual(config["cli"], "pi")
 
@@ -243,10 +258,10 @@ codex_hooks = true
                 "--no-db",
             ]), 0)
 
-            config = json.loads((root / ".arteries/config.json").read_text())
+            config = json.loads((root / ".vascular/arteries/config.json").read_text())
             self.assertEqual(config["cli"], "pi")
             self.assertEqual(config["capillaries_root"], str(cap.resolve()))
-            observe = (root / ".arteries/hooks/observe.sh").read_text(encoding="utf-8")
+            observe = (root / ".vascular/arteries/hooks/observe.sh").read_text(encoding="utf-8")
             self.assertIn("CAPILLARIES_ROOT", observe)
             self.assertIn("$CAPILLARIES_ROOT/src", observe)
 
@@ -296,11 +311,11 @@ class GeneratedAdapterTests(unittest.TestCase):
                     text = (root / relative).read_text(encoding="utf-8")
                     self.assertNotIn("{hooks}", text,
                                      f"{provider} ships a literal placeholder")
-                    absolute = str(root / ".arteries" / "hooks")
+                    absolute = str(root / ".vascular/arteries" / "hooks")
                     self.assertIn(absolute, text)
                     # blank the absolute references; anything still naming the
                     # hooks dir is doing it relative to an unknown cwd
-                    self.assertNotIn(".arteries/hooks", text.replace(absolute, ""),
+                    self.assertNotIn(".vascular/arteries/hooks", text.replace(absolute, ""),
                                      f"{provider} references hooks by relative path")
 
     def test_tracked_docs_name_the_hooks_dir_relative_to_the_repo(self):
@@ -316,7 +331,7 @@ class GeneratedAdapterTests(unittest.TestCase):
                             [provider, "--cwd", str(root), "--project", "demo", "--no-db"]), 0)
                     text = (root / relative).read_text(encoding="utf-8")
                     self.assertNotIn("{hooks}", text)
-                    self.assertIn(".arteries/hooks/", text)
+                    self.assertIn(".vascular/arteries/hooks/", text)
                     self.assertNotIn(str(root), text,
                                      f"{provider} wrote an absolute path into a tracked file")
 
