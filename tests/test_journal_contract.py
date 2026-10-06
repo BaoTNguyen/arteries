@@ -20,7 +20,7 @@ from arteries.journal import journal_dir
 
 JOURNAL_ENV = "EVENT_JOURNAL_DIR"
 # Relative to VASCULAR_HOME, which defaults to ~/.vascular.
-JOURNAL_DEFAULT = Path("state") / "heart" / "events"
+JOURNAL_DEFAULT = Path("spool") / "events"
 
 
 def test_the_default_path_matches_the_contract():

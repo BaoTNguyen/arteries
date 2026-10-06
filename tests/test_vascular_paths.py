@@ -12,13 +12,13 @@ from unittest.mock import patch
 
 
 class KindTests(unittest.TestCase):
-    def test_kind_set_has_five_entries(self):
+    def test_kind_set_has_eight_entries(self):
         from arteries.vascular_paths import KINDS
-        self.assertEqual(len(KINDS), 5)
+        self.assertEqual(len(KINDS), 8)
 
     def test_all_expected_kinds_present(self):
         from arteries.vascular_paths import KINDS
-        expected = ("config", "state", "cache", "data", "backups")
+        expected = ("config", "secrets", "state", "spool", "log", "cache", "data", "backups")
         self.assertEqual(KINDS, expected)
 
     def test_kinds_is_a_tuple_not_a_list(self):
@@ -75,6 +75,12 @@ class PathTests(unittest.TestCase):
         p = path("data", "mydata", "sub")
         self.assertFalse(p.exists())
 
+    def test_path_accepts_secrets_spool_and_log(self):
+        from arteries.vascular_paths import path
+        self.assertEqual(str(path("secrets", "x")), "/vhome/secrets/x")
+        self.assertEqual(str(path("spool", "x")), "/vhome/spool/x")
+        self.assertEqual(str(path("log", "x")), "/vhome/log/x")
+
 
 class JournalDirTests(unittest.TestCase):
     def setUp(self):
@@ -86,10 +92,10 @@ class JournalDirTests(unittest.TestCase):
         self.mock_home.return_value = Path("/vhome")
         self.addCleanup(self._p_home.stop)
 
-    def test_journal_dir_defaults_to_heart_state_events(self):
+    def test_journal_dir_defaults_to_spool_events(self):
         from arteries.vascular_paths import journal_dir
         j = journal_dir()
-        self.assertEqual(str(j), "/vhome/state/heart/events")
+        self.assertEqual(str(j), "/vhome/spool/events")
 
     def test_journal_dir_uses_EVENT_JOURNAL_DIR_when_set(self):
         from arteries.vascular_paths import journal_dir
@@ -147,7 +153,7 @@ class ArteriesStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, self._env(VASCULAR_HOME=tmp), clear=True):
                 self.assertEqual(arteries.journal.journal_dir(),
-                                 Path(tmp) / "state" / "heart" / "events")
+                                 Path(tmp) / "spool" / "events")
                 self.assertEqual(arteries.usage._state_path().parent,
                                  Path(tmp) / "state" / "arteries")
 
@@ -162,7 +168,7 @@ class ArteriesStateTests(unittest.TestCase):
         import arteries.vascular_paths
         data = Path(arteries.vascular_paths.__file__).read_bytes()
         self.assertEqual(hashlib.sha256(data).hexdigest(),
-                         "e2da9c91a10831ed001c198a74deec77272b634542766a094e52a872b37836c4")
+                         "15d668c51d5e881fa7a9bf5a9908ba3d7bba796ebb76499cd2216ebf4f05f758")
 
 
 if __name__ == "__main__":
