@@ -35,7 +35,8 @@ class InboxTests(unittest.TestCase):
                                        event_id="e1", run_id="run-a", note="hi")
             written = list(box.glob("*.ndjson"))
             self.assertEqual(len(written), 1)
-            event = json.loads(written[0].read_text().splitlines()[0])
+            lines = [json.loads(ln) for ln in written[0].read_text().splitlines()]
+            event = next(e for e in lines if e["kind"] == "turn.observed")
         self.assertEqual(event["id"], "e1")
         self.assertEqual(event["run_id"], "run-a")
         self.assertEqual(event["payload"]["note"], "hi")
