@@ -52,7 +52,7 @@ export default function arteries(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event) => {
     const prompt = (event?.prompt ?? "").trim();
     if (!prompt) return;
-    const context = run(["/home/user/Coding/Projects/arteries/.arteries/hooks/hook-observe.sh", prompt], event).trim();
+    const context = run(["/home/user/Coding/Projects/arteries/.vascular/arteries/hooks/hook-observe.sh", prompt], event).trim();
     if (!context) return;
     return {
       message: {
@@ -69,14 +69,14 @@ export default function arteries(pi: ExtensionAPI) {
     const message = event?.message;
     if (message?.role !== "assistant" || !messageText(message)) return;
     run(
-      ["/home/user/Coding/Projects/arteries/.arteries/hooks/hook-assistant-observe.sh", "pi-assistant"],
+      ["/home/user/Coding/Projects/arteries/.vascular/arteries/hooks/hook-assistant-observe.sh", "pi-assistant"],
       event,
       usageEnv(message.usage, message.responseModel ?? message.model),
     );
   });
 
   pi.on("session_before_compact", async (event) => {
-    const result = run(["/home/user/Coding/Projects/arteries/.arteries/hooks/pi-compact-json.sh"], event);
+    const result = run(["/home/user/Coding/Projects/arteries/.vascular/arteries/hooks/pi-compact-json.sh"], event);
     if (!result) return;
     const packet = JSON.parse(result);
     return {
