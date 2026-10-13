@@ -258,6 +258,8 @@ CREATE TABLE IF NOT EXISTS arteries.decisions (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Nothing writes here since 2026-10-13 (reward assignment removed until marrow
+-- is reworked against pulse). Kept, with its rows, for that rework.
 CREATE TABLE IF NOT EXISTS arteries.rewards (
     id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     episode_id     TEXT,
@@ -268,7 +270,7 @@ CREATE TABLE IF NOT EXISTS arteries.rewards (
     value          REAL NOT NULL,
     components     JSONB NOT NULL DEFAULT '{}',
     source         TEXT NOT NULL,
-    -- What the episode actually cost. actionlog.log_reward has written these
+    -- What the episode actually cost. actionlog.log_reward wrote these
     -- since 972bda2, which added them to the live database by hand and left
     -- schema.sql for later -- so every fresh install had an INSERT naming
     -- columns that did not exist.
