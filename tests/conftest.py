@@ -41,6 +41,17 @@ def _isolate_arteries_env():
     os.environ.update(saved)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_vascular_home(monkeypatch, tmp_path_factory):
+    """Keep ~/.vascular out of the suite.
+
+    journal_append records announced pulse contexts under
+    $VASCULAR_HOME/state/pulse/contexts, and plenty of tests set only
+    EVENT_JOURNAL_DIR. Tests that clear os.environ themselves still override.
+    """
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path_factory.mktemp("vhome")))
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
