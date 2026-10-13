@@ -24,7 +24,7 @@ from pathlib import Path
 import psycopg2
 import psycopg2.extras
 
-from arteries import vascular_paths
+from arteries import pulse_emit, trust, vascular_paths
 from arteries.config import DB_CONFIG, PROJECT_ID as _PROJECT
 
 
@@ -52,25 +52,24 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
     if os.getenv("ARTERIES_JOURNAL", "").lower() == "off":
         return
     try:
-        now = datetime.now(timezone.utc)
-        event: dict = {"ts": now.isoformat(), "source": source, "kind": kind}
-        for key, value in (
-            # id and run_id ride at the top level so the drain can insert this
-            # row idempotently without unpacking the payload
-            ("id", event_id),
-            ("run_id", run_id),
-            ("episode_id", os.getenv("ARTERIES_EPISODE_ID")),
-            ("task_id", os.getenv("ARTERIES_TASK_ID")),
-            ("turn_id", turn_id),
-        ):
-            if value:
-                event[key] = value
-        if payload:
-            event["payload"] = payload
-        journal = journal_dir()
-        journal.mkdir(parents=True, exist_ok=True)
-        with open(journal / now.strftime("%Y%m%d.ndjson"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, default=str) + "\n")
+        if kind == "turn.observed":
+            origin = "agent" if trust.agent_run() else "operator"
+        else:
+            origin = "agent" if kind == "assistant.response" else None
+        # id and run_id ride at the top level so the drain can insert this row
+        # idempotently without unpacking the payload; a given event_id wins over
+        # pulse_emit's fresh uuid. Empty values stay absent, as they always were.
+        pulse_emit.emit(
+            source, kind, vascular_paths.journal_dir(),
+            vascular_paths.path("state", "pulse", "contexts"),
+            id=event_id or None,
+            run_id=run_id or None,
+            episode_id=os.getenv("ARTERIES_EPISODE_ID") or None,
+            task_id=os.getenv("ARTERIES_TASK_ID") or None,
+            turn_id=turn_id or None,
+            payload=payload or None,
+            origin=origin,
+        )
     except Exception:
         pass
 
