@@ -24,7 +24,7 @@ from pathlib import Path
 import psycopg2
 import psycopg2.extras
 
-from arteries import pulse_emit, vascular_paths
+from arteries import pulse_emit, trust, vascular_paths
 from arteries.config import DB_CONFIG, PROJECT_ID as _PROJECT
 
 
@@ -53,7 +53,7 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
         return
     try:
         if kind == "turn.observed":
-            origin = "agent" if os.getenv("ARTERIES_TRUST") == "untrusted" else "operator"
+            origin = "agent" if trust.agent_run() else "operator"
         else:
             origin = "agent" if kind == "assistant.response" else None
         # id and run_id ride at the top level so the drain can insert this row
