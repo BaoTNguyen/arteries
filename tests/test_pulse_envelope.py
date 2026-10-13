@@ -87,6 +87,7 @@ def test_journal_off_writes_nothing(journal, monkeypatch, tmp_path):
 @pytest.mark.parametrize("kind, trust, origin", [
     ("turn.observed", None, "operator"),
     ("turn.observed", "untrusted", "agent"),
+    ("turn.observed", " Untrusted ", "agent"),  # read the way trust.py reads it
     ("assistant.response", None, "agent"),
     ("decision.retrieval.gate", None, None),
 ])
