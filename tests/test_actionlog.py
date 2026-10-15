@@ -83,13 +83,13 @@ class ActionlogTests(unittest.TestCase):
         self.assertIn("agent_id", observed[0]["payload"])
         self.assertNotIn("episode_id", observed[0]["payload"])
 
-    def test_ingest_heart_episodes(self):
+    def test_ingest_episodes(self):
         runs = self.root / "runs"
         (runs / "ep-heart-1").mkdir(parents=True)
         (runs / "ep-heart-1" / "episode.json").write_text(json.dumps({
             "episode_id": "ep-heart-1", "task_id": "toy-1", "outcome": "pass"}))
         with mock.patch.object(actionlog, "_corpus_feedback") as feedback:
-            n = actionlog.ingest_heart_episodes(runs)
+            n = actionlog.ingest_episodes(runs)
         self.assertEqual(n, 1)
         self.assertEqual(feedback.call_args.args[0]["outcome"], "pass")
 

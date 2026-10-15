@@ -231,18 +231,6 @@ def _query_embedding(message: str) -> list[float] | None:
         return None
 
 
-def _frame_dict(message: str) -> dict[str, Any]:
-    """The MemoryFrame as plain JSON, or {} if memory is unreachable.
-
-    Best-effort by the same rule as the packet itself: a retrieval that cannot
-    be enriched is worth doing unenriched, not worth failing a turn over.
-    """
-    try:
-        return dataclasses.asdict(frame_mod.get_current_frame(message))
-    except Exception:
-        return {}
-
-
 def _sandboxed_agent() -> bool:
     """Unattended or sandboxed agent turn: its prompt must not carry other
     sessions' conversation, so no recent pairs are drawn for it."""
@@ -671,14 +659,11 @@ MAX_PACKET_MEMORIES = 15
 # without something noticing.
 #
 # v3: bumped for the renderer split (planning/compaction_v3.md §2). The
-# retrieval layout (SECTION_TITLES) is unchanged; the compaction layout
+# retrieval layout is unchanged; the compaction layout
 # (STATE_SECTION_TITLES) is new, and it is the one the Codex prompt -- which
 # only ever fires on compaction -- should describe.
 PACKET_SCHEMA_VERSION = 3
 
-SECTION_TITLES = ("Current Context", "Recent Conversation", "Ephemeral Memory",
-                  "Persistent Memory", "Scope Memory", "Suggested Approach",
-                  "Use Rules")
 STATE_SECTION_TITLES = ("Current Context", "Objective", "Constraints", "Decisions",
                         "Done", "In Progress", "Blocked", "Retracted", "Unresolved",
                         "Open Question", "Files", "Next", "Dropped", "Use Rules")

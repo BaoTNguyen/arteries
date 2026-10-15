@@ -33,7 +33,7 @@ import httpx
 import psycopg2
 import psycopg2.extras
 
-from arteries import compile as compiler, evergreen, graph, runlog, scope
+from arteries import compile as compiler, graph, runlog, scope
 from arteries.config import DB_CONFIG, FRONTIER_VISION_MODEL, VISION_MODEL, VISION_URL
 from arteries.embed import embed_texts_sync
 

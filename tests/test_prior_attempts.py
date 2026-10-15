@@ -4,7 +4,6 @@ The decisions/rewards ledger has had episode_id and task_id all along; memory
 did not, so nothing could say which run produced a fact. That is the one
 question separating useful context from an answer sheet.
 """
-import os
 
 import pytest
 

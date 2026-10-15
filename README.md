@@ -612,8 +612,9 @@ claim nothing enforced.
 
 Promotion is one detached LLM pass per turn. It compares each candidate against
 **every** live persistent row in scope through the vector index: at or above
-0.93 cosine a fact is refused mechanically, and the 0.75–0.93 band is what the
-model sees so it can judge refinement against contradiction.
+0.97 cosine a fact is refused mechanically (`ARTERIES_DUPLICATE_SIM`); below
+that, the model sees the nearest neighbours and judges duplicate, refinement or
+contradiction itself.
 
 
 ### Controlling what gets promoted

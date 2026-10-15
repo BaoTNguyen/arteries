@@ -147,7 +147,7 @@ _REACHED_INDIRECTLY = {
     "main",            # CLI dispatch and __main__ blocks
     "setup", "check",  # setup_cli recipe tables
     "observe",         # public API for other repos in the stack
-    "ingest_episodes", "ingest_heart_episodes",
+    "ingest_episodes",
     "run", "choose",   # called through modules that import them qualified
 }
 
