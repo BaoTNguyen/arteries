@@ -143,7 +143,7 @@ def _corpus_feedback_post(body: dict) -> None:
         pass
 
 
-def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | None = None) -> int:
+def ingest_episodes(source: str | Path | None = None) -> int:
     """Take in finished heart episodes. Returns how many were new.
 
     Per episode: write its memory row, tell capillaries how its suggestions
@@ -416,7 +416,3 @@ def _recent_jsonl(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-# heart still calls this name; marrow will use ingest_episodes directly.
-ingest_heart_episodes = ingest_episodes

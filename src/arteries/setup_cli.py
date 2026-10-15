@@ -897,10 +897,10 @@ def _codex_compact_prompt() -> str:
 
     Finding 24: this named the v1 layout, and a prompt describing sections that
     no longer exist tells the model to preserve headings it will never see. The
-    sections come from `packet.SECTION_TITLES` now, and the stamped version is
+    sections come from `packet.STATE_SECTION_TITLES` now, and the stamped version is
     what `art doctor` compares against to notice drift.
     """
-    # STATE_SECTION_TITLES, not SECTION_TITLES: this prompt only ever fires on
+    # The compaction layout, not the retrieval one: this prompt only ever fires on
     # compaction, and the renderer split (planning/compaction_v3.md §2) gave
     # that path its own layout.
     sections = ", ".join(STATE_SECTION_TITLES[:-1]) + f", and {STATE_SECTION_TITLES[-1]}"
