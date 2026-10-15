@@ -215,7 +215,7 @@ existing database when the model changes.
 | `art observe` | one note from heart, plexus, or marrow | short text, stdin or argument |
 | `art ingest` | documents and plans | file, directory, or `-` for stdin |
 | `art docs` | mining a repo's Markdown for facts you approve | review file |
-| `art episodes` | finished heart episodes (`rewards` still works as an alias) | runs dir, JSONL file, or stdin |
+| `art episodes` | finished heart episodes | runs dir, JSONL file, or stdin |
 | `art remember` | a fact you are stating directly | argument |
 
 `art ingest` chunks, compiles, and graphs in one step, so a plan keeps its

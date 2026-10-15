@@ -25,7 +25,7 @@ from arteries.subagent import subagent_env
 
 
 COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe",
-            "activate", "ingest", "episodes", "rewards", "benchmark", "eval", "inspect", "runs", "journal",
+            "activate", "ingest", "episodes", "benchmark", "eval", "inspect", "runs", "journal",
             "doctor", "packet", "trace", "decisions", "remember", "spawn", "search",
             "compile", "migrate", "evergreen", "evict", "trust")
 
@@ -111,7 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return trace.main(ns.args)
     if ns.command == "decisions":
         return _decisions(ns.args)
-    if ns.command in ("episodes", "rewards"):  # `rewards`: the pre-2026-10-13 name
+    if ns.command == "episodes":
         return _episodes(ns.args)
     if ns.command == "remember":
         return remember.main(ns.args)

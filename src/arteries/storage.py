@@ -781,7 +781,7 @@ def touch_persistent(ids: list[str]) -> None:
     Best effort: reinforcement must never break a read.
 
     ponytail: counts surfacings, not usefulness. Outcome-weighted value needs
-    the reward ledger, which is still empty.
+    episode outcomes joined to surfacings, which nothing records yet.
     """
     if not ids:
         return
