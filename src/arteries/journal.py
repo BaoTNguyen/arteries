@@ -15,6 +15,7 @@ Optional and silent: ARTERIES_JOURNAL=off disables; failures never propagate.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import uuid
@@ -56,6 +57,13 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
             origin = "agent" if trust.agent_run() else "operator"
         else:
             origin = "agent" if kind == "assistant.response" else None
+        # A parent (heart, plexus) exports PULSE_TRACE_ID and pulse_emit picks it
+        # up. Without one, a Claude session is its own trace: derive a stable id
+        # from the session so every event it writes shares it.
+        trace_id = None
+        session = os.getenv("ARTERIES_SESSION_ID")
+        if not os.getenv("PULSE_TRACE_ID") and session:
+            trace_id = hashlib.sha256(("claude:" + session).encode()).hexdigest()[:32]
         # id and run_id ride at the top level so the drain can insert this row
         # idempotently without unpacking the payload; a given event_id wins over
         # pulse_emit's fresh uuid. Empty values stay absent, as they always were.
@@ -69,6 +77,7 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
             turn_id=turn_id or None,
             payload=payload or None,
             origin=origin,
+            trace_id=trace_id,
         )
     except Exception:
         pass
