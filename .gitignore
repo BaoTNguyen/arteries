@@ -225,3 +225,9 @@ __marimo__/
 # credentials included. Local only, as in heart and plexus.
 .marrow/
 .vascular/
+
+# Local-only: session transcripts, schema dumps, and the Pi extension
+# that `art setup` writes with this machine's absolute hook paths.
+.compaction-corpus/
+.migrate-backups/
+.pi/extensions/arteries.ts
