@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,10 @@ import psycopg2.extras
 
 from arteries import pulse_emit, trust, vascular_paths
 from arteries.config import DB_CONFIG, PROJECT_ID as _PROJECT
+
+
+# The same test hooks/arteries-tool.js applies: a web tool's result is external.
+_WEB_TOOL = re.compile(r"^(webfetch|websearch|web_fetch|web_search)$", re.I)
 
 
 def journal_dir() -> Path:
@@ -55,6 +60,8 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
     try:
         if kind == "turn.observed":
             origin = "agent" if trust.agent_run() else "operator"
+        elif kind == "tool.result":
+            origin = "external" if _WEB_TOOL.match(str(payload.get("tool") or "")) else None
         else:
             origin = "agent" if kind == "assistant.response" else None
         # A parent (heart, plexus) exports PULSE_TRACE_ID and pulse_emit picks it
