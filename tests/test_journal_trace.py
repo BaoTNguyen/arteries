@@ -1,10 +1,12 @@
 """journal_append's trace_id: a parent's PULSE_TRACE_ID wins, else one derived
 from ARTERIES_SESSION_ID, else none."""
 import hashlib
+import io
 import json
 
 import pytest
 
+from arteries import observe_tool, runlog
 from arteries.journal import journal_append
 
 
@@ -62,10 +64,6 @@ def test_other_tool_result_has_no_origin(lines):
 
 @pytest.mark.writes_events
 def test_observe_tool_web_search_end_to_end(lines, tmp_path, monkeypatch):
-    import io
-
-    from arteries import observe_tool, runlog
-
     monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
     monkeypatch.setenv("ARTERIES_REPO", str(tmp_path))
     monkeypatch.setenv("ARTERIES_RUNLOG", "db")

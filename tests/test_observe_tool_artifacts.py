@@ -6,14 +6,14 @@ import json
 
 import pytest
 
+from arteries import observe_tool, pulse_emit, runlog
+
 EVENT = {"tool": "Edit", "target": "a.py", "tool_input": {"file_path": "a.py"},
          "tool_response": {"ok": True, "text": "SECRET-OUTPUT"}}
 
 
 @pytest.fixture
 def run(tmp_path, monkeypatch):
-    from arteries import observe_tool, runlog
-
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EVENT_JOURNAL_DIR", str(tmp_path))
     monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
@@ -48,8 +48,6 @@ def test_artifacts_hold_content_and_journal_holds_digests(run, tmp_path):
 
 @pytest.mark.writes_events
 def test_artifact_failure_still_journals(run, monkeypatch):
-    from arteries import pulse_emit
-
     def boom(*a, **k):
         raise OSError("disk full")
     monkeypatch.setattr(pulse_emit, "artifact", boom)
