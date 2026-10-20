@@ -20,7 +20,7 @@ Arteries is the memory and tracing layer in a five-repo agent stack:
 ```text
 capillaries  prompt/skill retrieval
 arteries     memory + trace substrate               <- this repo
-heart        orchestration + environment + reward
+heart        orchestration + environment + verify
 plexus       goal decomposition + acceptance loop
 marrow       RL training on heart's episodes
 ```
@@ -215,7 +215,7 @@ existing database when the model changes.
 | `art observe` | one note from heart, plexus, or marrow | short text, stdin or argument |
 | `art ingest` | documents and plans | file, directory, or `-` for stdin |
 | `art docs` | mining a repo's Markdown for facts you approve | review file |
-| `art rewards` | episode rewards from marrow | JSONL on stdin |
+| `art episodes` | finished heart episodes | runs dir, JSONL file, or stdin |
 | `art remember` | a fact you are stating directly | argument |
 
 `art ingest` chunks, compiles, and graphs in one step, so a plan keeps its
@@ -612,8 +612,9 @@ claim nothing enforced.
 
 Promotion is one detached LLM pass per turn. It compares each candidate against
 **every** live persistent row in scope through the vector index: at or above
-0.93 cosine a fact is refused mechanically, and the 0.75–0.93 band is what the
-model sees so it can judge refinement against contradiction.
+0.97 cosine a fact is refused mechanically (`ARTERIES_DUPLICATE_SIM`); below
+that, the model sees the nearest neighbours and judges duplicate, refinement or
+contradiction itself.
 
 
 ### Controlling what gets promoted

@@ -1,4 +1,4 @@
-"""Ledger self-check: decisions/rewards with forced JSONL fallback, journal tee,
+"""Ledger self-check: decisions with forced JSONL fallback, journal tee,
 and runlog episode stamping. No Postgres required."""
 from __future__ import annotations
 
@@ -68,11 +68,6 @@ class ActionlogTests(unittest.TestCase):
         self.assertEqual(gate[0]["payload"]["chosen"], "abstain")
         self.assertEqual(gate[0]["payload"]["store"], "jsonl")  # DB forced down
 
-    def test_reward_fallback_and_journal(self):
-        actionlog.log_reward("task_success", 0.85, components={"public_tests": 1.0}, source="heart")
-        kinds = [e["kind"] for e in self._journal_events()]
-        self.assertIn("reward.task_success", kinds)
-
     @pytest.mark.writes_events
 
     def test_runlog_stamps_episode_and_tees(self):
@@ -88,28 +83,15 @@ class ActionlogTests(unittest.TestCase):
         self.assertIn("agent_id", observed[0]["payload"])
         self.assertNotIn("episode_id", observed[0]["payload"])
 
-    def test_ingest_heart_episodes(self):
+    def test_ingest_episodes(self):
         runs = self.root / "runs"
         (runs / "ep-heart-1").mkdir(parents=True)
         (runs / "ep-heart-1" / "episode.json").write_text(json.dumps({
-            "episode_id": "ep-heart-1", "task_id": "toy-1", "outcome": "pass",
-            "reward": {"total": 0.9, "components": {"public_tests": 1.0}},
-        }))
-        n = actionlog.ingest_heart_episodes(runs)
+            "episode_id": "ep-heart-1", "task_id": "toy-1", "outcome": "pass"}))
+        with mock.patch.object(actionlog, "_corpus_feedback") as feedback:
+            n = actionlog.ingest_episodes(runs)
         self.assertEqual(n, 1)
-
-        records = [
-            json.loads(line)
-            for p in (self.root / "repo" / ".vascular" / "arteries" / "decisions").glob("*.jsonl")
-            for line in p.read_text().splitlines()
-        ]
-        rewards = [r for r in records if r["kind"] == "reward"]
-        self.assertEqual(rewards[0]["episode_id"], "ep-heart-1")
-        self.assertEqual(rewards[0]["value"], 0.9)
-        self.assertEqual(rewards[0]["components"]["outcome"], "pass")
-        # env identity restored after the ingest loop
-        self.assertEqual(os.environ["ARTERIES_EPISODE_ID"], "ep-selftest-1")
-        self.assertIn("reward.episode", [e["kind"] for e in self._journal_events()])
+        self.assertEqual(feedback.call_args.args[0]["outcome"], "pass")
 
     def test_journal_off(self):
         os.environ["ARTERIES_JOURNAL"] = "off"
@@ -122,63 +104,24 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestIngestUnscoredEpisodes(unittest.TestCase):
-    """A null reward means nothing measured the episode. Scoring it 0.0 would
-    invent a failure; raising on it used to abort the whole ingest, which left
-    every later episode in the directory permanently unread."""
-
+class TestIngestEpisodes(unittest.TestCase):
     def _episodes(self, tmp: Path, records: list[dict]) -> str:
         path = tmp / "episodes.jsonl"
         path.write_text("\n".join(json.dumps(r) for r in records))
         return str(path)
 
-    def test_a_null_reward_is_skipped_not_scored_zero(self):
-        logged = []
-        with tempfile.TemporaryDirectory() as d:
-            src = self._episodes(Path(d), [
-                {"episode_id": "worker-a", "outcome": "unverified",
-                 "reward": {"total": None, "components": {}}},
-                {"episode_id": "merged-b", "outcome": "pass",
-                 "reward": {"total": 0.99, "components": {"public_tests": 1.0}}},
-            ])
-            with mock.patch.object(actionlog, "log_reward",
-                                   side_effect=lambda *a, **k: logged.append((a, k))), \
-                 mock.patch.object(actionlog, "_corpus_feedback"), \
-                 mock.patch.object(actionlog, "journal_append"):
-                count = actionlog.ingest_episodes(src)
-        self.assertEqual(count, 1)                      # only the scored one
-        self.assertEqual(len(logged), 1)
-        self.assertEqual(logged[0][0][1], 0.99)         # and it kept its value
-
-    def test_one_unscored_episode_does_not_strand_the_rest(self):
-        # the null used to raise inside the loop, so everything sorted after it
-        # was never read -- permanently, because the retry hit the same record.
-        logged = []
-        with tempfile.TemporaryDirectory() as d:
-            src = self._episodes(Path(d), [
-                {"episode_id": "first", "outcome": "unverified", "reward": {"total": None}},
-                {"episode_id": "second", "outcome": "pass", "reward": {"total": 0.5}},
-                {"episode_id": "third", "outcome": "fail", "reward": {"total": 0.0}},
-            ])
-            with mock.patch.object(actionlog, "log_reward",
-                                   side_effect=lambda *a, **k: logged.append(a[1])), \
-                 mock.patch.object(actionlog, "_corpus_feedback"), \
-                 mock.patch.object(actionlog, "journal_append"):
-                count = actionlog.ingest_episodes(src)
-        self.assertEqual(count, 2)
-        self.assertEqual(logged, [0.5, 0.0])            # a real 0.0 still lands
-
-    def test_capillaries_still_hears_the_outcome_of_an_unscored_episode(self):
+    def test_capillaries_hears_every_outcome(self):
         seen = []
         with tempfile.TemporaryDirectory() as d:
             src = self._episodes(Path(d), [
-                {"episode_id": "worker-a", "outcome": "unverified", "reward": {"total": None}},
+                {"episode_id": "worker-a", "outcome": "unverified"},
+                {"episode_id": "merged-b", "outcome": "pass"},
             ])
-            with mock.patch.object(actionlog, "log_reward"), \
-                 mock.patch.object(actionlog, "_corpus_feedback", side_effect=seen.append), \
-                 mock.patch.object(actionlog, "journal_append"):
-                actionlog.ingest_episodes(src)
-        self.assertEqual([e["episode_id"] for e in seen], ["worker-a"])
+            with mock.patch.object(actionlog, "_corpus_feedback", side_effect=seen.append), \
+                 mock.patch.object(actionlog, "close_episodes"):
+                count = actionlog.ingest_episodes(src)
+        self.assertEqual(count, 2)
+        self.assertEqual([e["episode_id"] for e in seen], ["worker-a", "merged-b"])
 
 
 class TestIngestClosesEpisodes(unittest.TestCase):
@@ -196,42 +139,19 @@ class TestIngestClosesEpisodes(unittest.TestCase):
         closed = []
         with tempfile.TemporaryDirectory() as d:
             src = self._episodes(Path(d), records)
-            with mock.patch.object(actionlog, "log_reward"), \
-                 mock.patch.object(actionlog, "_corpus_feedback"), \
-                 mock.patch.object(actionlog, "journal_append") as journal, \
+            with mock.patch.object(actionlog, "_corpus_feedback"), \
                  mock.patch.object(actionlog, "close_episodes",
                                    side_effect=lambda c: closed.extend(c)):
                 actionlog.ingest_episodes(src)
-        return closed, journal
+        return closed
 
-    def test_a_scored_episode_is_closed_with_its_outcome(self):
-        closed, _ = self._ingest([
-            {"episode_id": "ep-1", "outcome": "pass", "reward": {"total": 0.9}}])
-        self.assertEqual(closed, [("ep-1", "pass", 0.9)])
+    def test_an_episode_is_closed_with_its_outcome(self):
+        closed = self._ingest([{"episode_id": "ep-1", "outcome": "pass", "task_id": "t1"}])
+        self.assertEqual(closed, [("ep-1", "pass", "t1")])
 
-    def test_an_unscored_episode_still_ended(self):
-        """Skipped for scoring is not the same as still running. This was the
-        half that kept 287 rows open."""
-        closed, _ = self._ingest([
-            {"episode_id": "ep-2", "outcome": "blocked", "reward": {"total": None}}])
+    def test_a_blocked_episode_still_ended(self):
+        closed = self._ingest([{"episode_id": "ep-2", "outcome": "blocked"}])
         self.assertEqual(closed, [("ep-2", "blocked", None)])
-
-    def test_the_unscored_backlog_is_journalled_once_per_run_not_once_per_episode(self):
-        """O(runs x backlog) for a fact that cannot change: an unscored episode
-        can never become scored, so a backlog of 29 re-journalled itself on
-        every invocation -- 344 of the day's ~700 events."""
-        _, journal = self._ingest([
-            {"episode_id": f"ep-{i}", "outcome": "unverified", "reward": {"total": None}}
-            for i in range(29)])
-        self.assertEqual(journal.call_count, 1)
-        kwargs = journal.call_args.kwargs
-        self.assertEqual(kwargs["episodes"], 29)
-        self.assertEqual(kwargs["outcomes"], {"unverified": 29})
-
-    def test_nothing_unscored_says_nothing(self):
-        _, journal = self._ingest([
-            {"episode_id": "ep-1", "outcome": "pass", "reward": {"total": 1.0}}])
-        self.assertEqual(journal.call_count, 0)
 
 
 class TestEpisodeFacts(unittest.TestCase):
@@ -249,13 +169,11 @@ class TestEpisodeFacts(unittest.TestCase):
         "diff_lines": 38,
         "verifier_results": {"pytest": {"passed": False}, "ruff": {"passed": True}},
         "scope_refused_paths": ["src/app.py"],
-        "reward": {"total": 0.2143, "components": {"public_tests": 0.0}},
     }
 
     def test_the_fact_is_mechanical(self):
         line = actionlog.episode_fact(self.EP)
         self.assertIn("fail", line)
-        self.assertIn("reward 0.2143", line)
         self.assertIn("agent claude:haiku", line)
         self.assertIn("38 diff lines", line)
         self.assertIn("pytest failed", line)
@@ -263,11 +181,6 @@ class TestEpisodeFacts(unittest.TestCase):
         self.assertIn("refused 1 path(s)", line)
         self.assertIn("on arteries", line)      # the repo's name, not its path
         self.assertNotIn("/home/me", line)
-
-    def test_an_unscored_episode_says_so_rather_than_reading_zero(self):
-        line = actionlog.episode_fact({**self.EP, "reward": {"total": None}})
-        self.assertIn("unscored", line)
-        self.assertNotIn("reward 0", line)
 
     def test_a_row_names_its_episode(self):
         """persistent.episode_id and task_id are columns the table always had
@@ -294,22 +207,20 @@ class TestEpisodeFacts(unittest.TestCase):
         insert.assert_not_called()
 
 
-def test_an_already_scored_episode_still_gets_its_record(monkeypatch, tmp_path):
-    """The reward skip used to come first, so only episodes new to a pass were
-    ever recorded and the whole history stayed invisible to memory."""
+def test_a_closed_episode_still_gets_its_record_but_is_not_reposted(monkeypatch, tmp_path):
+    """The memory row is written once whatever happened before, but an episode
+    already closed is not re-posted to capillaries, which keeps a row per POST."""
     src = tmp_path / "eps.jsonl"
-    src.write_text(json.dumps({"episode_id": "old-1", "outcome": "pass",
-                               "reward": {"total": 1.0}}))
+    src.write_text(json.dumps({"episode_id": "old-1", "outcome": "pass"}))
     seen = []
-    with mock.patch.object(actionlog, "log_reward"), \
-         mock.patch.object(actionlog, "_corpus_feedback"), \
-         mock.patch.object(actionlog, "journal_append"), \
+    with mock.patch.object(actionlog, "_corpus_feedback") as feedback, \
          mock.patch.object(actionlog, "close_episodes"), \
          mock.patch.object(actionlog, "record_episode", side_effect=seen.append), \
          mock.patch.object(actionlog, "psycopg2") as pg:
         cur = pg.connect.return_value.__enter__.return_value.cursor.return_value \
                 .__enter__.return_value
-        cur.fetchall.side_effect = [[("old-1",)], []]   # scored already, never recorded
+        cur.fetchall.side_effect = [[("old-1",)], []]   # closed already, never recorded
         count = actionlog.ingest_episodes(str(src))
-    assert count == 0, "the reward is not ingested twice"
+    assert count == 0
+    feedback.assert_not_called()
     assert [e["episode_id"] for e in seen] == ["old-1"], "but the record is written"

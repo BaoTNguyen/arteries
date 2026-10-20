@@ -11,7 +11,6 @@ import unittest
 from dbprobe import DB_REACHABLE
 
 import psycopg2
-import pytest
 
 from arteries import activity, evict
 from arteries.config import DB_CONFIG

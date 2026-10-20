@@ -393,7 +393,6 @@ def _release_claimed(conn, ids: list) -> None:
 # number ever has. The threshold below survives only as a backstop for near-
 # identical strings, set high enough that firing it is unambiguous.
 DUPLICATE_SIM = float(os.getenv("ARTERIES_DUPLICATE_SIM", "0.97"))
-RELATED_SIM = 0.75     # the band the model is shown, not a rejection rule
 
 
 def _load_persistent_context(conn, batch: list[dict] | None = None,

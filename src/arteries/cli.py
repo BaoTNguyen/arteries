@@ -25,7 +25,7 @@ from arteries.subagent import subagent_env
 
 
 COMMANDS = ("setup", "docs", "ontology", "scope", "graph", "identity", "observe",
-            "activate", "ingest", "rewards", "benchmark", "eval", "inspect", "runs", "journal",
+            "activate", "ingest", "episodes", "benchmark", "eval", "inspect", "runs", "journal",
             "doctor", "packet", "trace", "decisions", "remember", "spawn", "search",
             "compile", "migrate", "evergreen", "evict", "trust")
 
@@ -111,8 +111,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return trace.main(ns.args)
     if ns.command == "decisions":
         return _decisions(ns.args)
-    if ns.command == "rewards":
-        return _rewards(ns.args)
+    if ns.command == "episodes":
+        return _episodes(ns.args)
     if ns.command == "remember":
         return remember.main(ns.args)
     if ns.command == "identity":
@@ -342,18 +342,18 @@ def _decisions(args: Sequence[str]) -> int:
     return 0
 
 
-def _rewards(args: Sequence[str]) -> int:
+def _episodes(args: Sequence[str]) -> int:
     p = argparse.ArgumentParser(
-        prog="art rewards",
-        description="Ingest episode rewards. Reads JSONL from stdin by default.",
-        epilog="marrow emits these; `marrow export | art rewards` is the intended shape.",
+        prog="art episodes",
+        description="Ingest finished heart episodes: memory rows, closed status, "
+                    "capillaries feedback. Reads JSONL from stdin by default.",
     )
     p.add_argument("path", nargs="?",
                    help="JSONL file or runs directory; omit to read stdin")
     ns = p.parse_args(args)
 
     n = actionlog.ingest_episodes(ns.path)
-    print(f"ingested {n} episode rewards")
+    print(f"ingested {n} episode(s)")
     return 0
 
 if __name__ == "__main__":

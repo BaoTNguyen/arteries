@@ -36,7 +36,6 @@ DERIVED_FROM = "derived_from"     # prov:wasDerivedFrom
 SUPERSEDES = "supersedes"         # prov:wasRevisionOf
 MENTIONS = "mentions"
 RELATIONS = ("supports", "refines", "contradicts", "depends_on")
-DECISION_RELS = ("chose", "over", "because")
 
 ENTITY_KINDS = ("concept", "module", "dependency")
 

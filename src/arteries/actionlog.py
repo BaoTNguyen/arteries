@@ -77,43 +77,6 @@ def log_decision(
     return record
 
 
-def log_reward(
-    reward_type: str,
-    value: float,
-    *,
-    components: dict[str, Any] | None = None,
-    source: str = "arteries",
-    decision_id: str | None = None,
-    turn_id: str | None = None,
-    repo_path: str | Path | None = None,
-    tokens_in: int | None = None,
-    tokens_out: int | None = None,
-    cost_usd: float | None = None,
-) -> dict[str, Any]:
-    run = _run(repo_path)
-    record = {
-        "id": str(uuid.uuid4()),
-        "episode_id": episode_id(),
-        "decision_id": decision_id,
-        "run_id": run["run_id"],
-        "project_id": run["project_id"],
-        "reward_type": reward_type,
-        "value": float(value),
-        "components": components or {},
-        "source": source,
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        "cost_usd": cost_usd,
-        "created_at": _now_iso(),
-    }
-    store = _persist(record, "reward", run, repo_path)
-    journal_append(
-        "arteries", f"reward.{reward_type}", turn_id=turn_id,
-        value=value, reward_source=source, store=store,
-    )
-    return record
-
-
 def recent_decisions(
     project_id: str | None = None,
     limit: int = 25,
@@ -150,27 +113,17 @@ def _corpus_feedback(episode: dict) -> None:
     Here rather than in heart for the same reason the gate is: the direction is
     capillaries -> arteries -> heart, and heart reaching back around arteries to
     report on a component it should not know about inverts that. This function
-    already has the episode's outcome and reward in hand.
-
-    Arteries had the whole loop for its own memory -- situation out, reward back
-    through this ingest, joined on episode_id. Capillaries heard the question
-    and never the answer, so its relevance signal could not exist at all. It is
-    deliberately not the same signal as the episode reward (they are joined,
-    neither replaces the other), but it needs the outcome to be computed from.
+    already has the episode's outcome in hand.
 
     Best-effort: retrieval feedback must never be what fails a finished episode.
     """
     outcome = episode.get("outcome")
-    total = (episode.get("reward") or {}).get("total")
     for packet in episode.get("context_packets") or []:
         trace_id = (packet.get("corpus") or {}).get("trace_id")
         if not trace_id or not outcome:
             continue
-        body = {"trace_id": trace_id, "outcome": outcome,
-                "notes": f"heart role={packet.get('role')}"}
-        if total is not None:
-            body["quality_score"] = max(0.0, min(1.0, float(total)))
-        _corpus_feedback_post(body)
+        _corpus_feedback_post({"trace_id": trace_id, "outcome": outcome,
+                               "notes": f"heart role={packet.get('role')}"})
 
 
 def _corpus_feedback_post(body: dict) -> None:
@@ -190,23 +143,20 @@ def _corpus_feedback_post(body: dict) -> None:
         pass
 
 
-def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | None = None) -> int:
-    """Backfill the rewards table from episode records.
+def ingest_episodes(source: str | Path | None = None) -> int:
+    """Take in finished heart episodes. Returns how many were new.
 
-    This is the credit-assignment bridge: heart and marrow are stdlib-only and
-    never talk to Postgres, so decisions get their episode reward here.
+    Per episode: write its memory row, tell capillaries how its suggestions
+    turned out, and close its arteries.episodes row. Heart is stdlib-only and
+    never talks to Postgres, so this is where those facts arrive.
 
     `source` may be a JSONL path, a directory of `*/episode.json`, or None to
     read JSONL from stdin. **Prefer stdin.** Arteries defines the record shape
     and the sender pipes it in; reaching into another repo's directory layout
-    couples this to whichever of them happens to own the filesystem this week,
-    and RL traffic is moving to marrow.
+    couples this to whichever of them happens to own the filesystem this week.
 
-    An episode whose reward total is null is skipped, not scored zero. Heart
-    writes null on purpose for `blocked`, `unverified` and `scope_denied`, and a
-    zero would assert those episodes did badly rather than that nothing measured
-    them. Each skip is journalled as `reward.unscored` and counted on stderr, so
-    a run that scores nothing says so instead of looking like a quiet success.
+    Deduped on the closed row: an episode already closed is not re-posted to
+    capillaries, which inserts a feedback row per POST.
     """
     if source is None:
         episodes = [json.loads(line) for line in sys.stdin.read().splitlines() if line.strip()]
@@ -217,12 +167,12 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
         else:
             episodes = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
-    ingested: set = set()
+    closed: set = set()
     recorded: set = set()
     try:
         with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT episode_id FROM arteries.rewards WHERE reward_type = 'episode'")
-            ingested = {row[0] for row in cur.fetchall()}
+            cur.execute("SELECT id FROM arteries.episodes WHERE ended_at IS NOT NULL")
+            closed = {row[0] for row in cur.fetchall()}
             # one query rather than an exists-check per episode: a runs
             # directory is hundreds of episodes and this pass reads all of them
             cur.execute("""SELECT episode_id FROM arteries.persistent
@@ -230,92 +180,35 @@ def ingest_episodes(source: str | Path | None = None, repo_path: str | Path | No
                               AND valid_until IS NULL""")
             recorded = {row[0] for row in cur.fetchall()}
     except Exception:
-        pass  # ponytail: no dedup in jsonl-fallback mode; re-ingest after db is back
+        pass  # ponytail: no dedup with the db down; re-ingest after it is back
 
-    count = skipped = 0
-    unscored: dict[str, int] = {}
-    _closed: list[tuple[str, str | None, float | None]] = []
-    saved = {k: os.environ.get(k) for k in ("ARTERIES_EPISODE_ID", "ARTERIES_TASK_ID")}
-    try:
-        for ep in episodes:
-            if not ep.get("episode_id"):
-                continue
-            # Before the reward skip, not after. An episode whose reward is
-            # already ingested still needs its record written once -- otherwise
-            # only episodes new to this pass ever got one, and the entire
-            # history stayed invisible to memory.
-            if ep["episode_id"] not in recorded:
-                record_episode(ep)
-                recorded.add(ep["episode_id"])
-            if ep["episode_id"] in ingested:
-                continue
-            os.environ["ARTERIES_EPISODE_ID"] = ep["episode_id"]
-            os.environ["ARTERIES_TASK_ID"] = ep.get("task_id") or ""
-            usage = ep.get("usage") or {}
-            reward = ep.get("reward") or {}
-            total = reward.get("total")
-            if total is None:
-                # Unscored is not zero, and the difference is the whole reason
-                # heart writes null here: `blocked` means the agent declined to
-                # guess, `unverified` means nothing ran a check, `scope_denied`
-                # means the sandbox refused writes the spec allowed. Recording
-                # 0.0 for any of them teaches the model a failure that never
-                # happened -- and blaming it for a mount table drawn too tight
-                # is the worst of the three.
-                #
-                # It is also not something to swallow. `.get("total", 0.0)` used
-                # to default only on a MISSING key, so a present null reached
-                # float() and raised -- which aborted the loop, leaving every
-                # later episode in the directory permanently unread.
-                unscored[ep.get("outcome") or "unknown"] = 1 + unscored.get(
-                    ep.get("outcome") or "unknown", 0)
-                skipped += 1
-                _closed.append((ep["episode_id"], ep.get("outcome"), None))
-                _corpus_feedback(ep)  # capillaries still wants the outcome
-                continue
-            log_reward(
-                "episode",
-                total,
-                components={**(reward.get("components") or {}),
-                            "outcome": ep.get("outcome")},
-                source="heart",
-                repo_path=repo_path,
-                tokens_in=usage.get("tokens_in"),
-                tokens_out=usage.get("tokens_out"),
-                cost_usd=usage.get("cost_usd"),
-            )
-            _corpus_feedback(ep)
-            _closed.append((ep["episode_id"], ep.get("outcome"), total))
-            count += 1
-    finally:
-        for k, v in saved.items():
-            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
-    close_episodes(_closed)
-    if skipped:
-        # one line, because silence here is how you fail to notice that most of
-        # a week's episodes carried no score at all
-        print(f"skipped {skipped} unscored episode(s)", file=sys.stderr)
-        # One event for the run, not one per episode. It used to be per episode,
-        # and an unscored episode can never become scored -- so a backlog of 29
-        # re-journalled itself on every invocation and grew the day's journal to
-        # 344 `reward.unscored` events out of ~700. O(runs x backlog) for a fact
-        # that does not change. The tally keeps what the event was for.
-        journal_append("arteries", "reward.unscored", reward_source="heart",
-                       episodes=skipped, outcomes=unscored)
-    return count
+    closures: list[tuple[str, str | None, str | None]] = []
+    for ep in episodes:
+        eid = ep.get("episode_id")
+        if not eid:
+            continue
+        # before the closed skip: an already-closed episode still needs its
+        # memory row written once, or history stays invisible to memory
+        if eid not in recorded:
+            record_episode(ep)
+            recorded.add(eid)
+        if eid in closed:
+            continue
+        _corpus_feedback(ep)
+        closures.append((eid, ep.get("outcome"), ep.get("task_id")))
+    close_episodes(closures)
+    return len(closures)
 
 
 def episode_fact(ep: dict) -> str:
     """One line of what an episode did. Mechanical only.
 
-    Every clause is read off episode.json -- outcome, reward, which verifiers
-    ran and what they said, how big the diff was, which agent. No summary of
-    the agent's reasoning and no judgment about whether the work was good: the
-    reward already scores that, and a model's account of its own failed run is
-    the last thing that should harden into memory.
+    Every clause is read off episode.json -- outcome, which verifiers ran and
+    what they said, how big the diff was, which agent. No summary of the
+    agent's reasoning and no judgment about whether the work was good: a
+    model's account of its own failed run is the last thing that should harden
+    into memory.
     """
-    reward = ep.get("reward") or {}
-    total = reward.get("total")
     parts = [f"heart episode {ep.get('episode_id')}"]
     if task := ep.get("task_id"):
         parts.append(f"({task})")
@@ -324,7 +217,6 @@ def episode_fact(ep: dict) -> str:
     if base := ep.get("base_commit"):
         parts.append(f"@{base[:12]}")
     line = " ".join(parts) + f": {ep.get('outcome') or 'unknown'}"
-    line += f", reward {total:.4g}" if isinstance(total, (int, float)) else ", unscored"
     if agent := ep.get("agent"):
         line += f"; agent {agent}"
     if (lines := ep.get("diff_lines")) is not None:
@@ -372,8 +264,6 @@ def record_episode(ep: dict) -> str | None:
             # fails when it is down
             embedding=None,
             source_meta={"source": "heart", "outcome": ep.get("outcome"),
-                         "reward": (ep.get("reward") or {}).get("total"),
-                         "components": (ep.get("reward") or {}).get("components") or {},
                          "agent": ep.get("agent"), "repo_path": ep.get("repo_path"),
                          "base_commit": ep.get("base_commit"),
                          "diff_lines": ep.get("diff_lines"),
@@ -383,49 +273,43 @@ def record_episode(ep: dict) -> str | None:
             kind="episode",
         )
     except Exception:
-        # the reward rows and the closed status already landed; a memory row is
-        # never worth failing an ingest over
+        # a memory row is never worth failing an ingest over
         return None
 
 
-def close_episodes(closures: list[tuple[str, str | None, float | None]]) -> int:
-    """Mark episodes finished. Returns how many rows moved off `running`.
+def close_episodes(closures: list[tuple[str, str | None, str | None]]) -> int:
+    """Mark episodes finished, creating the row if nothing has yet. Returns how
+    many rows moved off `running`. `closures` is (episode_id, outcome, task_id).
 
-    arteries.episodes was write-only: `_upsert_episode` creates a row the first
-    time a decision or reward carries an episode id, and nothing ever updated
-    it. 299 of 299 rows read `running`, 287 of them older than an hour, and
-    `ended_at` was never set -- so any question of the form "what finished, and
-    how" was unanswerable from the database, while retention and activity logic
-    read a column with one value in it.
-
-    Here rather than in heart because heart never talks to Postgres. The
-    terminal fact already arrives on this side: `art rewards` reads
-    episode.json, which carries the outcome and the reward. Closing on ingest
-    means the row closes exactly when the fact that closes it is read, scored or
-    not -- an episode skipped as unscored is still an episode that ended.
+    Creating it here matters: rows used to be born only when a decision or a
+    reward carried the episode id, so an episode with neither had no row to
+    close and was re-ingested -- and re-posted to capillaries -- on every pass.
 
     `WHERE ended_at IS NULL` so a re-ingest cannot rewrite history, the same
     guard runlog.close_run has always used.
     """
-    rows = [(outcome or "finished", json.dumps({"reward_total": total}), eid)
-            for eid, outcome, total in closures if eid]
+    rows = [(eid, os.getenv("ARTERIES_PROJECT") or PROJECT_ID, task, outcome or "finished")
+            for eid, outcome, task in closures if eid]
     if not rows:
         return 0
+    moved = 0
     try:
         with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-            psycopg2.extras.execute_batch(cur, """
-                UPDATE arteries.episodes
-                   SET status = %s,
-                       ended_at = now(),
-                       metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb
-                 WHERE id = %s AND ended_at IS NULL
-            """, rows)
+            for row in rows:
+                cur.execute("""
+                    INSERT INTO arteries.episodes (id, project_id, task_id, status, ended_at)
+                    VALUES (%s, %s, %s, %s, now())
+                    ON CONFLICT (id) DO UPDATE
+                       SET status = EXCLUDED.status, ended_at = now()
+                     WHERE arteries.episodes.ended_at IS NULL
+                """, row)
+                moved += max(cur.rowcount, 0)
             conn.commit()
-            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     except Exception:
-        # the reward rows are already written; a closed status is a read-side
-        # convenience, never worth failing an ingest over
+        # a closed status is a read-side convenience, never worth failing an
+        # ingest over
         return 0
+    return moved
 
 
 def _run(repo_path: str | Path | None) -> dict[str, Any]:
@@ -443,10 +327,7 @@ def _run(repo_path: str | Path | None) -> dict[str, Any]:
 def _persist(record: dict, kind: str, run: dict, repo_path: str | Path | None) -> str:
     """Returns where the write landed: db | jsonl | lost (degradation signal)."""
     try:
-        if kind == "decision":
-            _db_insert_decision(record)
-        else:
-            _db_insert_reward(record)
+        _db_insert_decision(record)
         return "db"
     except Exception:
         try:
@@ -479,30 +360,9 @@ def _db_insert_decision(record: dict) -> None:
         conn.commit()
 
 
-def _db_insert_reward(record: dict) -> None:
-    with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-        _upsert_episode(cur, record)
-        cur.execute(
-            """
-            INSERT INTO arteries.rewards
-                (id, episode_id, decision_id, run_id, project_id, reward_type,
-                 value, components, source, tokens_in, tokens_out, cost_usd)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
-            """,
-            (
-                record["id"], record["episode_id"], record.get("decision_id"),
-                record["run_id"], record["project_id"], record["reward_type"],
-                record["value"], json.dumps(record["components"], default=str),
-                record["source"], record.get("tokens_in"), record.get("tokens_out"),
-                record.get("cost_usd"),
-            ),
-        )
-        conn.commit()
-
-
 def _upsert_episode(cur, record: dict) -> None:
     # the ledger self-populates episode rows: heart never talks to Postgres,
-    # so the first decision/reward carrying an episode id creates the episode
+    # so the first decision carrying an episode id creates the episode
     if not record.get("episode_id"):
         return
     cur.execute(
@@ -556,7 +416,3 @@ def _recent_jsonl(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-# heart still calls this name; marrow will use ingest_episodes directly.
-ingest_heart_episodes = ingest_episodes

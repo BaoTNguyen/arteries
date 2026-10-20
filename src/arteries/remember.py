@@ -19,7 +19,7 @@ from collections.abc import Sequence
 
 import psycopg2.extras
 
-from arteries import degrade, evergreen, scope as scope_mod, storage
+from arteries import degrade, scope as scope_mod, storage
 from arteries.config import DB_CONFIG
 from arteries.docs import _infer_domains
 from arteries.embed import embed_text_sync
