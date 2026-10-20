@@ -78,7 +78,8 @@ const target = web ? (host || 'search') :
 try {
   execFileSync('python3', ['-m', 'arteries.observe_tool'], {
     input: JSON.stringify({ tool, exit_code: exitCode, failed, target,
-                            session_id: sessionId }),
+                            session_id: sessionId, tool_input: input,
+                            tool_response: response }),
     timeout: 3000,
     stdio: ['pipe', 'ignore', 'ignore'],
     env,

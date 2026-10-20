@@ -15,8 +15,10 @@ Optional and silent: ARTERIES_JOURNAL=off disables; failures never propagate.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +28,10 @@ import psycopg2.extras
 
 from arteries import pulse_emit, trust, vascular_paths
 from arteries.config import DB_CONFIG, PROJECT_ID as _PROJECT
+
+
+# The same test hooks/arteries-tool.js applies: a web tool's result is external.
+_WEB_TOOL = re.compile(r"^(webfetch|websearch|web_fetch|web_search)$", re.I)
 
 
 def journal_dir() -> Path:
@@ -54,8 +60,17 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
     try:
         if kind == "turn.observed":
             origin = "agent" if trust.agent_run() else "operator"
+        elif kind == "tool.result":
+            origin = "external" if _WEB_TOOL.match(str(payload.get("tool") or "")) else None
         else:
             origin = "agent" if kind == "assistant.response" else None
+        # A parent (heart, plexus) exports PULSE_TRACE_ID and pulse_emit picks it
+        # up. Without one, a Claude session is its own trace: derive a stable id
+        # from the session so every event it writes shares it.
+        trace_id = None
+        session = os.getenv("ARTERIES_SESSION_ID")
+        if not os.getenv("PULSE_TRACE_ID") and session:
+            trace_id = hashlib.sha256(("claude:" + session).encode()).hexdigest()[:32]
         # id and run_id ride at the top level so the drain can insert this row
         # idempotently without unpacking the payload; a given event_id wins over
         # pulse_emit's fresh uuid. Empty values stay absent, as they always were.
@@ -69,6 +84,7 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
             turn_id=turn_id or None,
             payload=payload or None,
             origin=origin,
+            trace_id=trace_id,
         )
     except Exception:
         pass
