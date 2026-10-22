@@ -14,7 +14,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import degrade, normalize, runlog, scope as scope_mod, trust
+from arteries import degrade, normalize, pulse_emit, runlog, scope as scope_mod, trust, vascular_paths
 from arteries.config import DB_CONFIG
 from arteries.scope import SCOPE_CTE
 
@@ -834,6 +834,26 @@ def log_retrieval(
     situation: str,
     score: float,
 ) -> None:
+    # Emit before the INSERT, straight through pulse_emit: journal sits above
+    # this layer, so its ARTERIES_JOURNAL=off switch is repeated here. The event
+    # can never raise into, or be lost to, a failing INSERT.
+    if os.getenv("ARTERIES_JOURNAL", "").lower() != "off":
+        try:
+            pulse_emit.emit(
+                "arteries", "retrieval.logged", vascular_paths.journal_dir(),
+                vascular_paths.path("state", "pulse", "contexts"),
+                payload={
+                    "project_id": project_id,
+                    "agent_process_id": agent_process_id,
+                    "prompt_id": prompt_id,
+                    "score": float(score),
+                    "relevance": 1.0,
+                    "situation": situation,
+                    "situation_chars": len(situation),
+                },
+            )
+        except Exception:
+            pass
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
