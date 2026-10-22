@@ -6,13 +6,14 @@ import argparse
 import json
 import re
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
 
-from arteries import runlog, storage, vascular_paths
+from arteries import pulse_read, runlog, storage, vascular_paths
 from arteries.config import DB_CONFIG
 
 
@@ -165,6 +166,46 @@ def _prompt_refs(prompt_ids: list[str], preview_chars: int) -> dict[str, dict[st
 
 
 def _retrieval_situations(project: str, agent: str, preview_chars: int) -> dict[str, dict[str, Any]]:
+    # Pulse first (retrieval.logged, newest first, paged by seq); the table
+    # fills in prompt ids pulse never reached. Pulse wins on overlap.
+    # ponytail: scan capped at 2000 events; older prompts come from the table
+    found: dict[str, dict[str, Any]] = {}
+    try:
+        before = None
+        scanned = 0
+        while scanned < 2000:
+            page = pulse_read.events(
+                kind="retrieval.logged", source="arteries", order="desc", limit=500, before=before
+            )
+            if not page:
+                break
+            scanned += len(page)
+            for e in page:
+                p = e.get("payload") or {}
+                if p.get("project_id") != project or p.get("agent_process_id") != agent:
+                    continue
+                key = str(p.get("prompt_id"))
+                if key in found:
+                    continue
+                situation = p.get("situation") or ""
+                found[key] = {
+                    "prompt_id": p.get("prompt_id"),
+                    "situation_preview": situation[:preview_chars],
+                    "situation_chars": len(situation),
+                    "situation_truncated": len(situation) > preview_chars,
+                    "created_at": datetime.fromisoformat(e["ts"]),
+                }
+            before = min(e["seq"] for e in page)
+    except Exception:
+        pass
+    try:
+        table = _retrieval_situations_table(project, agent, preview_chars)
+    except Exception:
+        table = {}
+    return {**{k: v for k, v in table.items() if k not in found}, **found}
+
+
+def _retrieval_situations_table(project: str, agent: str, preview_chars: int) -> dict[str, dict[str, Any]]:
     try:
         with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(

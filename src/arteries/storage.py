@@ -9,12 +9,13 @@ them to MemoryFrame types.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
 
-from arteries import degrade, normalize, runlog, scope as scope_mod, trust
+from arteries import degrade, normalize, pulse_emit, pulse_read, runlog, scope as scope_mod, trust, vascular_paths
 from arteries.config import DB_CONFIG
 from arteries.scope import SCOPE_CTE
 
@@ -807,24 +808,64 @@ def touch_persistent(ids: list[str]) -> None:
         degrade.note(exc, "access_count reinforcement")
 
 
+def _recent_retrievals_table(
+    project_id: str,
+    agent_process_id: str,
+    limit: int,
+    before: datetime | None = None,
+) -> list[dict[str, Any]]:
+    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT prompt_id, situation, score, relevance, created_at
+            FROM arteries.retrievals
+            WHERE project_id = %s
+              AND agent_process_id = %s
+              {"AND created_at < %s" if before is not None else ""}
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (project_id, agent_process_id,
+             *((before,) if before is not None else ()), limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
 def get_recent_retrievals(
     project_id: str,
     agent_process_id: str,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT prompt_id, situation, score, relevance, created_at
-            FROM arteries.retrievals
-            WHERE project_id = %s
-              AND agent_process_id = %s
-            ORDER BY created_at DESC
-            LIMIT %s
-            """,
-            (project_id, agent_process_id, limit),
-        )
-        return [dict(r) for r in cur.fetchall()]
+    # Pulse first (retrieval.logged events, newest first), topped up from the
+    # table with rows older than the oldest event used.
+    # ponytail: one 200-event page; matches past it come from the table
+    events = pulse_read.events(kind="retrieval.logged", source="arteries", order="desc", limit=200)
+    if events is None:
+        return _recent_retrievals_table(project_id, agent_process_id, limit)
+    rows: list[dict[str, Any]] = []
+    for e in events:
+        if len(rows) >= limit:
+            break
+        p = e.get("payload") or {}
+        if p.get("project_id") != project_id or p.get("agent_process_id") != agent_process_id:
+            continue
+        ts = datetime.fromisoformat(e["ts"])
+        rows.append({
+            "prompt_id": p.get("prompt_id"),
+            "situation": p.get("situation"),
+            "score": p.get("score"),
+            "relevance": p.get("relevance", 1.0),
+            "created_at": ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc),
+        })
+    if len(rows) >= limit:
+        return rows
+    before = rows[-1]["created_at"] if rows else None
+    try:
+        return rows + _recent_retrievals_table(project_id, agent_process_id, limit - len(rows), before)
+    except Exception:
+        if not rows:
+            raise
+        return rows
 
 
 def log_retrieval(
@@ -834,6 +875,26 @@ def log_retrieval(
     situation: str,
     score: float,
 ) -> None:
+    # Emit before the INSERT, straight through pulse_emit: journal sits above
+    # this layer, so its ARTERIES_JOURNAL=off switch is repeated here. The event
+    # can never raise into, or be lost to, a failing INSERT.
+    if os.getenv("ARTERIES_JOURNAL", "").lower() != "off":
+        try:
+            pulse_emit.emit(
+                "arteries", "retrieval.logged", vascular_paths.journal_dir(),
+                vascular_paths.path("state", "pulse", "contexts"),
+                payload={
+                    "project_id": project_id,
+                    "agent_process_id": agent_process_id,
+                    "prompt_id": prompt_id,
+                    "score": float(score),
+                    "relevance": 1.0,
+                    "situation": situation,
+                    "situation_chars": len(situation),
+                },
+            )
+        except Exception:
+            pass
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
