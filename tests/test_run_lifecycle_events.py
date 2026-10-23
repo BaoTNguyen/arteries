@@ -135,3 +135,35 @@ def test_interval_strings():
     assert runlog._seconds("1 hour") == 3600
     assert runlog._seconds("48 hours") == 172800
     assert runlog._seconds("30 minutes") == 1800
+
+
+def _stdin(monkeypatch, data):
+    import os
+    import sys
+    r, w = os.pipe()
+    if data is not None:
+        os.write(w, data.encode())
+        os.close(w)
+    monkeypatch.setattr(sys, "stdin", os.fdopen(r))
+    return w
+
+
+def test_runs_start_takes_the_session_from_the_hook_event(monkeypatch):
+    import os
+
+    from arteries import runs
+    monkeypatch.delenv("ARTERIES_SESSION_ID", raising=False)
+    _stdin(monkeypatch, '{"session_id": "abc", "hook_event_name": "SessionStart"}')
+    runs._hook_session()
+    assert os.environ.pop("ARTERIES_SESSION_ID") == "abc"
+
+
+def test_runs_start_never_waits_on_an_idle_stdin(monkeypatch):
+    import os
+
+    from arteries import runs
+    monkeypatch.delenv("ARTERIES_SESSION_ID", raising=False)
+    w = _stdin(monkeypatch, None)
+    runs._hook_session()
+    os.close(w)
+    assert "ARTERIES_SESSION_ID" not in os.environ

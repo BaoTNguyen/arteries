@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import select
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,6 +22,27 @@ def _project(ns) -> str:
     that holds nothing.
     """
     return ns.project or scope.current_project()
+
+
+def _hook_session() -> None:
+    """Take the session id from a SessionStart hook's stdin JSON.
+
+    Generated hooks pipe the event straight into `runs start` without
+    exporting ARTERIES_SESSION_ID, so the run was resolved sessionless: a new
+    session "resumed" whatever this CLI ran last, and its real run was minted
+    later by the first prompt with no run.started. Only an already-written
+    stdin is read, so a caller holding an idle pipe open never blocks."""
+    if os.getenv("ARTERIES_SESSION_ID") or sys.stdin is None or sys.stdin.isatty():
+        return
+    try:
+        if not select.select([sys.stdin], [], [], 0.2)[0]:
+            return
+        event = json.loads(sys.stdin.read() or "{}")
+    except Exception:
+        return
+    session = isinstance(event, dict) and (event.get("session_id") or event.get("conversation_id"))
+    if session:
+        os.environ["ARTERIES_SESSION_ID"] = str(session)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -64,6 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv = ["recent"]
     ns = parser.parse_args(argv)
     if ns.command == "start":
+        _hook_session()
         print(json.dumps(runlog.start_run(_project(ns), ns.agent, ns.cli, ns.repo, force=ns.force),
                          indent=2, sort_keys=True))
         return 0
