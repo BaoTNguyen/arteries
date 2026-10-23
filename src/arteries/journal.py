@@ -52,6 +52,11 @@ def inbox(run_id: str, root: str | Path | None = None) -> Path:
     return Path(root or journal_dir()) / "incoming" / run_id
 
 
+def session_trace(session: str) -> str:
+    """The trace a Claude session's events share when no parent set one."""
+    return hashlib.sha256(("claude:" + session).encode()).hexdigest()[:32]
+
+
 def journal_append(source: str, kind: str, *, turn_id: str | None = None,
                    event_id: str | None = None, run_id: str | None = None,
                    **payload) -> None:
@@ -70,7 +75,7 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
         trace_id = None
         session = os.getenv("ARTERIES_SESSION_ID")
         if not os.getenv("PULSE_TRACE_ID") and session:
-            trace_id = hashlib.sha256(("claude:" + session).encode()).hexdigest()[:32]
+            trace_id = session_trace(session)
         # id and run_id ride at the top level so the drain can insert this row
         # idempotently without unpacking the payload; a given event_id wins over
         # pulse_emit's fresh uuid. Empty values stay absent, as they always were.

@@ -32,6 +32,8 @@ def events(
     before: str | int | None = None,
     limit: int | None = 500,
     timeout: float = 2.0,
+    run: str | None = None,
+    trace: str | None = None,
 ) -> list[dict] | None:
     """GET /events once and return its `events` list (pulse's `next` is
     ignored), or None on any failure."""
@@ -42,6 +44,7 @@ def events(
         params = (
             ("kind", kind), ("project", project), ("source", source),
             ("order", order), ("before", before), ("limit", limit),
+            ("run", run), ("trace", trace),
         )
         query = urllib.parse.urlencode([(k, v) for k, v in params if v is not None])
         conn = _UnixHTTPConnection(sock_path, timeout)

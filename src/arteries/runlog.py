@@ -16,9 +16,9 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import vascular_paths
+from arteries import pulse_read, vascular_paths
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
-from arteries.journal import journal_append
+from arteries.journal import journal_append, session_trace
 
 RUN_ENV_KEYS = ("AGENT_RUN_ID", "ARTERIES_RUN_ID")
 
@@ -115,6 +115,10 @@ def _persist_run(run: dict[str, Any]) -> None:
 
 
 def _run_exists(run_id: str) -> bool:
+    # pulse first (pulse P5, A4): any event carrying the run means it was used
+    if pulse_read.events(run=run_id, limit=1):
+        return True
+
     def work(cur):
         cur.execute("SELECT 1 FROM arteries.agent_runs WHERE id = %s", (run_id,))
         return cur.fetchone() is not None
@@ -440,7 +444,14 @@ def _db(work, default, dict_rows: bool = False):
 
 
 def _session_run(session_id: str, open_only: bool = True) -> dict[str, Any] | None:
-    """Newest run belonging to this session, or None. Never raises."""
+    """Newest run belonging to this session, or None. Never raises.
+
+    Pulse first: the session's run.started / run.resumed events share its
+    trace (journal.session_trace) and carry the whole run since A4 step 1.
+    Runs older than that, or pulse being down, fall through to the table."""
+    found = _session_run_pulse(session_id, open_only)
+    if found is not None:
+        return found
     clause = "AND ended_at IS NULL" if open_only else ""
 
     def work(cur):
@@ -458,9 +469,32 @@ def _session_run(session_id: str, open_only: bool = True) -> dict[str, Any] | No
     return _db(work, None, dict_rows=True)
 
 
+def _session_run_pulse(session_id: str, open_only: bool) -> dict[str, Any] | None:
+    page = pulse_read.events(kind="run.*", source="arteries", trace=session_trace(session_id),
+                             order="desc", limit=200)
+    seen: set[str] = set()
+    for e in page or []:
+        p = e.get("payload") or {}
+        run_id = e.get("run_id")
+        if e.get("kind") not in ("run.started", "run.resumed") or not run_id or run_id in seen:
+            continue
+        seen.add(run_id)
+        if "started_at" not in p:
+            return None  # written before the event carried the run: ask the table
+        if open_only and not _run_is_open(run_id):
+            continue
+        return {"id": run_id, "project_id": p.get("project_id"), "repo_path": p.get("repo"),
+                "cli": p.get("cli"), "agent_id": p.get("agent_id"),
+                "started_at": p["started_at"], "metadata": p.get("metadata") or {}}
+    return None
+
+
 def _run_is_open(run_id: str) -> bool:
-    """False only when the database says so. A lookup that cannot answer must
-    not close a run the caller is legitimately still using."""
+    """False only when pulse or the database says so. A lookup that cannot
+    answer must not close a run the caller is legitimately still using."""
+    if pulse_read.events(run=run_id, kind="run.ended", limit=1):
+        return False
+
     def work(cur):
         cur.execute("SELECT ended_at FROM arteries.agent_runs WHERE id = %s", (run_id,))
         row = cur.fetchone()
