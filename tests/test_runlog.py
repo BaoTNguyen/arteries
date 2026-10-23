@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timedelta, timezone
 import tempfile
 import uuid
 import psycopg2
@@ -56,12 +57,10 @@ class RunlogDiscardTests(unittest.TestCase):
 
     def test_discard_writes_nothing(self):
         with patch.dict(os.environ, {"ARTERIES_RUNLOG": "discard"}), \
-                patch.object(runlog, "_write_db_run") as db_run, \
                 patch.object(runlog.projection, "project") as project, \
                 patch.object(runlog, "journal_append") as journal:
             event = runlog.log_event("turn.observed", "test", {"message_preview": "hi"})
 
-        db_run.assert_not_called()
         project.assert_not_called()
         journal.assert_not_called()
         self.assertEqual(event["event_type"], "turn.observed")
@@ -76,7 +75,6 @@ class RunlogDiscardTests(unittest.TestCase):
     def test_without_discard_the_line_is_journaled_and_projected(self):
         env = {k: v for k, v in os.environ.items() if k != "ARTERIES_RUNLOG"}
         with patch.dict(os.environ, env, clear=True), \
-                patch.object(runlog, "_write_db_run"), \
                 patch.object(runlog, "_write_current_run"), \
                 patch.object(runlog, "journal_append", return_value={"id": "x"}) as journal, \
                 patch.object(runlog.projection, "project") as project:
@@ -95,7 +93,34 @@ class RunlogDiscardTests(unittest.TestCase):
         self.assertEqual(event["payload"]["session_id"], "sess-42")
 
 
-@unittest.skipUnless(DB_REACHABLE, "no reachable Postgres; run lifecycle is a database contract")
+class _Pulse:
+    """An in-memory pulse: journal_append records, events() filters. Runs are
+    events now (pulse P5, A4), so the lifecycle contract is tested against
+    the events alone, with the agent_runs archive unreachable."""
+
+    def __init__(self):
+        self.lines = []
+
+    def append(self, source, kind, *, run_id=None, turn_id=None, event_id=None, **payload):
+        session = os.getenv("ARTERIES_SESSION_ID")
+        line = {"id": event_id or str(uuid.uuid4()), "source": source, "kind": kind,
+                "run_id": run_id, "payload": payload,
+                "trace_id": runlog.session_trace(session) if session else None,
+                "ts": datetime.now(timezone.utc).isoformat()}
+        self.lines.append(line)
+        return line
+
+    def events(self, kind=None, source=None, order="asc", limit=500, run=None, trace=None, **_):
+        def hit(e):
+            if kind and not (e["kind"].startswith(kind[:-1]) if kind.endswith("*") else e["kind"] == kind):
+                return False
+            return all(want is None or e[key] == want for key, want in
+                       (("source", source), ("run_id", run), ("trace_id", trace)))
+        page = sorted((e for e in self.lines if hit(e)), key=lambda e: e["ts"],
+                      reverse=order == "desc")
+        return page[:limit]
+
+
 class RunLifecycleTests(unittest.TestCase):
     """Runs are keyed by session and closed by a sweep.
 
@@ -116,16 +141,18 @@ class RunLifecycleTests(unittest.TestCase):
         os.environ.pop("AGENT_RUN_ID", None)
         os.environ.pop("ARTERIES_EPISODE_ID", None)
         runlog._resolved.clear()
+        self.pulse = _Pulse()
+        for patcher in (patch.object(runlog, "journal_append", self.pulse.append),
+                        patch.object(runlog.pulse_read, "events", self.pulse.events),
+                        patch.object(runlog.projection, "project"),
+                        patch.object(runlog, "_write_current_run"),
+                        patch.object(runlog, "_db", lambda work, default, **k: default)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self.env.stop()
         runlog._resolved.clear()
-        try:
-            with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-                cur.execute("DELETE FROM arteries.agent_events WHERE project_id = %s", (self.project,))
-                cur.execute("DELETE FROM arteries.agent_runs WHERE project_id = %s", (self.project,))
-        except Exception:
-            pass
 
     def _begin(self, session=None):
         """Start a session the way a session-start hook does."""
@@ -138,12 +165,10 @@ class RunLifecycleTests(unittest.TestCase):
         self._session(session)
         return runlog.current_run(project_id=self.project, cli="claude", repo_path=self.repo)
 
-    def _backdate(self, run_id, interval):
-        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-            cur.execute(f"UPDATE arteries.agent_runs SET started_at = now() - interval '{interval}' "
-                        "WHERE id = %s", (run_id,))
-            cur.execute(f"UPDATE arteries.agent_events SET created_at = now() - interval '{interval}' "
-                        "WHERE run_id = %s", (run_id,))
+    def _backdate(self, run_id, hours):
+        for e in self.pulse.lines:
+            if e["run_id"] == run_id:
+                e["ts"] = (datetime.fromisoformat(e["ts"]) - timedelta(hours=hours)).isoformat()
 
     def _session(self, session):
         runlog._resolved.clear()
@@ -192,7 +217,7 @@ class RunLifecycleTests(unittest.TestCase):
         fresh = self._begin("sess-fresh")
         # idleness is measured from the last event, not from started_at, so a
         # run with a fresh run.started row is live no matter how old it looks
-        self._backdate(stale["run_id"], "60 hours")
+        self._backdate(stale["run_id"], 60)
 
         closed = runlog.sweep_runs()
 
@@ -204,10 +229,23 @@ class RunLifecycleTests(unittest.TestCase):
             runlog._resolved.clear()
             episode = runlog.start_run(project_id=self.project, agent_id="test",
                                        cli="claude", repo_path=self.repo)
-        self._backdate(episode["run_id"], "2 hours")
+        self._backdate(episode["run_id"], 2)
 
         # two hours is nothing for an interactive run and terminal for an episode
         self.assertIn(episode["run_id"], runlog.sweep_runs())
+
+
+    def test_a_run_minted_on_its_first_event_is_announced_once(self):
+        # the start hook never ran: without run.started the next process can't
+        # find this run by session and mints another
+        self._session("sess-late")
+        runlog.log_event("turn.observed", "arteries", {}, project_id=self.project,
+                         cli="claude", repo_path=self.repo)
+        runlog.log_event("turn.observed", "arteries", {}, project_id=self.project,
+                         cli="claude", repo_path=self.repo)
+        started = [e for e in self.pulse.lines if e["kind"] == "run.started"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(self._run("sess-late")["run_id"], started[0]["run_id"])
 
 
 if __name__ == "__main__":

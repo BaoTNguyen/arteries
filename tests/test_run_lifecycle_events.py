@@ -15,7 +15,6 @@ def test_start_run_carries_the_whole_run(monkeypatch):
     monkeypatch.setattr(runlog, "sweep_runs", lambda: [])
     monkeypatch.setattr(runlog, "current_run", lambda *a, **k: _run())
     monkeypatch.setattr(runlog, "_run_exists", lambda rid: False)
-    monkeypatch.setattr(runlog, "_persist_run", lambda run: None)
     monkeypatch.setattr(runlog, "log_event", lambda kind, src, payload, **kw: logged.append((kind, payload)))
     runlog.start_run()
     kind, payload = logged[0]
@@ -25,8 +24,8 @@ def test_start_run_carries_the_whole_run(monkeypatch):
 
 
 def test_end_run_emits_run_ended_once(monkeypatch):
-    results = iter([True, False])
-    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: next(results))
+    results = iter([True, False])  # open, then pulse has its run.ended
+    monkeypatch.setattr(runlog, "_run_is_open", lambda rid: next(results))
     with patch.object(runlog, "journal_append") as journal:
         assert runlog.end_run("run-1", "episode_finished")
         assert not runlog.end_run("run-1", "episode_finished")
@@ -34,7 +33,7 @@ def test_end_run_emits_run_ended_once(monkeypatch):
 
 
 def test_the_sweep_emits_run_ended_per_closed_run(monkeypatch):
-    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: ["a", "b"])
+    monkeypatch.setattr(runlog, "_idle_runs_pulse", lambda: ["a", "b"])
     with patch.object(runlog, "journal_append") as journal:
         assert runlog.sweep_runs() == ["a", "b"]
     assert [c.kwargs["run_id"] for c in journal.call_args_list] == ["a", "b"]
@@ -43,7 +42,7 @@ def test_the_sweep_emits_run_ended_per_closed_run(monkeypatch):
 
 def test_discard_emits_nothing(monkeypatch):
     monkeypatch.setenv("ARTERIES_RUNLOG", "discard")
-    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: True)
+    monkeypatch.setattr(runlog, "_run_is_open", lambda rid: True)
     with patch.object(runlog, "journal_append") as journal:
         runlog.end_run("run-1")
     journal.assert_not_called()
@@ -116,6 +115,8 @@ def test_idle_runs_from_pulse(monkeypatch):
     def events(**kw):
         if kw.get("kind") == "run.*":
             return page
+        if kw.get("kind") == "run.ended":
+            return []
         return [{"ts": newest[kw["run"]]}] if kw["run"] in newest else []
 
     monkeypatch.setattr(runlog.pulse_read, "events", events)
@@ -123,12 +124,28 @@ def test_idle_runs_from_pulse(monkeypatch):
     assert sorted(runlog._idle_runs_pulse(now)) == ["archived", "quiet-ep"]
 
 
-def test_sweep_falls_back_to_sql_when_pulse_is_down(monkeypatch):
+def test_sweep_closes_nothing_when_pulse_is_down(monkeypatch):
+    # agent_runs is a read-only archive: there is no table to close rows in
     monkeypatch.setattr(runlog.pulse_read, "events", lambda **kw: None)
-    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: ["sql-closed"])
     with patch.object(runlog, "journal_append") as journal:
-        assert runlog.sweep_runs() == ["sql-closed"]
-    assert journal.call_args.kwargs["run_id"] == "sql-closed"
+        assert runlog.sweep_runs() == []
+    journal.assert_not_called()
+
+
+def test_an_old_run_ended_beyond_the_page_is_not_swept_again(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+
+    def events(**kw):
+        if kw.get("kind") == "run.*":
+            return []  # its run.ended has fallen off the page
+        if kw.get("kind") == "run.ended":
+            return [{"kind": "run.ended", "run_id": kw["run"]}]
+        return [{"ts": "2026-10-01T00:00:00+00:00"}]
+
+    monkeypatch.setattr(runlog.pulse_read, "events", events)
+    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: [("archived", "interactive", None)])
+    assert runlog._idle_runs_pulse(now) == []
 
 
 def test_interval_strings():
