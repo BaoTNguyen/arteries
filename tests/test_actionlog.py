@@ -230,3 +230,31 @@ def test_a_closed_episode_still_gets_its_record_but_is_not_reposted(monkeypatch,
     assert count == 0
     feedback.assert_not_called()
     assert [e["episode_id"] for e in seen] == ["old-1"], "but the record is written"
+
+
+def test_one_torn_episode_file_does_not_stop_the_ingest(monkeypatch, tmp_path, capsys):
+    # ARTERIES-B18: heart writes episode.json non-atomically
+    for name, body in (("a", '{"episode_id": "ok-1", "outcome": "pass"}'), ("b", '{"episode_id": "to')):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "episode.json").write_text(body)
+    seen = []
+    with mock.patch.object(actionlog, "_corpus_feedback"), \
+         mock.patch.object(actionlog, "close_episodes"), \
+         mock.patch.object(actionlog, "record_episode", side_effect=seen.append), \
+         mock.patch.object(actionlog, "psycopg2") as pg:
+        pg.connect.side_effect = RuntimeError("db down")
+        assert actionlog.ingest_episodes(str(tmp_path)) == 1
+    assert [e["episode_id"] for e in seen] == ["ok-1"]
+    assert "skipped 1 unparsable" in capsys.readouterr().err
+
+
+def test_corpus_feedback_maps_heart_outcomes_to_capillaries(monkeypatch):
+    # CAPILLARIES-B15: capillaries' CHECK accepts only success/partial/failure/skipped
+    posted = []
+    monkeypatch.setattr(actionlog, "_corpus_feedback_post", posted.append)
+    for outcome in ("pass", "unverified", "fail"):
+        actionlog._corpus_feedback({"outcome": outcome,
+                                    "context_packets": [{"role": "implement",
+                                                         "corpus": {"trace_id": "t"}}]})
+    assert [p["outcome"] for p in posted] == ["success", "partial", "failure"]
+    assert "outcome=pass" in posted[0]["notes"]
