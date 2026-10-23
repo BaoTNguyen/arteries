@@ -42,6 +42,13 @@ def test_sandboxed_with_nothing_else_returns_empty(stubbed):
     assert packet.build_packet("") != ""
 
 
+def test_the_parent_role_is_interactive(stubbed):
+    # ARTERIES-B03: the generated hooks set role `parent` for the session itself
+    stubbed.setenv("ARTERIES_AGENT_ROLE", "parent")
+    out = packet.build_packet("hi")
+    assert "Recent Conversation" in out and STUB in out
+
+
 def test_compaction_path_skips_pairs(stubbed):
     stubbed.setenv("ARTERIES_AGENT_ROLE", "implement")
     stubbed.setattr(packet.storage, "_env_session_id", lambda: None)

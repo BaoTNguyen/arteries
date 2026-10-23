@@ -24,7 +24,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import runlog, storage, vascular_paths
+from arteries import pulse_read, runlog, storage, vascular_paths
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
 from arteries.journal import journal_append
 
@@ -65,14 +65,24 @@ def log_decision(
         "created_at": _now_iso(),
     }
     store = _persist(record, "decision", run, repo_path)
+    # The whole record rides on the event (pulse P5, DIRECTION A3), keyed by the
+    # decision's own id, so the table can be checked against pulse row for row
+    # and then retired. Observations are small, so inline rather than artifacts.
     journal_append(
         "arteries",
         f"decision.{decision_type}",
         turn_id=turn_id,
+        event_id=record["id"],
+        run_id=record["run_id"],
         chosen=chosen_action,
         available=available_actions,
         store=store,
         **({"cost": cost} if cost else {}),
+        **({"observation": record["observation"]} if record["observation"] else {}),
+        **({"metadata": record["metadata"]} if record["metadata"] else {}),
+        project_id=record["project_id"],
+        agent_id=record["agent_id"],
+        created_at=record["created_at"],
     )
     return record
 
@@ -84,27 +94,79 @@ def recent_decisions(
     repo_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     project = project_id or os.getenv("ARTERIES_PROJECT") or PROJECT_ID
+    # Pulse first (decision.* events that carry the whole record, newest
+    # first), topped up from the table with rows older than the oldest used.
+    # ponytail: one 500-event page; matches past it come from the table
+    events = pulse_read.events(kind="decision.*", source="arteries", order="desc", limit=500)
+    rows: list[dict[str, Any]] = []
+    for e in events or []:
+        if len(rows) >= limit:
+            break
+        p = e.get("payload") or {}
+        if "created_at" not in p:
+            continue  # written before the event carried the record
+        if (e.get("episode_id") != episode) if episode else (p.get("project_id") != project):
+            continue
+        rows.append(_decision_from_event(e))
+    if len(rows) >= limit:
+        return rows
+    before = rows[-1]["created_at"] if rows else None
     try:
-        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(
-            cursor_factory=psycopg2.extras.RealDictCursor
-        ) as cur:
-            where, params = "project_id = %s", [project]
-            if episode:
-                where, params = "episode_id = %s", [episode]
-            cur.execute(
-                f"""
-                SELECT id, episode_id, run_id, turn_id, project_id, decision_type,
-                       observation, available_actions, chosen_action, cost, metadata, created_at
-                FROM arteries.decisions
-                WHERE {where}
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (*params, limit),
-            )
-            return [runlog._json_ready(dict(row)) for row in cur.fetchall()]
+        return rows + _recent_decisions_table(project, episode, limit - len(rows), before)
     except Exception:
+        if rows:
+            return rows
         return _recent_jsonl(project if not episode else None, episode, limit, repo_path)
+
+
+def _decision_from_event(e: dict[str, Any]) -> dict[str, Any]:
+    p = e.get("payload") or {}
+    return {
+        "id": e.get("id"),
+        "episode_id": e.get("episode_id"),
+        "run_id": e.get("run_id"),
+        "turn_id": e.get("turn_id"),
+        "project_id": p.get("project_id"),
+        "decision_type": e["kind"].removeprefix("decision."),
+        "observation": p.get("observation") or {},
+        "available_actions": p.get("available") or [],
+        "chosen_action": p.get("chosen"),
+        "cost": p.get("cost") or {},
+        "metadata": p.get("metadata") or {},
+        "created_at": p["created_at"],
+    }
+
+
+def _recent_decisions_table(
+    project: str, episode: str | None, limit: int, before: str | None = None,
+) -> list[dict[str, Any]]:
+    with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(
+        cursor_factory=psycopg2.extras.RealDictCursor
+    ) as cur:
+        where, params = "project_id = %s", [project]
+        if episode:
+            where, params = "episode_id = %s", [episode]
+        if before:
+            where += " AND created_at < %s"
+            params.append(before)
+        cur.execute(
+            f"""
+            SELECT id, episode_id, run_id, turn_id, project_id, decision_type,
+                   observation, available_actions, chosen_action, cost, metadata, created_at
+            FROM arteries.decisions
+            WHERE {where}
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (*params, limit),
+        )
+        return [runlog._json_ready(dict(row)) for row in cur.fetchall()]
+
+
+# capillaries' feedback.outcome CHECK allows only these four; heart's own
+# values (pass, unverified, ...) were rejected and the feedback silently lost
+# (CAPILLARIES-B15). The raw outcome rides in the notes.
+_CORPUS_OUTCOME = {"pass": "success", "unverified": "partial"}
 
 
 def _corpus_feedback(episode: dict) -> None:
@@ -122,8 +184,8 @@ def _corpus_feedback(episode: dict) -> None:
         trace_id = (packet.get("corpus") or {}).get("trace_id")
         if not trace_id or not outcome:
             continue
-        _corpus_feedback_post({"trace_id": trace_id, "outcome": outcome,
-                               "notes": f"heart role={packet.get('role')}"})
+        _corpus_feedback_post({"trace_id": trace_id, "outcome": _CORPUS_OUTCOME.get(outcome, "failure"),
+                               "notes": f"heart role={packet.get('role')} outcome={outcome}"})
 
 
 def _corpus_feedback_post(body: dict) -> None:
@@ -159,13 +221,23 @@ def ingest_episodes(source: str | Path | None = None) -> int:
     capillaries, which inserts a feedback row per POST.
     """
     if source is None:
-        episodes = [json.loads(line) for line in sys.stdin.read().splitlines() if line.strip()]
+        texts = [line for line in sys.stdin.read().splitlines() if line.strip()]
     else:
         path = Path(source)
         if path.is_dir():
-            episodes = [json.loads(p.read_text()) for p in sorted(path.glob("*/episode.json"))]
+            texts = [p.read_text(errors="replace") for p in sorted(path.glob("*/episode.json"))]
         else:
-            episodes = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+            texts = [line for line in path.read_text().splitlines() if line.strip()]
+    # one at a time: heart writes episode.json non-atomically, and one torn
+    # file used to abort every ingest over its directory for good (ARTERIES-B18)
+    episodes, bad = [], 0
+    for text in texts:
+        try:
+            episodes.append(json.loads(text))
+        except json.JSONDecodeError:
+            bad += 1
+    if bad:
+        print(f"art episodes: skipped {bad} unparsable episode record(s)", file=sys.stderr)
 
     closed: set = set()
     recorded: set = set()

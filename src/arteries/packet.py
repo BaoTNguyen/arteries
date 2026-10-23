@@ -234,7 +234,10 @@ def _query_embedding(message: str) -> list[float] | None:
 def _sandboxed_agent() -> bool:
     """Unattended or sandboxed agent turn: its prompt must not carry other
     sessions' conversation, so no recent pairs are drawn for it."""
-    return trust.agent_run() or trust.web_lane() or bool(os.getenv("ARTERIES_AGENT_ROLE", "").strip())
+    # `parent` is the interactive session's own role (cli_normalize's default),
+    # not a sandboxed agent; counting it blanked every compaction (ARTERIES-B03)
+    role = os.getenv("ARTERIES_AGENT_ROLE", "").strip()
+    return trust.agent_run() or trust.web_lane() or role not in ("", "parent")
 
 
 def build_packet(message: str = "", event: dict[str, Any] | None = None,
