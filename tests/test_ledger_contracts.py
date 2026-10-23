@@ -57,7 +57,9 @@ class DegradationDrillTests(unittest.TestCase):
             events += [json.loads(line) for line in path.read_text().splitlines()]
         return events
 
-    def test_dead_db_degrades_to_jsonl_and_journal_records_store(self):
+    def test_dead_db_still_records_the_decision_as_an_event(self):
+        # pulse P5: the decision.* event is the record, so a dead database
+        # loses nothing and nothing degrades to a repo-local file
         try:
             rec = actionlog.log_decision(
                 "contract.degradation",
@@ -66,24 +68,14 @@ class DegradationDrillTests(unittest.TestCase):
                 observation={"reason": "dead port drill"},
             )
         except Exception as exc:  # pragma: no cover - the point of this test
-            self.fail(f"log_decision raised instead of degrading gracefully: {exc!r}")
+            self.fail(f"log_decision raised with the database down: {exc!r}")
 
-        self.assertEqual(rec["episode_id"], "contract-test-degradation-1")
-
-        jsonl_files = list((self.root / "repo" / ".vascular" / "arteries" / "decisions").glob("*.jsonl"))
-        self.assertEqual(len(jsonl_files), 1, "expected exactly one JSONL fallback file")
-
-        jsonl_records = [json.loads(line) for line in jsonl_files[0].read_text().splitlines()]
-        matching = [r for r in jsonl_records if r.get("id") == rec["id"]]
-        self.assertEqual(len(matching), 1)
-
-        journaled = self._journal_events()
-        gate = [e for e in journaled if e["kind"] == "decision.contract.degradation"]
+        gate = [e for e in self._journal_events() if e["kind"] == "decision.contract.degradation"]
         self.assertEqual(len(gate), 1)
-        # Pin reality: with a dead DB but a writable tempdir, the jsonl write
-        # succeeds, so the emitted store flag is "jsonl" (not "lost"). "lost"
-        # only fires if the jsonl write itself also raises.
-        self.assertEqual(gate[0]["payload"]["store"], "jsonl")
+        self.assertEqual(gate[0]["id"], rec["id"])
+        self.assertEqual(gate[0]["payload"]["store"], "pulse")
+        self.assertEqual(gate[0]["payload"]["observation"], {"reason": "dead port drill"})
+        self.assertFalse((self.root / "repo" / ".vascular" / "arteries" / "decisions").exists())
 
 
 if __name__ == "__main__":

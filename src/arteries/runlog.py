@@ -89,10 +89,13 @@ def start_run(
     existed = _run_exists(run["run_id"])
     _persist_run(run)
 
+    # The whole run rides on the event (pulse P5, DIRECTION A4), so the run's
+    # lifecycle can be read from pulse and agent_runs retired: run.started /
+    # run.resumed open it, run.ended (end_run, sweep_runs) closes it.
     log_event(
         "run.resumed" if existed else "run.started",
         "arteries",
-        {},
+        {"started_at": run["started_at"], "metadata": run.get("metadata") or {}},
         project_id=run["project_id"],
         run_id=run["run_id"],
         agent_id=run["agent_id"],
@@ -487,7 +490,19 @@ def end_run(run_id: str, reason: str = "explicit") -> bool:
         )
         return cur.rowcount > 0
 
-    return _db(work, False)
+    ended = _db(work, False)
+    if ended:
+        _emit_ended(run_id, reason)
+    return ended
+
+
+def _emit_ended(run_id: str, reason: str) -> None:
+    """run.ended, keyed by the run's own id. The sweep closes other sessions'
+    runs, so the event carries this process's trace, not the run's: readers
+    find a run's end by run_id."""
+    if _discard():
+        return
+    journal_append("arteries", "run.ended", run_id=run_id, reason=reason)
 
 
 def sweep_runs() -> list[str]:
@@ -518,7 +533,10 @@ def sweep_runs() -> list[str]:
         )
         return [str(row[0]) for row in cur.fetchall()]
 
-    return _db(work, [])
+    closed = _db(work, [])
+    for run_id in closed:
+        _emit_ended(run_id, "idle_sweep")
+    return closed
 
 
 def _repo(repo_path: str | Path | None = None) -> Path:
