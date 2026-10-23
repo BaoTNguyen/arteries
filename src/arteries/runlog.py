@@ -46,6 +46,8 @@ IDLE_INTERACTIVE = os.getenv("ARTERIES_IDLE_INTERACTIVE", "48 hours")
 # log_event, and the session lookup is a database round trip; hook processes are
 # short-lived, so this turns one query per event into one query per hook.
 _resolved: dict[tuple[str, str, str], dict[str, Any]] = {}
+# runs current_run minted that no run.started has announced yet
+_unannounced: set[str] = set()
 
 # Mirrors ARTERIES_EPHEMERAL=discard. The smoke script advertised itself as a
 # dry run while writing turn.observed rows into the live store and rewriting
@@ -85,14 +87,12 @@ def start_run(
     else:
         run = current_run(project_id, agent_id, cli, repo_path)
 
-    # Session start is where a run becomes real, so later processes can find it
-    # by session and resume rather than minting a fresh id every time.
+    # Session start is where a run becomes real: the whole run rides on
+    # run.started / run.resumed (pulse P5, DIRECTION A4), so later processes
+    # find it by session and resume rather than minting a fresh id. run.ended
+    # (end_run, sweep_runs) closes it. agent_runs is a read-only archive.
     existed = _run_exists(run["run_id"])
-    _persist_run(run)
-
-    # The whole run rides on the event (pulse P5, DIRECTION A4), so the run's
-    # lifecycle can be read from pulse and agent_runs retired: run.started /
-    # run.resumed open it, run.ended (end_run, sweep_runs) closes it.
+    _unannounced.discard(run["run_id"])
     log_event(
         "run.resumed" if existed else "run.started",
         "arteries",
@@ -104,15 +104,6 @@ def start_run(
         repo_path=repo,
     )
     return run
-
-
-def _persist_run(run: dict[str, Any]) -> None:
-    """Insert on creation so the next process can find this run. Best-effort:
-    an unwritable run is still usable here, and log_event's JSONL fallback keeps
-    the events either way."""
-    if _discard():
-        return
-    _db(lambda cur: _write_db_run(run), None)
 
 
 def _run_exists(run_id: str) -> bool:
@@ -228,9 +219,10 @@ def current_run(
     # Deliberately not persisted here. Resolving a run must stay a read: this
     # function is called from every log_event, and writing a row on resolution
     # meant merely *asking* which run you were in created one -- a test that
-    # resolved without logging left rows in the live store. start_run persists
-    # at session start, and log_event's _write_db_run persists on first event,
+    # resolved without logging left rows in the live store. start_run announces
+    # at session start, and log_event announces on first event,
     # so a run nobody began and nobody wrote to correctly does not exist.
+    _unannounced.add(run["run_id"])
     _resolved[cache_key] = run
     return run
 
@@ -250,6 +242,14 @@ def log_event(
     run = current_run(project_id=project_id, agent_id=agent_id, cli=cli, repo_path=repo_path)
     if run_id:
         run["run_id"] = run_id
+    elif run["run_id"] in _unannounced and not event_type.startswith("run."):
+        # minted here, not at session start (the start hook never ran): without
+        # this the next process can't find the run by session and mints another
+        _unannounced.discard(run["run_id"])
+        log_event("run.started", "arteries",
+                  {"started_at": run["started_at"], "metadata": run.get("metadata") or {}},
+                  run_id=run["run_id"], project_id=run["project_id"],
+                  agent_id=run["agent_id"], cli=run["cli"], repo_path=run["repo_path"])
     event = {
         "id": str(uuid.uuid4()),
         "run_id": run["run_id"],
@@ -268,9 +268,7 @@ def log_event(
             event["payload"].setdefault(key, value)
     if _discard():
         return event
-    # agent_runs is still written while its readers are compared against
-    # pulse; agent_events is a projection of the journal line below (A4)
-    _db(lambda cur: _write_db_run(run), None)
+    # agent_events is a projection of the journal line below (A4)
     # journal_append's own parameters are source/kind/turn_id, and the payload is
     # spread into its **kwargs -- so a payload key with any of those names
     # raises "got multiple values for argument". Callers should not have to know
@@ -344,8 +342,10 @@ def recent_events(project_id: str | None = None, limit: int = 25, repo_path: str
 def show_run(run_id: str, limit: int = 100, repo_path: str | Path | None = None) -> dict[str, Any]:
     try:
         with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM arteries.agent_runs WHERE id = %s", (run_id,))
-            run = cur.fetchone()
+            run = _run_record_pulse(run_id)
+            if run is None:
+                cur.execute("SELECT * FROM arteries.agent_runs WHERE id = %s", (run_id,))
+                run = cur.fetchone()
             cur.execute(
                 """
                 SELECT id, run_id, project_id, turn_id, event_type, source, payload, created_at
@@ -360,6 +360,17 @@ def show_run(run_id: str, limit: int = 100, repo_path: str | Path | None = None)
     except Exception:
         events = [event for event in _recent_jsonl_events(None, limit=1000, repo_path=repo_path) if event.get("run_id") == run_id]
         return {"run": None, "events": events[:limit]}
+
+
+def _run_record_pulse(run_id: str) -> dict[str, Any] | None:
+    """The run as its newest run.started / run.resumed carried it."""
+    for e in pulse_read.events(run=run_id, kind="run.*", order="desc", limit=50) or []:
+        p = e.get("payload") or {}
+        if e.get("kind") in ("run.started", "run.resumed") and "started_at" in p:
+            return {"id": run_id, "project_id": p.get("project_id"), "repo_path": p.get("repo"),
+                    "cli": p.get("cli"), "agent_id": p.get("agent_id"),
+                    "started_at": p["started_at"], "metadata": p.get("metadata") or {}}
+    return None
 
 
 def summarize(project_id: str | None = None, limit: int = 100, repo_path: str | Path | None = None) -> dict[str, Any]:
@@ -464,7 +475,11 @@ def _session_run(session_id: str, open_only: bool = True) -> dict[str, Any] | No
         )
         return cur.fetchone()
 
-    return _db(work, None, dict_rows=True)
+    found = _db(work, None, dict_rows=True)
+    # the archive can't record an end any more; pulse can
+    if found and open_only and not _run_is_open(str(found["id"])):
+        return None
+    return found
 
 
 def _session_run_pulse(session_id: str, open_only: bool) -> dict[str, Any] | None:
@@ -509,23 +524,12 @@ def end_run(run_id: str, reason: str = "explicit") -> bool:
     That is the point: nothing may depend on the explicit signal arriving, so a
     killed terminal or a crashed episode costs lateness, never correctness.
     """
-    def work(cur):
-        cur.execute(
-            """
-            UPDATE arteries.agent_runs
-            SET ended_at = now(),
-                metadata = COALESCE(metadata, '{}'::jsonb)
-                           || jsonb_build_object('end_reason', %s)
-            WHERE id = %s AND ended_at IS NULL
-            """,
-            (reason, run_id),
-        )
-        return cur.rowcount > 0
-
-    ended = _db(work, False)
-    if ended:
-        _emit_ended(run_id, reason)
-    return ended
+    # ponytail: a second end inside pulse's drain lag (seconds) can emit a
+    # duplicate run.ended; readers treat ended as a set, so it costs nothing
+    if not _run_is_open(run_id):
+        return False
+    _emit_ended(run_id, reason)
+    return True
 
 
 def _emit_ended(run_id: str, reason: str) -> None:
@@ -545,40 +549,13 @@ def sweep_runs() -> list[str]:
     about to decide what to join. A machine left off for a week sweeps clean the
     moment any CLI opens a session.
 
-    Decided from pulse (pulse P5, A4); the table's SQL sweep is the fallback
-    when pulse can't answer.
+    Decided from pulse (pulse P5, A4). Pulse down closes nothing: a run
+    swept late costs lateness, never correctness.
     """
-    idle = _idle_runs_pulse()
-    if idle is not None:
-        for run_id in idle:
-            _db(lambda cur, rid=run_id: _close_row(cur, rid, "idle_sweep"), None)
-            _emit_ended(run_id, "idle_sweep")
-        return idle
-
-    def work(cur):
-        cur.execute(
-            f"""
-            UPDATE arteries.agent_runs r
-            SET ended_at = now(),
-                metadata = COALESCE(r.metadata, '{{}}'::jsonb)
-                           || jsonb_build_object('end_reason', 'idle_sweep')
-            WHERE r.ended_at IS NULL
-              AND COALESCE(
-                    (SELECT max(created_at) FROM arteries.agent_events e
-                      WHERE e.run_id = r.id),
-                    r.started_at
-                  ) < now() - (CASE WHEN r.metadata->>'kind' = 'episode'
-                                    THEN interval '{IDLE_EPISODE}'
-                                    ELSE interval '{IDLE_INTERACTIVE}' END)
-            RETURNING r.id
-            """
-        )
-        return [str(row[0]) for row in cur.fetchall()]
-
-    closed = _db(work, [])
-    for run_id in closed:
+    idle = _idle_runs_pulse() or []
+    for run_id in idle:
         _emit_ended(run_id, "idle_sweep")
-    return closed
+    return idle
 
 
 _UNITS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 604800}
@@ -622,6 +599,8 @@ def _idle_runs_pulse(now: datetime | None = None) -> list[str] | None:
     for run_id, kind in kinds.items():
         if run_id in ended:
             continue
+        if pulse_read.events(run=run_id, kind="run.ended", limit=1):
+            continue  # ended before the page reaches back
         newest = pulse_read.events(run=run_id, order="desc", limit=1)
         if newest is None:
             return None
@@ -630,19 +609,6 @@ def _idle_runs_pulse(now: datetime | None = None) -> list[str] | None:
         if last is not None and (now - last).total_seconds() > limit:
             idle.append(run_id)
     return idle
-
-
-def _close_row(cur, run_id: str, reason: str) -> None:
-    """Close the table row too while agent_runs is still written."""
-    cur.execute(
-        """
-        UPDATE arteries.agent_runs
-        SET ended_at = now(),
-            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('end_reason', %s)
-        WHERE id = %s AND ended_at IS NULL
-        """,
-        (reason, run_id),
-    )
 
 
 def _repo(repo_path: str | Path | None = None) -> Path:
@@ -694,27 +660,6 @@ def _write_current_run(repo: Path, run: dict[str, Any]) -> None:
     # more, but `art trace` and external readers still expect the old path.
     legacy = vascular_paths.repo_dir(repo, "arteries") / "current-run.json"
     legacy.write_text(blob, encoding="utf-8")
-
-
-def _write_db_run(run: dict[str, Any]) -> None:
-    with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO arteries.agent_runs
-                (id, project_id, repo_path, cli, agent_id, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-            ON CONFLICT (id) DO NOTHING
-            """,
-            (
-                run["run_id"],
-                run["project_id"],
-                run.get("repo_path"),
-                run.get("cli"),
-                run.get("agent_id"),
-                json.dumps(run.get("metadata") or {}, default=str),
-            ),
-        )
-        conn.commit()
 
 
 def _recent_jsonl_events(project_id: str | None, limit: int, repo_path: str | Path | None = None) -> list[dict[str, Any]]:
