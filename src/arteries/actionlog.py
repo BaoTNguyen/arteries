@@ -24,7 +24,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-from arteries import runlog, storage, vascular_paths
+from arteries import pulse_read, runlog, storage, vascular_paths
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
 from arteries.journal import journal_append
 
@@ -94,27 +94,73 @@ def recent_decisions(
     repo_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     project = project_id or os.getenv("ARTERIES_PROJECT") or PROJECT_ID
+    # Pulse first (decision.* events that carry the whole record, newest
+    # first), topped up from the table with rows older than the oldest used.
+    # ponytail: one 500-event page; matches past it come from the table
+    events = pulse_read.events(kind="decision.*", source="arteries", order="desc", limit=500)
+    rows: list[dict[str, Any]] = []
+    for e in events or []:
+        if len(rows) >= limit:
+            break
+        p = e.get("payload") or {}
+        if "created_at" not in p:
+            continue  # written before the event carried the record
+        if (e.get("episode_id") != episode) if episode else (p.get("project_id") != project):
+            continue
+        rows.append(_decision_from_event(e))
+    if len(rows) >= limit:
+        return rows
+    before = rows[-1]["created_at"] if rows else None
     try:
-        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(
-            cursor_factory=psycopg2.extras.RealDictCursor
-        ) as cur:
-            where, params = "project_id = %s", [project]
-            if episode:
-                where, params = "episode_id = %s", [episode]
-            cur.execute(
-                f"""
-                SELECT id, episode_id, run_id, turn_id, project_id, decision_type,
-                       observation, available_actions, chosen_action, cost, metadata, created_at
-                FROM arteries.decisions
-                WHERE {where}
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (*params, limit),
-            )
-            return [runlog._json_ready(dict(row)) for row in cur.fetchall()]
+        return rows + _recent_decisions_table(project, episode, limit - len(rows), before)
     except Exception:
+        if rows:
+            return rows
         return _recent_jsonl(project if not episode else None, episode, limit, repo_path)
+
+
+def _decision_from_event(e: dict[str, Any]) -> dict[str, Any]:
+    p = e.get("payload") or {}
+    return {
+        "id": e.get("id"),
+        "episode_id": e.get("episode_id"),
+        "run_id": e.get("run_id"),
+        "turn_id": e.get("turn_id"),
+        "project_id": p.get("project_id"),
+        "decision_type": e["kind"].removeprefix("decision."),
+        "observation": p.get("observation") or {},
+        "available_actions": p.get("available") or [],
+        "chosen_action": p.get("chosen"),
+        "cost": p.get("cost") or {},
+        "metadata": p.get("metadata") or {},
+        "created_at": p["created_at"],
+    }
+
+
+def _recent_decisions_table(
+    project: str, episode: str | None, limit: int, before: str | None = None,
+) -> list[dict[str, Any]]:
+    with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor(
+        cursor_factory=psycopg2.extras.RealDictCursor
+    ) as cur:
+        where, params = "project_id = %s", [project]
+        if episode:
+            where, params = "episode_id = %s", [episode]
+        if before:
+            where += " AND created_at < %s"
+            params.append(before)
+        cur.execute(
+            f"""
+            SELECT id, episode_id, run_id, turn_id, project_id, decision_type,
+                   observation, available_actions, chosen_action, cost, metadata, created_at
+            FROM arteries.decisions
+            WHERE {where}
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (*params, limit),
+        )
+        return [runlog._json_ready(dict(row)) for row in cur.fetchall()]
 
 
 def _corpus_feedback(episode: dict) -> None:
