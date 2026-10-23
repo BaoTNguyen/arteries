@@ -18,6 +18,7 @@ import psycopg2.extras
 
 from arteries import pulse_read, vascular_paths
 from arteries.config import AGENT_PROCESS_ID, DB_CONFIG, PROJECT_ID
+from arteries import journal as projection
 from arteries.journal import journal_append, session_trace
 
 RUN_ENV_KEYS = ("AGENT_RUN_ID", "ARTERIES_RUN_ID")
@@ -267,13 +268,9 @@ def log_event(
             event["payload"].setdefault(key, value)
     if _discard():
         return event
-    store = "db"
-    try:
-        _write_db_run(run)
-        _write_db_event(event)
-    except Exception:
-        _write_jsonl(run, event)
-        store = "jsonl"  # degradation signal: pulse health watches this
+    # agent_runs is still written while its readers are compared against
+    # pulse; agent_events is a projection of the journal line below (A4)
+    _db(lambda cur: _write_db_run(run), None)
     # journal_append's own parameters are source/kind/turn_id, and the payload is
     # spread into its **kwargs -- so a payload key with any of those names
     # raises "got multiple values for argument". Callers should not have to know
@@ -286,13 +283,14 @@ def log_event(
         if k in ("episode_id", "task_id"):
             continue
         journaled[f"payload_{k}" if k in _RESERVED else k] = v
-    journal_append(
-        source, event_type, turn_id=turn_id, store=store,
+    line = journal_append(
+        source, event_type, turn_id=turn_id, store="pulse",
         event_id=event["id"], run_id=run["run_id"],
         project_id=run["project_id"], repo=run["repo_path"],
         cli=run["cli"], agent_id=run["agent_id"],
         **journaled,
     )
+    projection.project(line)
     return event
 
 
@@ -645,54 +643,29 @@ def _write_db_run(run: dict[str, Any]) -> None:
         conn.commit()
 
 
-def _write_db_event(event: dict[str, Any]) -> None:
-    with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO arteries.agent_events
-                (id, run_id, project_id, turn_id, event_type, source, payload)
-            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
-            """,
-            (
-                event["id"],
-                event["run_id"],
-                event["project_id"],
-                event.get("turn_id"),
-                event["event_type"],
-                event["source"],
-                json.dumps(event.get("payload") or {}, default=str),
-            ),
-        )
-        conn.commit()
-
-
-def _write_jsonl(run: dict[str, Any], event: dict[str, Any]) -> None:
-    root = vascular_paths.repo_dir(run.get("repo_path") or Path.cwd(), "arteries") / "runs"
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{run['run_id']}.jsonl"
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"kind": "event", **event}, sort_keys=True, default=str) + "\n")
-
-
 def _recent_jsonl_events(project_id: str | None, limit: int, repo_path: str | Path | None = None) -> list[dict[str, Any]]:
-    roots = [vascular_paths.repo_dir(_repo(repo_path), "arteries") / "runs"]
+    """With the database down: the journal's last two day files, which hold
+    every event (agent_events is their projection, pulse P5), as event rows."""
     events: list[dict[str, Any]] = []
-    for root in roots:
-        if not root.exists():
+    for path in sorted(vascular_paths.journal_dir().glob("[0-9]*.ndjson"))[-2:]:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
             continue
-        for path in sorted(root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("kind") != "event":
-                    continue
-                if project_id and event.get("project_id") != project_id:
-                    continue
-                events.append(event)
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(e, dict) or e.get("source") not in ("arteries", "capillaries"):
+                continue
+            payload = e.get("payload") or {}
+            if project_id and payload.get("project_id") != project_id:
+                continue
+            events.append({"id": e.get("id"), "run_id": e.get("run_id"),
+                           "project_id": payload.get("project_id"), "turn_id": e.get("turn_id"),
+                           "event_type": e.get("kind"), "source": e.get("source"),
+                           "payload": payload, "created_at": e.get("ts", "")})
     events.sort(key=lambda e: e.get("created_at", ""), reverse=True)
     return events[:limit]
 

@@ -54,7 +54,7 @@ class TestRenderState:
                 "VALUES (%s, %s, 'arteries', 'tool.result', %s::jsonb)",
                 (self.run_id, self.project_id,
                  json.dumps({"tool": tool, "target": target, "failed": failed,
-                            "exit_code": exit_code})),
+                            "exit_code": exit_code, "session_id": self.session_id})),
             )
             conn.commit()
 

@@ -201,7 +201,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_project
 
 CREATE TABLE IF NOT EXISTS arteries.agent_events (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id          UUID REFERENCES arteries.agent_runs(id),
+    run_id          UUID,  -- no FK since 022: runs are events (pulse P5)
     project_id      TEXT NOT NULL,
     turn_id         TEXT,
     event_type      TEXT NOT NULL,

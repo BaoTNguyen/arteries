@@ -1,3 +1,4 @@
+import os
 import tempfile
 import pytest
 import unittest
@@ -10,8 +11,12 @@ from arteries import doctor
 class DoctorTests(unittest.TestCase):
     @pytest.mark.writes_events
     def test_check_works_with_jsonl_fallback_when_db_is_down(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(doctor.psycopg2, "connect", side_effect=RuntimeError("db down")):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(os.environ, {"EVENT_JOURNAL_DIR": tmp, "VASCULAR_HOME": tmp}):
+            os.environ.pop("ARTERIES_JOURNAL", None)
+            with patch.object(doctor.psycopg2, "connect", side_effect=RuntimeError("db down")), \
+                    patch.object(doctor.runlog.psycopg2, "connect", side_effect=RuntimeError("db down")), \
+                    patch.object(doctor.runlog.projection.psycopg2, "connect", side_effect=RuntimeError("db down")):
                 report = doctor.check("test-project", "agent-1", "codex", Path(tmp))
 
         self.assertTrue(report["fallback_ok"])

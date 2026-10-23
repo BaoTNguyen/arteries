@@ -174,12 +174,10 @@ def _capture_trust(cur, source: str, session_id: str | None) -> str | None:
         cur.execute(
             """SELECT EXISTS (
                    SELECT 1 FROM arteries.agent_events e
-                   LEFT JOIN arteries.agent_runs r ON r.id = e.run_id
-                   WHERE (e.payload->>'session_id' = %s
-                          OR r.metadata->>'session_id' = %s)
+                   WHERE e.payload->>'session_id' = %s
                      AND e.event_type = 'tool.result'
                      AND lower(e.payload->>'tool') = ANY(%s))""",
-            (session_id, session_id, list(trust.WEB_TOOLS)))
+            (session_id, list(trust.WEB_TOOLS)))
         return trust.UNTRUSTED if cur.fetchone()[0] else None
     except Exception as exc:
         # Not knowing is not "clean". A failed check marks the row untrusted:
@@ -585,8 +583,8 @@ def latest_packet(project_id: str, session_id: str | None = None) -> dict[str, A
 def tool_results_since(project_id: str, session_id: str | None,
                        since: Any, until: Any) -> list[dict[str, Any]]:
     """`tool.result` events (hooks/arteries-tool.js) in (since, until] for this
-    session. Joins through agent_runs because the event carries `run_id`, not
-    `session_id` -- `runlog._session_run` uses the same join.
+    session, by the payload's `session_id` (log_event stamps it; the old join
+    through agent_runs found fewer rows and is gone with the run table, A4).
 
     No session known -> no events, rather than every session's: a state field
     scoped to "everyone, ever" is not a continuity field."""
@@ -598,9 +596,8 @@ def tool_results_since(project_id: str, session_id: str | None,
                 """
                 SELECT e.payload, e.created_at
                 FROM arteries.agent_events e
-                JOIN arteries.agent_runs r ON r.id = e.run_id
                 WHERE e.project_id = %s
-                  AND r.metadata->>'session_id' = %s
+                  AND e.payload->>'session_id' = %s
                   AND e.event_type = 'tool.result'
                   AND e.created_at > %s AND e.created_at <= %s
                 ORDER BY e.created_at

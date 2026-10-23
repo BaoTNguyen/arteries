@@ -59,9 +59,10 @@ def session_trace(session: str) -> str:
 
 def journal_append(source: str, kind: str, *, turn_id: str | None = None,
                    event_id: str | None = None, run_id: str | None = None,
-                   **payload) -> None:
+                   **payload) -> dict | None:
+    """Write one event to the journal; return the line as written, or None."""
     if os.getenv("ARTERIES_JOURNAL", "").lower() == "off":
-        return
+        return None
     try:
         if kind == "turn.observed":
             origin = "agent" if trust.agent_run() else "operator"
@@ -79,7 +80,7 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
         # id and run_id ride at the top level so the drain can insert this row
         # idempotently without unpacking the payload; a given event_id wins over
         # pulse_emit's fresh uuid. Empty values stay absent, as they always were.
-        pulse_emit.emit(
+        return pulse_emit.emit(
             source, kind, vascular_paths.journal_dir(),
             vascular_paths.path("state", "pulse", "contexts"),
             id=event_id or None,
@@ -92,7 +93,7 @@ def journal_append(source: str, kind: str, *, turn_id: str | None = None,
             trace_id=trace_id,
         )
     except Exception:
-        pass
+        return None
 
 
 def drain(root: str | Path | None = None, delete: bool = True,
@@ -197,38 +198,6 @@ def _ingest_daily(base: Path, days: int | None = 2) -> int:
     return _store(rows) if rows else 0
 
 
-def _known_run_ids(ids: set) -> set:
-    """Which of these run ids exist in agent_runs. Empty on any failure, which
-    detaches every id -- the events still land, just without the join."""
-    try:
-        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-            cur.execute("SELECT id::text FROM arteries.agent_runs WHERE id::text = ANY(%s)",
-                        (list(ids),))
-            return {row[0] for row in cur.fetchall()}
-    except Exception:
-        return set()
-
-
-def _detach_unknown_runs(events: list[dict]) -> list[dict]:
-    """Blank any run_id that has no row in agent_runs.
-
-    agent_events.run_id is a foreign key, and execute_batch sends the whole
-    batch as one statement: one event naming a run that was never inserted --
-    or was pruned -- takes every other event in the drain down with it, and the
-    failure is swallowed as "stored 0". That is how 30,707 journal lines
-    reported nothing wrong while landing nothing.
-
-    An event whose run is gone is still an event. It loses the join, not its
-    place in the record.
-    """
-    ids = {e.get("run_id") for e in events if e.get("run_id")}
-    if not ids:
-        return events
-    known = _known_run_ids(ids)
-    return [e if not e.get("run_id") or str(e["run_id"]) in known
-            else {**e, "run_id": None} for e in events]
-
-
 def _payload(event: dict) -> dict:
     """The event's payload, with the fields heart keeps at top level folded in.
 
@@ -266,12 +235,23 @@ def _storable(event: object) -> dict | None:
     return event
 
 
+def project(event: dict | None) -> bool:
+    """Project one journal line into agent_events now, as the drain would.
+
+    agent_events is a projection of the journal (pulse P5, A4): its readers
+    (search, the session web check, the corpus cache, the compaction window)
+    need a fresh row, so the writer projects its own line at once and the
+    drain backfills whatever a database outage missed."""
+    row = _storable(event) if event else None
+    return row is not None and _store([row]) > 0
+
+
 def _store(events: list[dict]) -> int:
-    """Insert drained arteries events, skipping any already there."""
+    """Insert journal events into agent_events, skipping any already there.
+    No foreign key to agent_runs since migration 022: runs are events now."""
     if not events:
         return 0
     try:
-        events = _detach_unknown_runs(events)
         rows = [
             (e["id"], e.get("run_id"),
              (e.get("payload") or {}).get("project_id") or _PROJECT,

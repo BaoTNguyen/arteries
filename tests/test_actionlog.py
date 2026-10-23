@@ -79,7 +79,7 @@ class ActionlogTests(unittest.TestCase):
         observed = [e for e in self._journal_events() if e["kind"] == "turn.observed"]
         self.assertEqual(observed[0]["episode_id"], "ep-selftest-1")
         self.assertEqual(observed[0]["payload"]["message_chars"], 12)
-        self.assertEqual(observed[0]["payload"]["store"], "jsonl")
+        self.assertEqual(observed[0]["payload"]["store"], "pulse")
         self.assertEqual(observed[0]["payload"]["project_id"], "actionlog-selftest")
         self.assertEqual(observed[0]["payload"]["repo"], str(self.root / "repo"))
         self.assertIn("cli", observed[0]["payload"])
