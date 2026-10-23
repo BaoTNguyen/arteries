@@ -355,7 +355,9 @@ def fix(project: str) -> dict[str, Any]:
 
 
 def check(project: str, agent: str, cli: str, repo: Path) -> dict[str, Any]:
-    fallback = vascular_paths.repo_dir(repo, "arteries") / "runs"
+    # the journal is the record and agent_events its projection (pulse P5),
+    # so the write path that must work without a database is the journal
+    fallback = vascular_paths.journal_dir()
     checks: dict[str, Any] = {
         "project_id": project,
         "agent_id": str(agent),

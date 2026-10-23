@@ -191,24 +191,19 @@ class OneEventStreamNotTwo(unittest.TestCase):
             self.assertTrue(daily.exists(), "the daily file is the record, not a queue")
 
 
-class AMissingRunDoesNotTakeTheBatchDown(unittest.TestCase):
-    """agent_events.run_id is a foreign key and execute_batch sends the batch as
-    one statement, so a single event naming a pruned run failed the whole drain
-    -- swallowed by the except and reported as `stored: 0`. 30,707 lines sat
-    unread behind one bad id."""
+class RunIdsAreStoredAsGiven(unittest.TestCase):
+    """agent_events.run_id lost its FK in migration 022 (runs are events now,
+    pulse P5), so the drain no longer blanks ids it can't find in agent_runs."""
 
-    def test_an_unknown_run_is_detached_not_dropped(self):
-        events = [{"id": "a", "kind": "k", "run_id": "gone"},
-                  {"id": "b", "kind": "k", "run_id": "here"},
-                  {"id": "c", "kind": "k"}]
-        with patch.object(journal, "_known_run_ids", return_value={"here"}):
-            out = journal._detach_unknown_runs(events)
-        self.assertIsNone(out[0]["run_id"], "the event survives without the join")
-        self.assertEqual(out[1]["run_id"], "here")
-        self.assertEqual(len(out), 3)
+    def test_store_keeps_every_run_id(self):
+        sent = []
+        cur = unittest.mock.MagicMock()
+        conn = unittest.mock.MagicMock()
+        conn.__enter__.return_value.cursor.return_value.__enter__.return_value = cur
+        with patch.object(journal.psycopg2, "connect", return_value=conn), \
+                patch.object(journal.psycopg2.extras, "execute_batch",
+                             side_effect=lambda c, sql, rows: sent.extend(rows)):
+            journal._store([{"id": "a", "kind": "k", "run_id": "never-in-agent-runs"}])
+        self.assertEqual(sent[0][1], "never-in-agent-runs")
 
-    def test_nothing_to_check_is_not_a_database_round_trip(self):
-        events = [{"id": "a", "kind": "k"}]
-        with patch.object(journal, "_known_run_ids") as known:
-            self.assertEqual(journal._detach_unknown_runs(events), events)
-        known.assert_not_called()
+

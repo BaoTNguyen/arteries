@@ -28,51 +28,25 @@ class RunlogTests(unittest.TestCase):
         self.addCleanup(env.stop)
         os.environ.pop("ARTERIES_REPO", None)
 
-    def test_log_event_falls_back_to_repo_jsonl(self):
-        old_cwd = Path.cwd()
-        with tempfile.TemporaryDirectory() as tmp:
-            os.chdir(tmp)
-            try:
-                with patch.object(runlog.psycopg2, "connect", side_effect=RuntimeError("db down")):
-                    event = runlog.log_event(
-                        "turn.observed",
-                        "arteries",
-                        {"not_json": Mock(name="not-json")},
-                        project_id="test-project",
-                    )
-
-                path = Path(".vascular") / "arteries" / "runs" / f"{event['run_id']}.jsonl"
-                self.assertTrue(path.exists())
-                row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
-                self.assertEqual(row["event_type"], "turn.observed")
-                self.assertEqual(row["project_id"], "test-project")
-                self.assertIn("not-json", row["payload"]["not_json"])
-            finally:
-                os.chdir(old_cwd)
-
-    def test_start_run_and_summary_use_repo_fallback(self):
-        old_cwd = Path.cwd()
-        with tempfile.TemporaryDirectory() as tmp:
-            os.chdir(tmp)
-            try:
-                with patch.object(runlog.psycopg2, "connect", side_effect=RuntimeError("db down")):
-                    run = runlog.start_run(project_id="test-project", agent_id="agent-1", cli="codex")
-                    runlog.log_event(
-                        "memory.ephemeral.extracted",
-                        "arteries",
-                        {"count": 2},
-                        project_id="test-project",
-                    )
-                    summary = runlog.summarize("test-project", repo_path=tmp)
-
-                current = json.loads(Path(".vascular/arteries/current-run.json").read_text(encoding="utf-8"))
-                self.assertEqual(current["run_id"], run["run_id"])
-                self.assertEqual(current["cli"], "codex")
-                self.assertEqual(summary["latest_run_id"], run["run_id"])
-                self.assertEqual(summary["extracted_total"], 2)
-                self.assertEqual(summary["counts_by_type"]["run.started"], 1)
-            finally:
-                os.chdir(old_cwd)
+    def test_log_event_journals_with_the_db_down(self):
+        # pulse P5 (A4): the journal line is the record; agent_events is its
+        # projection and the drain backfills it, so no repo JSONL fallback
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(os.environ, {"EVENT_JOURNAL_DIR": tmp, "VASCULAR_HOME": tmp}), \
+                patch.object(runlog.psycopg2, "connect", side_effect=RuntimeError("db down")), \
+                patch.object(runlog, "_write_current_run"):
+            os.environ.pop("ARTERIES_JOURNAL", None)
+            runlog._resolved.clear()  # a run cached by an earlier test keeps its project
+            event = runlog.log_event("turn.observed", "arteries",
+                                     {"not_json": Mock(name="not-json")}, project_id="test-project")
+            lines = [json.loads(l) for f in Path(tmp).glob("*.ndjson")
+                     for l in f.read_text().splitlines()]
+        row = next(l for l in lines if l["kind"] == "turn.observed")
+        self.assertEqual(row["id"], event["id"])
+        self.assertEqual(row["payload"]["project_id"], "test-project")
+        self.assertEqual(row["payload"]["store"], "pulse")
+        self.assertIn("not-json", row["payload"]["not_json"])
+        self.assertFalse((Path(tmp) / ".vascular").exists())
 
 
 class RunlogDiscardTests(unittest.TestCase):
@@ -82,13 +56,13 @@ class RunlogDiscardTests(unittest.TestCase):
 
     def test_discard_writes_nothing(self):
         with patch.dict(os.environ, {"ARTERIES_RUNLOG": "discard"}), \
-                patch.object(runlog, "_write_db_event") as db_event, \
-                patch.object(runlog, "_write_jsonl") as jsonl, \
+                patch.object(runlog, "_write_db_run") as db_run, \
+                patch.object(runlog.projection, "project") as project, \
                 patch.object(runlog, "journal_append") as journal:
             event = runlog.log_event("turn.observed", "test", {"message_preview": "hi"})
 
-        db_event.assert_not_called()
-        jsonl.assert_not_called()
+        db_run.assert_not_called()
+        project.assert_not_called()
         journal.assert_not_called()
         self.assertEqual(event["event_type"], "turn.observed")
 
@@ -99,19 +73,17 @@ class RunlogDiscardTests(unittest.TestCase):
 
         path.assert_not_called()
 
-    def test_without_discard_the_write_is_attempted(self):
+    def test_without_discard_the_line_is_journaled_and_projected(self):
         env = {k: v for k, v in os.environ.items() if k != "ARTERIES_RUNLOG"}
-        # the file writers are stubbed too: unstubbed, they create .vascular/arteries/runs
-        # in the checkout, which the sandbox verifier mounts read-only
         with patch.dict(os.environ, env, clear=True), \
                 patch.object(runlog, "_write_db_run"), \
-                patch.object(runlog, "_write_db_event") as db_event, \
-                patch.object(runlog, "_write_jsonl"), \
                 patch.object(runlog, "_write_current_run"), \
-                patch.object(runlog, "journal_append"):
+                patch.object(runlog, "journal_append", return_value={"id": "x"}) as journal, \
+                patch.object(runlog.projection, "project") as project:
             runlog.log_event("turn.observed", "test", {})
 
-        db_event.assert_called_once()
+        journal.assert_called_once()
+        project.assert_called_once_with({"id": "x"})
 
     def test_session_id_is_stamped_from_the_environment(self):
         # the finer key the packet filters on -- without it, concurrent sessions

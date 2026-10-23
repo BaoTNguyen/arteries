@@ -47,3 +47,53 @@ def test_discard_emits_nothing(monkeypatch):
     with patch.object(runlog, "journal_append") as journal:
         runlog.end_run("run-1")
     journal.assert_not_called()
+
+
+def _ev(kind, run_id, **payload):
+    return {"kind": kind, "run_id": run_id, "payload": payload}
+
+
+def _pulse(monkeypatch, pages):
+    """pages: {(kind, run, trace): events}; anything else answers []."""
+    calls = []
+
+    def events(**kw):
+        calls.append(kw)
+        return pages.get((kw.get("kind"), kw.get("run"), kw.get("trace")), [])
+
+    monkeypatch.setattr(runlog.pulse_read, "events", events)
+    return calls
+
+
+def test_a_run_ended_on_pulse_is_closed_without_the_table(monkeypatch):
+    _pulse(monkeypatch, {("run.ended", "r1", None): [_ev("run.ended", "r1", reason="x")]})
+    monkeypatch.setattr(runlog, "_db", lambda *a, **k: (_ for _ in ()).throw(AssertionError("table read")))
+    assert runlog._run_is_open("r1") is False
+
+
+def test_no_run_ended_falls_through_to_the_table(monkeypatch):
+    _pulse(monkeypatch, {})
+    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: "table says")
+    assert runlog._run_is_open("r1") == "table says"
+
+
+def test_the_sessions_newest_open_run_comes_from_pulse(monkeypatch):
+    trace = runlog.session_trace("sess-A")
+    full = dict(started_at="2026-10-23T00:00:00+00:00", metadata={"kind": "interactive"},
+                project_id="p", repo="/r", cli="claude", agent_id="a")
+    _pulse(monkeypatch, {
+        ("run.*", None, trace): [_ev("run.resumed", "new", **full), _ev("run.started", "new", **full),
+                                 _ev("run.started", "old", **full)],
+        ("run.ended", "new", None): [_ev("run.ended", "new")],
+    })
+    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: True)  # table: still open
+    got = runlog._session_run("sess-A", open_only=True)
+    assert got["id"] == "old" and got["metadata"] == {"kind": "interactive"}
+    assert runlog._session_run("sess-A", open_only=False)["id"] == "new"
+
+
+def test_a_session_whose_events_predate_the_record_asks_the_table(monkeypatch):
+    trace = runlog.session_trace("sess-A")
+    _pulse(monkeypatch, {("run.*", None, trace): [_ev("run.started", "r", store="db")]})
+    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: {"id": "from-table"})
+    assert runlog._session_run("sess-A")["id"] == "from-table"
