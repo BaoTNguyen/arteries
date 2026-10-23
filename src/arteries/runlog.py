@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -544,7 +544,17 @@ def sweep_runs() -> list[str]:
     path of every log_event, and staleness only matters when a new session is
     about to decide what to join. A machine left off for a week sweeps clean the
     moment any CLI opens a session.
+
+    Decided from pulse (pulse P5, A4); the table's SQL sweep is the fallback
+    when pulse can't answer.
     """
+    idle = _idle_runs_pulse()
+    if idle is not None:
+        for run_id in idle:
+            _db(lambda cur, rid=run_id: _close_row(cur, rid, "idle_sweep"), None)
+            _emit_ended(run_id, "idle_sweep")
+        return idle
+
     def work(cur):
         cur.execute(
             f"""
@@ -569,6 +579,70 @@ def sweep_runs() -> list[str]:
     for run_id in closed:
         _emit_ended(run_id, "idle_sweep")
     return closed
+
+
+_UNITS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 604800}
+
+
+def _seconds(interval: str) -> float:
+    """'1 hour', '48 hours', '30 minutes' -> seconds (the IDLE_* env form)."""
+    n, unit = interval.split()
+    return float(n) * _UNITS[unit.rstrip("s")]
+
+
+def _idle_runs_pulse(now: datetime | None = None) -> list[str] | None:
+    """Open runs idle past their threshold, from pulse; None if pulse can't
+    answer. Open = opened by run.started/run.resumed in the last 30 days, or
+    still open in the agent_runs archive, and never run.ended. Idle is
+    measured from the run's newest event, as the SQL sweep measured it from
+    its newest agent_events row."""
+    now = now or datetime.now(timezone.utc)
+    since = (now - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+    page = pulse_read.events(kind="run.*", source="arteries", order="desc", limit=5000)
+    if page is None:
+        return None
+    ended = {e.get("run_id") for e in page if e.get("kind") == "run.ended"}
+    kinds: dict[str, str] = {}
+    for e in page:
+        p = e.get("payload") or {}
+        if e.get("kind") in ("run.started", "run.resumed") and e.get("ts", "") >= since[:19] \
+                and e.get("run_id") and "metadata" in p:
+            kinds.setdefault(e["run_id"], (p.get("metadata") or {}).get("kind", "interactive"))
+
+    def table(cur):
+        cur.execute("SELECT id::text, metadata->>'kind', started_at FROM arteries.agent_runs "
+                    "WHERE ended_at IS NULL")
+        return cur.fetchall()
+
+    started: dict[str, datetime] = {}
+    for run_id, kind, started_at in _db(table, []):
+        kinds.setdefault(run_id, kind or "interactive")
+        started[run_id] = started_at
+    idle = []
+    for run_id, kind in kinds.items():
+        if run_id in ended:
+            continue
+        newest = pulse_read.events(run=run_id, order="desc", limit=1)
+        if newest is None:
+            return None
+        last = datetime.fromisoformat(newest[0]["ts"]) if newest else started.get(run_id)
+        limit = _seconds(IDLE_EPISODE if kind == "episode" else IDLE_INTERACTIVE)
+        if last is not None and (now - last).total_seconds() > limit:
+            idle.append(run_id)
+    return idle
+
+
+def _close_row(cur, run_id: str, reason: str) -> None:
+    """Close the table row too while agent_runs is still written."""
+    cur.execute(
+        """
+        UPDATE arteries.agent_runs
+        SET ended_at = now(),
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('end_reason', %s)
+        WHERE id = %s AND ended_at IS NULL
+        """,
+        (reason, run_id),
+    )
 
 
 def _repo(repo_path: str | Path | None = None) -> Path:

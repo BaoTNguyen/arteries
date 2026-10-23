@@ -97,3 +97,41 @@ def test_a_session_whose_events_predate_the_record_asks_the_table(monkeypatch):
     _pulse(monkeypatch, {("run.*", None, trace): [_ev("run.started", "r", store="db")]})
     monkeypatch.setattr(runlog, "_db", lambda work, default, **k: {"id": "from-table"})
     assert runlog._session_run("sess-A")["id"] == "from-table"
+
+
+def test_idle_runs_from_pulse(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+    meta = lambda kind: {"started_at": "x", "metadata": {"kind": kind}}  # noqa: E731
+    page = [
+        {"kind": "run.ended", "run_id": "ended", "ts": "2026-10-20T00:00:00+00:00", "payload": {}},
+        {"kind": "run.started", "run_id": "ended", "ts": "2026-10-19T00:00:00+00:00", "payload": meta("interactive")},
+        {"kind": "run.started", "run_id": "quiet-ep", "ts": "2026-10-23T09:00:00+00:00", "payload": meta("episode")},
+        {"kind": "run.started", "run_id": "live", "ts": "2026-10-22T00:00:00+00:00", "payload": meta("interactive")},
+    ]
+    newest = {"quiet-ep": "2026-10-23T10:00:00+00:00",   # 2h quiet, episode: 1h limit
+              "live": "2026-10-23T11:00:00+00:00",       # 1h quiet, interactive: 48h
+              "archived": "2026-10-20T00:00:00+00:00"}   # 3.5 days, from the table
+
+    def events(**kw):
+        if kw.get("kind") == "run.*":
+            return page
+        return [{"ts": newest[kw["run"]]}] if kw["run"] in newest else []
+
+    monkeypatch.setattr(runlog.pulse_read, "events", events)
+    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: [("archived", "interactive", None)])
+    assert sorted(runlog._idle_runs_pulse(now)) == ["archived", "quiet-ep"]
+
+
+def test_sweep_falls_back_to_sql_when_pulse_is_down(monkeypatch):
+    monkeypatch.setattr(runlog.pulse_read, "events", lambda **kw: None)
+    monkeypatch.setattr(runlog, "_db", lambda work, default, **k: ["sql-closed"])
+    with patch.object(runlog, "journal_append") as journal:
+        assert runlog.sweep_runs() == ["sql-closed"]
+    assert journal.call_args.kwargs["run_id"] == "sql-closed"
+
+
+def test_interval_strings():
+    assert runlog._seconds("1 hour") == 3600
+    assert runlog._seconds("48 hours") == 172800
+    assert runlog._seconds("30 minutes") == 1800
