@@ -2,8 +2,9 @@
 
 Events (runlog) record what happened. Decisions record the counterfactual —
 the available actions, the choice, and its cost — which is what RL credit
-assignment needs. Postgres when available, repo-local JSONL fallback
-(.vascular/arteries/decisions/), always teed to the heart event spine.
+assignment needs. Each decision is a `decision.<type>` event on pulse; since
+pulse P5 that event is the record. arteries.decisions and the repo-local
+JSONL files (.vascular/arteries/decisions/) are read-only history.
 
 Episode/task identity arrives via env (set by heart per episode):
     ARTERIES_EPISODE_ID
@@ -64,10 +65,10 @@ def log_decision(
         "metadata": {**(metadata or {}), **({"task_id": task_id()} if task_id() else {})},
         "created_at": _now_iso(),
     }
-    store = _persist(record, "decision", run, repo_path)
-    # The whole record rides on the event (pulse P5, DIRECTION A3), keyed by the
-    # decision's own id, so the table can be checked against pulse row for row
-    # and then retired. Observations are small, so inline rather than artifacts.
+    _note_episode(record)
+    # The event is the record (pulse P5, DIRECTION A3): keyed by the decision's
+    # own id, observation inline because it is small. arteries.decisions is a
+    # read-only archive since it matched pulse row for row (migration 021).
     journal_append(
         "arteries",
         f"decision.{decision_type}",
@@ -76,7 +77,7 @@ def log_decision(
         run_id=record["run_id"],
         chosen=chosen_action,
         available=available_actions,
-        store=store,
+        store="pulse",
         **({"cost": cost} if cost else {}),
         **({"observation": record["observation"]} if record["observation"] else {}),
         **({"metadata": record["metadata"]} if record["metadata"] else {}),
@@ -396,40 +397,17 @@ def _run(repo_path: str | Path | None) -> dict[str, Any]:
         }
 
 
-def _persist(record: dict, kind: str, run: dict, repo_path: str | Path | None) -> str:
-    """Returns where the write landed: db | jsonl | lost (degradation signal)."""
+def _note_episode(record: dict) -> None:
+    """Best-effort: the episode row is still a table, and a decision can be
+    the first thing to carry an episode id."""
+    if not record.get("episode_id"):
+        return
     try:
-        _db_insert_decision(record)
-        return "db"
+        with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
+            _upsert_episode(cur, record)
+            conn.commit()
     except Exception:
-        try:
-            _write_jsonl(run, kind, record, repo_path)
-            return "jsonl"
-        except Exception:
-            return "lost"  # the journal tee still fires; never break the caller
-
-
-def _db_insert_decision(record: dict) -> None:
-    with psycopg2.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
-        _upsert_episode(cur, record)
-        cur.execute(
-            """
-            INSERT INTO arteries.decisions
-                (id, episode_id, run_id, turn_id, project_id, agent_id, decision_type,
-                 observation, available_actions, chosen_action, cost, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s::jsonb)
-            """,
-            (
-                record["id"], record["episode_id"], record["run_id"], record["turn_id"],
-                record["project_id"], record["agent_id"], record["decision_type"],
-                json.dumps(record["observation"], default=str),
-                json.dumps(record["available_actions"], default=str),
-                record["chosen_action"],
-                json.dumps(record["cost"], default=str),
-                json.dumps(record["metadata"], default=str),
-            ),
-        )
-        conn.commit()
+        pass
 
 
 def _upsert_episode(cur, record: dict) -> None:
@@ -448,16 +426,6 @@ def _upsert_episode(cur, record: dict) -> None:
             task_id(), record.get("run_id"),
         ),
     )
-
-
-def _write_jsonl(run: dict, kind: str, record: dict, repo_path: str | Path | None) -> None:
-    root = vascular_paths.repo_dir(
-        repo_path or run.get("repo_path") or os.getenv("ARTERIES_REPO") or Path.cwd(), "arteries"
-    ) / "decisions"
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"kind": kind, **record}, sort_keys=True, default=str) + "\n")
 
 
 def _recent_jsonl(

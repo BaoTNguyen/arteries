@@ -56,17 +56,14 @@ class ActionlogTests(unittest.TestCase):
         self.assertEqual(rec["episode_id"], "ep-selftest-1")
         self.assertEqual(rec["metadata"]["task_id"], "task-selftest")
 
-        jsonl = list((self.root / "repo" / ".vascular" / "arteries" / "decisions").glob("*.jsonl"))
-        self.assertEqual(len(jsonl), 1)
-
-        rows = actionlog.recent_decisions(episode="ep-selftest-1")
-        self.assertEqual(rows[0]["chosen_action"], "abstain")
+        # the event is the record now: nothing falls back to a repo file
+        self.assertFalse((self.root / "repo" / ".vascular" / "arteries" / "decisions").exists())
 
         journaled = self._journal_events()
         gate = [e for e in journaled if e["kind"] == "decision.retrieval.gate"]
         self.assertEqual(gate[0]["episode_id"], "ep-selftest-1")
         self.assertEqual(gate[0]["payload"]["chosen"], "abstain")
-        self.assertEqual(gate[0]["payload"]["store"], "jsonl")  # DB forced down
+        self.assertEqual(gate[0]["payload"]["store"], "pulse")
         # the whole record rides along, keyed by the decision id (pulse P5)
         self.assertEqual(gate[0]["id"], rec["id"])
         self.assertEqual(gate[0]["payload"]["observation"], {"reason": "test"})
