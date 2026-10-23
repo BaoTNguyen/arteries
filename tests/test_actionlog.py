@@ -67,6 +67,12 @@ class ActionlogTests(unittest.TestCase):
         self.assertEqual(gate[0]["episode_id"], "ep-selftest-1")
         self.assertEqual(gate[0]["payload"]["chosen"], "abstain")
         self.assertEqual(gate[0]["payload"]["store"], "jsonl")  # DB forced down
+        # the whole record rides along, keyed by the decision id (pulse P5)
+        self.assertEqual(gate[0]["id"], rec["id"])
+        self.assertEqual(gate[0]["payload"]["observation"], {"reason": "test"})
+        self.assertEqual(gate[0]["payload"]["metadata"], rec["metadata"])
+        self.assertEqual(gate[0]["payload"]["created_at"], rec["created_at"])
+        self.assertEqual(gate[0]["payload"]["project_id"], rec["project_id"])
 
     @pytest.mark.writes_events
 

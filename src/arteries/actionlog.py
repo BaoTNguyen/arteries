@@ -65,14 +65,24 @@ def log_decision(
         "created_at": _now_iso(),
     }
     store = _persist(record, "decision", run, repo_path)
+    # The whole record rides on the event (pulse P5, DIRECTION A3), keyed by the
+    # decision's own id, so the table can be checked against pulse row for row
+    # and then retired. Observations are small, so inline rather than artifacts.
     journal_append(
         "arteries",
         f"decision.{decision_type}",
         turn_id=turn_id,
+        event_id=record["id"],
+        run_id=record["run_id"],
         chosen=chosen_action,
         available=available_actions,
         store=store,
         **({"cost": cost} if cost else {}),
+        **({"observation": record["observation"]} if record["observation"] else {}),
+        **({"metadata": record["metadata"]} if record["metadata"] else {}),
+        project_id=record["project_id"],
+        agent_id=record["agent_id"],
+        created_at=record["created_at"],
     )
     return record
 
