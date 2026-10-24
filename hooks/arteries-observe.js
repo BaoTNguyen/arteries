@@ -12,6 +12,7 @@
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const path = require('path');
+const wiredRoot = require('./wired');
 
 const isCopilot = Boolean(process.env.COPILOT_PLUGIN_DATA);
 const isCodex = !isCopilot && Boolean(process.env.PLUGIN_DATA);
@@ -48,7 +49,8 @@ process.stdin.on('end', () => {
       (Array.isArray(data.workspace_roots) &&
        data.workspace_roots.find(r => typeof r === 'string' && r)) || '';
 
-    if (!prompt || !cwd) {
+    const repo = wiredRoot(cwd);
+    if (!prompt || !repo) {
       writeOutput('');
       return;
     }
@@ -63,6 +65,8 @@ process.stdin.on('end', () => {
     const env = { ...process.env };
     env.ARTERIES_CLI = env.ARTERIES_CLI || (data.cursor_version ? 'cursor' : 'claude');
     env.ARTERIES_EVENT_CWD = cwd;
+    env.ARTERIES_REPO = repo;
+    wiredRoot.identity(env, repo, data);
     const sessionId = data.session_id || data.conversation_id;
     if (sessionId) env.ARTERIES_SESSION_ID = String(sessionId);
     else delete env.ARTERIES_SESSION_ID;

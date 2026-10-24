@@ -21,6 +21,7 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const wiredRoot = require('./wired');
 
 function read(stream) {
   try { return JSON.parse(fs.readFileSync(0, 'utf8') || '{}'); }
@@ -50,13 +51,16 @@ if (!failed && !mutating && !web) process.exit(0);
 const cwd = (typeof event.cwd === 'string' && event.cwd) ||
   (Array.isArray(event.workspace_roots) &&
    event.workspace_roots.find(r => typeof r === 'string' && r)) || '';
-if (!cwd) process.exit(0);
+const repo = wiredRoot(cwd);
+if (!repo) process.exit(0);
 
 const sessionId = event.session_id || event.conversation_id || undefined;
 const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 const env = { ...process.env };
 env.ARTERIES_CLI = env.ARTERIES_CLI || (event.cursor_version ? 'cursor' : 'claude');
 env.ARTERIES_EVENT_CWD = cwd;
+env.ARTERIES_REPO = repo;
+wiredRoot.identity(env, repo, event);
 if (sessionId) env.ARTERIES_SESSION_ID = String(sessionId);
 else delete env.ARTERIES_SESSION_ID;
 const srcPath = path.join(pluginRoot, 'src');

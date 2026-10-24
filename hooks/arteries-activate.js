@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const wiredRoot = require('./wired');
 
 const isCopilot = Boolean(process.env.COPILOT_PLUGIN_DATA);
 const isCodex = !isCopilot && Boolean(process.env.PLUGIN_DATA);
@@ -46,8 +47,19 @@ function writeOutput(output) {
   process.stdout.write(output);
 }
 
+// Unwired folder: say nothing, or the model is told memory is on where it is not.
+function sessionCwd() {
+  if (process.stdin.isTTY) return '';
+  try {
+    const event = JSON.parse(fs.readFileSync(0, 'utf8').replace(/^\uFEFF/, '') || '{}');
+    return (typeof event.cwd === 'string' && event.cwd) ||
+      (Array.isArray(event.workspace_roots) &&
+       event.workspace_roots.find(r => typeof r === 'string' && r)) || '';
+  } catch { return ''; }
+}
+
 try {
-  writeOutput(context);
+  if (wiredRoot(sessionCwd())) writeOutput(context);
 } catch (e) {
   // Silent fail — don't block session start
 }
