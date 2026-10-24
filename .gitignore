@@ -231,3 +231,7 @@ __marimo__/
 .compaction-corpus/
 .migrate-backups/
 .pi/extensions/arteries.ts
+
+# Private, never committed anywhere: agent reasoning traces and compaction
+# transcripts (DIRECTION §14).
+*reasoning_trace*
