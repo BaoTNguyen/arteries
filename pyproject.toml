@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "arteries"
 version = "0.1.0"
 description = "Always-on memory layer for prompt retrieval"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 # capillaries isn't on PyPI, so a bare name in `dependencies` would end up in
 # the package metadata and resolve to a stranger's package for anything that
 # reads it. It lives in the `dev` group below instead, where [tool.uv.sources]
