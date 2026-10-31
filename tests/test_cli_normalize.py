@@ -58,8 +58,9 @@ class CliNormalizeTests(unittest.TestCase):
         hooks.json's own matcher string ("startup|resume|clear|compact") is
         written against. Without reading it, the compact-specific SessionStart
         hook (setup_cli.py's `_claude_hooks`) canonicalizes identically to
-        plain startup, and planning/compaction_v3.md's renderer split never
-        fires for the CLI most sessions actually run."""
+        plain startup, and the renderer split
+        (docs/adr/2026-09-15-compaction-renderer-split.md) never fires for the
+        CLI most sessions actually run."""
         event = normalize(
             {"hook_event_name": "SessionStart", "source": "compact",
              "session_id": "s1"},

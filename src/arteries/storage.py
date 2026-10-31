@@ -230,7 +230,7 @@ def get_persistent_by_kind(
     """Live persistent rows of the given kinds, newest first. Enumerated, not
     ranked -- for continuity-packet fields (constraints, decisions) that ask
     "what do we hold of this kind", not "what matches this query"
-    (planning/compaction_v3.md §3)."""
+    (docs/adr/2026-09-15-compaction-renderer-split.md)."""
     with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             SCOPE_CTE + """
@@ -527,14 +527,14 @@ def record_packet(project_id: str, member_ids: list[str],
 
     The chaining columns (`previous_id`, `covers_from`/`covers_to`,
     `resume_from`, `body`) are unused until the renderer split
-    (planning/compaction_v3.md §2) writes real values -- `record_packet` just
+    (docs/adr/2026-09-15-compaction-renderer-split.md) writes real values -- `record_packet` just
     accepts and stores them from here on so that landing costs no second
     migration and no signature change.
 
     Best effort: a packet that fails to record itself is a packet the next turn
     repeats, which is the old behaviour and not worth failing a turn over.
 
-    A state packet (planning/compaction_v3.md §2) has no ranked members -- its
+    A state packet (docs/adr/2026-09-15-compaction-renderer-split.md) has no ranked members -- its
     fields are enumerated, not selected -- so `body` alone is enough reason to
     record the row; chaining needs the row to exist even when member_ids is
     empty.
@@ -561,7 +561,7 @@ def record_packet(project_id: str, member_ids: list[str],
 def latest_packet(project_id: str, session_id: str | None = None) -> dict[str, Any] | None:
     """Most recent packet for this (project, session), or None on a cold
     start. `covers_to` is what the next packet's `covers_from` chains against
-    (planning/compaction_v3.md §5)."""
+    (docs/adr/2026-09-15-compaction-never-drops-silently.md)."""
     session_id = session_id if session_id is not None else _env_session_id()
     if not session_id:
         return None
@@ -613,7 +613,7 @@ def tool_results_since(project_id: str, session_id: str | None,
 def recent_supersede_edges(project_id: str, since: Any, limit: int = 20) -> list[dict[str, Any]]:
     """`supersedes`/`contradicts` edges over persistent rows, written at
     promotion (compile.py) for previous sessions -- detector 1 of
-    planning/compaction_v3.md §4.2. `since` bounds it to edges new since the
+    docs/adr/2026-09-15-retraction-detectors.md. `since` bounds it to edges new since the
     last packet, which is what makes a retraction line render once rather than
     resurfacing every compaction for the rest of the project's life."""
     try:
@@ -645,7 +645,7 @@ def near_duplicate_ephemeral_pairs(project_id: str, session_id: str | None,
                                    limit: int = 20) -> list[dict[str, Any]]:
     """Pairs of this session's ephemeral atoms similar enough that a differing
     literal between them is a value overwrite rather than two unrelated facts
-    (planning/compaction_v3.md §4.2 detector 3). Cosine in SQL rather than
+    (docs/adr/2026-09-15-retraction-detectors.md). Cosine in SQL rather than
     fetching embeddings into Python -- pgvector already does this comparison
     for every other ranked query here."""
     if not session_id:

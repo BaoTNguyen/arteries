@@ -453,7 +453,7 @@ message="${{1:-context-pressure}}"
 # never wired to anything but a compact-triggered hook, and "$message" is a
 # descriptive label ("claude-compact", "codex-precompact") that _canonical_event
 # does not recognise, so passing it here silently defeated the renderer split
-# (planning/compaction_v3.md §2) for every CLI whose own payload also fails to
+# (docs/adr/2026-09-15-compaction-renderer-split.md) for every CLI whose own payload also fails to
 # self-report a recognisable event name.
 eval "$(printf '%s' "$event_json" | python3 -m arteries.cli_normalize --cli "$ARTERIES_CLI" --event compact --project "$ARTERIES_PROJECT" --agent "$ARTERIES_AGENT_ID" --format shell)"
 printf '%s' "$event_json" | python3 -m arteries.packet --format "$format" --message "$message" --stdin-json --budget "${{ARTERIES_PACKET_BUDGET:-20000}}"
@@ -901,7 +901,7 @@ def _codex_compact_prompt() -> str:
     what `art doctor` compares against to notice drift.
     """
     # The compaction layout, not the retrieval one: this prompt only ever fires on
-    # compaction, and the renderer split (planning/compaction_v3.md §2) gave
+    # compaction, and the renderer split (docs/adr/2026-09-15-compaction-renderer-split.md) gave
     # that path its own layout.
     sections = ", ".join(STATE_SECTION_TITLES[:-1]) + f", and {STATE_SECTION_TITLES[-1]}"
     return f"""When compacting this coding session, preserve continuity for Arteries.

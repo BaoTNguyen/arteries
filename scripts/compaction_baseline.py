@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One-off measurement: how often does a session redo work a packet already
-surfaced. Run before any v3 change lands (planning/compaction_v3.md §8) --
+surfaced. Run before any v3 change lands (docs/adr/2026-09-15-compaction-renderer-split.md) --
 v1 and v3 packets aren't comparable by content, so this ratio, re-measured on
 the same kind of sessions after v3 ships, is the only valid before/after.
 
