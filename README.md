@@ -1,12 +1,12 @@
 # arteries
 
-Arteries is the memory and tracing layer around capillaries.
+Arteries is the memory and tracing layer for coding CLIs.
 
-Capillaries decides whether a prompt from your private corpus should be used. Arteries gives that decision a memory frame, records what happened, and leaves enough trace data that you can later answer practical questions like:
+On each turn it builds a memory frame, asks the stack's prompt retrieval whether a prompt from your private corpus fits, records what happened, and leaves enough trace data that you can later answer practical questions like:
 
 - What did the agent observe in this repo?
 - Which memories did it extract?
-- Which prompt did capillaries retrieve?
+- Which prompt was retrieved?
 - What gate match caused retrieval to open?
 - What user message triggered it?
 - Did Codex, Pi, or Claude produce the event?
@@ -15,18 +15,7 @@ The goal is not to make another agent. The goal is to make the agents you alread
 
 ## Where it sits in the stack
 
-Arteries is the memory and tracing layer in a six-repo agent stack:
-
-```text
-capillaries  prompt/skill retrieval
-arteries     memory + trace substrate               <- this repo
-heart        orchestration + environment + verify
-plexus       goal decomposition + acceptance loop
-marrow       RL training on heart's episodes
-pulse        event journal: collection, store, queries
-```
-
-Capillaries decides which prompt fits. Arteries gives that decision a memory frame and records what happened. Heart runs coding agents that ride arteries' hooks; marrow later trains on the decision ledger arteries leaves behind. Dependencies point one way: arteries imports capillaries, never the reverse.
+Arteries is part of [vascular](https://github.com/BaoTNguyen/vascular), the monorepo that holds the whole stack in one clone. It needs the stack's prompt-retrieval package beside it, which vascular provides; vascular's README describes what passes between them.
 
 ## What sets it apart
 
@@ -46,7 +35,7 @@ Coding CLIs forget too much between sessions, and each CLI has its own hook or e
 Arteries gives those tools one shared local memory path:
 
 ```text
-CLI hook or extension -> arteries -> capillaries -> private prompt corpus
+CLI hook or extension -> arteries -> prompt retrieval -> private prompt corpus
                          |
                          +-> Postgres memory and run logs
                          +-> repo-local fallback logs
@@ -56,24 +45,12 @@ It handles four jobs:
 
 1. Observe each user turn that reaches the hook.
 2. Extract short-lived project memories from that turn.
-3. Build the `MemoryFrame` that capillaries uses for gate and retrieval decisions.
+3. Build the `MemoryFrame` that retrieval uses for gate and retrieval decisions.
 4. Log runs, gate decisions, retrieved prompts, compaction packets, and memory compilation.
 
-Capillaries remains the retrieval engine. Arteries owns the runtime layer around it.
+Retrieval stays in its own package. Arteries owns the runtime layer around it.
 
 ## How the pieces fit
-
-Keep the dependency direction one-way:
-
-```text
-agent CLI hook -> arteries -> capillaries
-```
-
-Capillaries owns:
-
-- prompt gating
-- prompt search and reranking
-- private prompt corpus access
 
 Arteries owns:
 
@@ -86,38 +63,17 @@ Arteries owns:
 - central trace output
 - run/event telemetry
 
-The two repos should usually sit next to each other:
-
-```text
-~/code/arteries
-~/code/capillaries
-```
-
-The scripts assume that sibling layout unless you pass `--capillaries-root`.
-`~/code` stands in for wherever you clone; `git clone --recursive
-https://github.com/BaoTNguyen/vascular` gives you the same layout in one step.
-
-The two import each other, in opposite directions and at different weights.
-Arteries imports capillaries' retrieval entry points (`find`, `gate`);
-capillaries imports exactly one arteries module, `arteries.memory_types` —
-stdlib dataclasses, no psycopg2, no database. So capillaries needs arteries on
-the path, but never touches its storage. `uv sync` here installs both; from
-capillaries' side, add arteries with `uv pip install -e ../arteries`.
-
-The contract types live with the producer on purpose. They were in capillaries
-until arteries could not define its own output without importing the consumer
-of it — which meant retrieval could not be swapped out or removed without
-taking the memory contract with it.
+Prompt gating, search, reranking and corpus access are not here; they belong to the retrieval package. The scripts expect it beside this checkout, as vascular lays it out, unless you pass `--capillaries-root`.
 
 ## Services it expects
 
 For memory and retrieval to work, keep these available locally:
 
 - PostgreSQL with `pgvector`
-- the `capillaries` database
+- the shared prompt database (`DB_NAME`, default `capillaries`)
 - an OpenAI-compatible embedding endpoint, usually `http://127.0.0.1:8003/v1/embeddings`
 - an OpenAI-compatible chat/completions endpoint, usually `http://127.0.0.1:8001/v1/chat/completions`
-- capillaries importable (see [Development environment](#development-environment))
+- the retrieval package importable (see [Development environment](#development-environment))
 
 Defaults live in `src/arteries/config.py` and environment variables can override them:
 
@@ -140,16 +96,16 @@ art setup <provider>   # applies the schema too
 
 ## Development environment
 
-Work inside a virtualenv at `.venv`, built by uv, matching capillaries:
+Work inside a virtualenv at `.venv`, built by uv:
 
 ```bash
 uv sync --extra ontology
 ```
 
 That is the whole setup. It creates `.venv`, installs arteries editable,
-resolves capillaries from the sibling checkout via `[tool.uv.sources]`, and
-pulls rdflib for the ontology loader. A cold sync takes about seven seconds
-because uv shares its cache with the capillaries checkout next door.
+resolves the retrieval package from vascular's checkout via `[tool.uv.sources]`,
+and pulls rdflib for the ontology loader. A cold sync takes about seven seconds
+because uv shares its cache with the neighbouring checkouts.
 
 `uv.lock` is committed. Re-lock after changing dependencies:
 
@@ -158,8 +114,9 @@ uv lock
 uv run pytest tests/ -q
 ```
 
-uv's cache hardlinks packages instead of copying them, so capillaries' ML
-stack (dspy, scikit-learn, pandas, the reranker) isn't rebuilt per checkout.
+uv's cache hardlinks packages instead of copying them, so the retrieval
+package's ML stack (dspy, scikit-learn, pandas, the reranker) isn't rebuilt per
+checkout.
 
 Every script in `scripts/` sources `scripts/_env.sh`, which prefers
 `.venv/bin/python` and falls back to `python3` with `PYTHONPATH` set. So both
@@ -185,38 +142,24 @@ Arteries declares two hard dependencies and one optional extra:
 | `rdflib` | `[ontology]` extra | `ontology.load` only | never imported at runtime; grounding reads the cached T-Box out of Postgres and matches with stdlib `difflib` |
 | `pytest` | `dev` group | tests | `uv sync` installs it |
 
-`uv sync --extra ontology` gets all of the above, capillaries included.
+`uv sync --extra ontology` gets all of the above, the retrieval package included.
 
-Capillaries is a hard requirement, but it is not on PyPI, so naming it in
-`dependencies` would put a bare name in the package metadata that resolves to a
-stranger's package. It is declared in the `dev` dependency group instead, with
-`[tool.uv.sources]` pinning it to `../capillaries`. Arteries imports four
-things from it:
-
-| Import | Where | Degrades if missing? |
-| --- | --- | --- |
-| `capillaries.config.paths` (`EMBED_MODEL`, `EMBED_DIM`, `EMBED_URL`, `QUERY_PREFIX`) | `config.py` | yes — falls back to local defaults |
-| `capillaries.agent.inference.DOMAIN_KEYWORDS` | `extract.py` | yes — falls back to `evergreen.DOMAIN_KEYWORDS` |
-| `capillaries.agent.gate.gate` | `eval.py` | no — hard import |
-| `capillaries.find.find` | `eval.py` | no — hard import |
-
-The embedding config is a **shared contract**, not an arteries setting: both
-projects write vectors into the same Postgres, so the model and dimension have
-to agree. They silently disagreed once — capillaries moved to
-Qwen3-Embedding-0.6B at 1024 dims while arteries stayed on arctic-embed at 768,
-which would have failed every embedding write. Importing the values rather than
-restating them is what stops that recurring. `migrate_embed_dim.py` resizes an
-existing database when the model changes.
+The retrieval package is a hard requirement but is not on PyPI, so it is
+declared in the `dev` dependency group and pinned to vascular's checkout with
+`[tool.uv.sources]`. What arteries imports from it, and why the embedding model
+and dimension are a shared setting rather than an arteries one, is in
+[vascular's README](https://github.com/BaoTNguyen/vascular#how-the-pieces-connect).
+`migrate_embed_dim.py` resizes an existing database when the model changes.
 
 ## Getting things into memory
 
 | Command | For | Shape |
 | --- | --- | --- |
 | *(automatic)* | your turns in a coding CLI | the hook path |
-| `art observe` | one note from heart, plexus, or marrow | short text, stdin or argument |
+| `art observe` | one note from another tool or script | short text, stdin or argument |
 | `art ingest` | documents and plans | file, directory, or `-` for stdin |
 | `art docs` | mining a repo's Markdown for facts you approve | review file |
-| `art episodes` | finished heart episodes | runs dir, JSONL file, or stdin |
+| `art episodes` | finished agent episodes | runs dir, JSONL file, or stdin |
 | `art remember` | a fact you are stating directly | argument |
 
 `art ingest` chunks, compiles, and graphs in one step, so a plan keeps its
@@ -224,7 +167,7 @@ structure and every claim carries provenance back to the passage it came from:
 
 ```bash
 art ingest design.md
-plexus plan --goal retrieval | art ingest - --kind plan --name plexus:goal/retrieval
+cat plan.md | art ingest - --kind plan --name goal/retrieval
 ```
 
 `--kind plan` chunks finer than `--kind document`. A plan is read for its parts,
@@ -241,7 +184,7 @@ of you has already seen it, and their description beats what a small local model
 would produce from the same pixels. So the description is an input:
 
 ```bash
-art ingest diagram.png --describe "Architecture: capillaries feeds arteries, which feeds heart. Arrows one way."
+art ingest diagram.png --describe "Architecture: the gateway feeds the queue, which feeds the workers. Arrows one way."
 ```
 
 The description is what gets embedded, compiled, and graphed; the image is
@@ -258,7 +201,7 @@ the prose around it:
 ```
 Before:  The current shape is shown below.  ![architecture](arch.png)
 After:   The current shape is shown below.  [Image: architecture] Three boxes
-         left to right: capillaries, arteries, heart. Arrows point one way…
+         left to right: gateway, queue, workers. Arrows point one way…
 ```
 
 These go to a **frontier model** (`claude-opus-5` by default), not the local one.
@@ -479,10 +422,10 @@ bash ~/code/arteries/scripts/art.sh setup cursor --check
 bash ~/code/arteries/scripts/art.sh setup cursor --remove
 ```
 
-If capillaries is not a sibling of arteries, pass it explicitly:
+If the retrieval package is not beside arteries, pass its path:
 
 ```bash
-bash ~/code/arteries/scripts/art.sh setup add codex   --capillaries-root /path/to/capillaries
+bash ~/code/arteries/scripts/art.sh setup add codex   --capillaries-root /path/to/retrieval
 ```
 
 Use a stable project name when activity from multiple CLIs should land in the same trace:
@@ -558,7 +501,7 @@ On each observed user prompt, `arteries.eval`:
 1. logs `turn.observed`
 2. extracts ephemeral memories
 3. builds a `MemoryFrame`
-4. asks capillaries whether prompt retrieval should open
+4. asks the retrieval gate whether prompt retrieval should open
 5. retrieves a prompt if the gate opens
 6. prints the retrieved prompt text back to the CLI hook
 7. compiles ephemeral memories into persistent project memory in the background
@@ -577,13 +520,13 @@ Arteries never fabricates missing assistant answers. If a CLI only exposes user 
 
 ## Scope: which repos share a memory
 
-A **scope** is a set of repos that read each other's persistent memory. Five
-harness repos behave as one brain; a standalone project keeps its own.
+A **scope** is a set of repos that read each other's persistent memory. Several
+repos can behave as one brain; a standalone project keeps its own.
 
 ```bash
-art scope add harness ~/code/{arteries,capillaries,heart,plexus,marrow}
+art scope add platform ~/code/{api,web,worker}
 art scope show          # which group covers this directory
-art scope move marrow standalone
+art scope move worker standalone
 ```
 
 Arteries is **opt-in**: a directory that resolves to no scope is not observed at
@@ -663,7 +606,7 @@ counter, so its only job is to make disuse visible:
 
 ```sql
 SELECT count(*) FROM arteries.persistent
-WHERE project_id = 'plexus' AND access_count = 0 AND source_ts < now() - interval '30 days';
+WHERE project_id = 'my-app' AND access_count = 0 AND source_ts < now() - interval '30 days';
 ```
 
 A memory that has not surfaced once in a month of real work is not earning its
@@ -678,7 +621,7 @@ the cost side.
 
 ## Relevance-filtered retrieval
 
-Persistent memories are embedded at compile time using the same embedding server that capillaries uses (Qwen3-Embedding-0.6B, 1024-dim, imported from capillaries' config). At retrieval time, the current user message is embedded and matched against persistent memories via pgvector HNSW cosine search. Only memories above a similarity threshold are included in the MemoryFrame.
+Persistent memories are embedded at compile time using the stack's shared embedding server (Qwen3-Embedding-0.6B, 1024-dim; the setting is shared with retrieval, not set here). At retrieval time, the current user message is embedded and matched against persistent memories via pgvector HNSW cosine search. Only memories above a similarity threshold are included in the MemoryFrame.
 
 This replaces the previous recency-based retrieval and naturally isolates subagents by task — a test-writing agent surfaces test-relevant memories, a code agent surfaces code-relevant memories, without needing scope labels.
 
@@ -723,7 +666,7 @@ ARTERIES_PERSISTENT_READ=none # relevance (default) or none
 ## Trace data
 
 Every event appends to the shared event journal (`~/.vascular/spool/events`, or
-`$EVENT_JOURNAL_DIR`), which pulse collects. `arteries.agent_runs` and
+`$EVENT_JOURNAL_DIR`), which the stack's event store collects. `arteries.agent_runs` and
 `arteries.agent_events` in Postgres are projections of it. With Postgres down,
 `art runs` reads the journal's last two day files instead.
 
@@ -843,7 +786,7 @@ Use this rule:
 - Codex `.codex/config.toml` changes: restart Codex.
 - Pi extension changes: restart or reload Pi.
 - Claude hook settings: restart Claude Code or start a new session.
-- Prompt database changes: no CLI restart, unless a separate capillaries server has cached prompt data.
+- Prompt database changes: no CLI restart, unless a separate retrieval server has cached prompt data.
 
 ## Importing facts from docs
 
@@ -910,17 +853,11 @@ The live tests create temporary records and clean up after themselves. The persi
 
 This repo is shell-script first. The least painful Windows path is WSL2 or Git Bash with a Python virtual environment.
 
-Use sibling checkouts such as:
-
-```text
-C:/src/arteries
-C:/src/capillaries
-```
-
-Install both packages in editable mode, start Postgres with `pgvector`, then set the service URLs:
+Clone vascular (for example to `C:/src/vascular`), install arteries and the
+retrieval package beside it in editable mode, start Postgres with `pgvector`, then set the service URLs:
 
 ```powershell
-$env:CAPILLARIES_ROOT = "C:/src/capillaries"
+$env:CAPILLARIES_ROOT = "<path to the retrieval package>"
 $env:DB_HOST = "127.0.0.1"
 $env:DB_PORT = "5432"
 $env:DB_NAME = "capillaries"
@@ -936,11 +873,11 @@ python -m arteries.setup_db
 
 ## Troubleshooting
 
-If setup cannot find capillaries, pass `--capillaries-root`.
+If setup cannot find the retrieval package, pass `--capillaries-root`.
 
 If Codex complains about `.codex/config.toml`, check that `experimental_compact_prompt_file` is top-level and points to `../.vascular/arteries/codex/compact_prompt.txt`.
 
-If no prompts surface, run trace first. Look for `prompt.gate.decided`. If `search_opened` is false, capillaries decided the prompt corpus was not relevant enough. If search opened but no `prompt.retrieved` appears, inspect capillaries retrieval and model services.
+If no prompts surface, run trace first. Look for `prompt.gate.decided`. If `search_opened` is false, the retrieval gate decided the prompt corpus was not relevant enough. If search opened but no `prompt.retrieved` appears, inspect the retrieval package and model services.
 
 If trace shows only character counts for older turns, that is expected. Message previews were added later. New turns record bounded previews and hashes.
 
