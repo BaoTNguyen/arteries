@@ -94,7 +94,7 @@ def normalize(
     # already names the event (Codex's PreCompact, pi's session_before_compact
     # fallback); only this one needs a second field, and only for the one
     # value ("compact") that changes what a packet build should render
-    # (planning/compaction_v3.md §2). The other three sources still fall
+    # (docs/adr/2026-09-15-compaction-renderer-split.md). The other three sources still fall
     # through to "session_start" exactly as before.
     if event == "session_start" and str(payload.get("source") or "").strip().lower() == "compact":
         event = "compact"

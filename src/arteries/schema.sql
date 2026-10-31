@@ -437,7 +437,7 @@ CREATE TABLE IF NOT EXISTS arteries.packets (
     agent_process_id TEXT,
     member_ids  TEXT[] NOT NULL DEFAULT '{}',
     -- Chaining (migrations/018_packet_chaining.sql). Unused until the
-    -- renderer split in planning/compaction_v3.md §2 writes real values.
+    -- renderer split (docs/adr/2026-09-15-compaction-renderer-split.md) writes real values.
     previous_id UUID REFERENCES arteries.packets(id),
     covers_from TIMESTAMPTZ,
     covers_to   TIMESTAMPTZ,

@@ -13,6 +13,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: arteries
+      - run: python3 arteries/docs/adr/index.py --check
 
       # arteries imports capillaries by name (memory_types, eval), so the suite
       # cannot collect without it. Which capillaries is the point of the matrix:

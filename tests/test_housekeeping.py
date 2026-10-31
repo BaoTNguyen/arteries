@@ -73,7 +73,7 @@ class CompactPromptTests(unittest.TestCase):
     def test_the_prompt_is_generated_from_the_packet_sections(self):
         """STATE_SECTION_TITLES, not the retrieval layout: this prompt only ever
         fires on compaction, and the renderer split
-        (planning/compaction_v3.md §2) gave that path its own layout."""
+        (docs/adr/2026-09-15-compaction-renderer-split.md) gave that path its own layout."""
         prompt = _codex_compact_prompt()
         for title in packet.STATE_SECTION_TITLES:
             self.assertIn(title, prompt)

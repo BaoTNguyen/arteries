@@ -1,4 +1,4 @@
-"""The compaction renderer (planning/compaction_v3.md §2): state fields
+"""The compaction renderer (docs/adr/2026-09-15-compaction-renderer-split.md): state fields
 instead of provenance tiers, picked by ARTERIES_EVENT=compact rather than the
 message content, so retrieval calls are provably unaffected.
 """
@@ -238,7 +238,7 @@ class TestRenderState:
         """The v2 worked example, kept as the regression case: a script
         deliberately leaves RERANKER_DEVICE unset, .vascular/arteries/env sets it to
         cuda:1 -- cosine high, differing literal, but different files, both
-        true (planning/compaction_v3.md §4.4)."""
+        true (docs/adr/2026-09-15-retraction-detectors.md)."""
         monkeypatch.setattr(packet, "RETRACTION_DRY_RUN", False)
         self._embedded_pair("compact-packet.sh leaves RERANKER_DEVICE unset.",
                             ".vascular/arteries/env sets RERANKER_DEVICE to cuda:1.")
@@ -290,7 +290,8 @@ class TestRenderState:
         assert "## Dropped\n\n(none)" in text
 
     def test_protected_sections_survive_a_tiny_budget_intact(self):
-        """The never-drop fields (planning/compaction_v3.md §5) must not be
+        """The never-drop fields
+        (docs/adr/2026-09-15-compaction-never-drops-silently.md) must not be
         eaten by the droppable sections' overflow, however small the budget."""
         for i in range(30):
             storage.insert_persistent(self.project_id, f"Constraint number {i} about something.",

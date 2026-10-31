@@ -1,4 +1,4 @@
-"""Packet chaining columns (planning/compaction_v3.md commit 1).
+"""Packet chaining columns (docs/adr/2026-09-15-packet-chaining-by-range.md).
 
 Additive only: record_packet writes them when given. Nothing reads them back
 yet -- that lands in commit 2 with the renderer that first needs to, alongside

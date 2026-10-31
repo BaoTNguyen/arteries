@@ -287,7 +287,7 @@ def build_packet(message: str = "", event: dict[str, Any] | None = None,
 
 def _is_compaction_trigger() -> bool:
     """Retrieval and compaction share one entry point and want different
-    layouts (planning/compaction_v3.md §2). `cli_normalize.apply_event_env`
+    layouts (docs/adr/2026-09-15-compaction-renderer-split.md). `cli_normalize.apply_event_env`
     already computes the canonical event name and exports it before every hook
     invocation that can reach `art packet` -- `.vascular/arteries/hooks/*.sh` all run it
     first -- so this reads a signal that already exists rather than adding one.
@@ -334,7 +334,7 @@ def _constraints() -> list[str]:
 
 
 def _mid_session_decisions(ephemerals: list[dict[str, Any]]) -> list[str]:
-    """planning/compaction_v3.md §12.1: settled decisions from persistent, plus
+    """docs/adr/2026-09-15-mid-session-decisions.md: settled decisions from persistent, plus
     ephemeral atoms this session that look like a choice being made. Renders
     without rationale by design -- the rationale is prose the compiler has not
     read yet, and the next packet (after promotion) carries the structured
@@ -384,7 +384,7 @@ def _open_question(recent_pairs: list[RecentPair]) -> str:
     return "(none)"
 
 
-# Commit 3 (planning/compaction_v3.md §4.2, §8): detectors 1 and 2, dry-run by
+# Commit 3 (docs/adr/2026-09-15-retraction-detectors.md): detectors 1 and 2, dry-run by
 # default. Candidates are computed and logged every build, never rendered,
 # until a week of logged candidates has been read by hand (§8 check 3) and
 # this is turned off. A false retraction tells the agent a true thing is
@@ -436,7 +436,7 @@ def _detect_tool_refutations(ephemerals: list[dict[str, Any]],
     return lines
 
 
-# Commit 4 (planning/compaction_v3.md §4.2 detectors 3-4, §4.3, §4.4): value
+# Commit 4 (docs/adr/2026-09-15-retraction-detectors.md): value
 # overwrite, user correction, precedence, and the near-miss guard. Same
 # RETRACTION_DRY_RUN flag as commits 1-2 -- adjudication is added code, not a
 # separately-timed rollout; what changes on a longer review window is when a
@@ -454,7 +454,7 @@ def _subjects(fact: str) -> set[str]:
 
 def _near_miss(fact_a: str, fact_b: str) -> bool:
     """True when two similar-sounding facts are not actually a contradiction
-    (planning/compaction_v3.md §4.4). Only the "different subject" leg is
+    (docs/adr/2026-09-15-retraction-detectors.md). Only the "different subject" leg is
     checked here -- different scope and differing-marked-time both require
     reading intent out of prose, which is exactly the kind of judgment call
     this design keeps out of the deterministic detectors."""
@@ -526,7 +526,7 @@ def _files(events: list[dict[str, Any]], limit: int = 5) -> list[str]:
 
 def render_state(message: str, event: dict[str, Any], budget: int = 20000) -> str:
     """The compaction layout: state fields, enumerated rather than ranked
-    (planning/compaction_v3.md §2, §3). What must survive so work continues,
+    (docs/adr/2026-09-15-compaction-renderer-split.md). What must survive so work continues,
     not what best matches the trigger message -- so unlike `build_packet`'s
     default path, nothing here runs a similarity search or calls the corpus.
 
@@ -567,8 +567,9 @@ def render_state(message: str, event: dict[str, Any], budget: int = 20000) -> st
     unresolved = ["(none)"] if RETRACTION_DRY_RUN else (unresolved_candidates or ["(none)"])
 
     # Protected sections render in full, always -- never truncated, never the
-    # thing a blind tail-cut eats (planning/compaction_v3.md §5: "never
-    # dropped: retracted, unresolved, open_question, state.blocked, next").
+    # thing a blind tail-cut eats: retracted, unresolved, open_question,
+    # state.blocked and next are never dropped
+    # (docs/adr/2026-09-15-compaction-never-drops-silently.md).
     # Sized first so the droppable sections below get whatever budget remains,
     # not a fixed share computed before anyone knew how big they'd actually be.
     protected = [
@@ -661,7 +662,7 @@ MAX_PACKET_MEMORIES = 15
 # `art setup` regenerates the prompt when this changes, so the two cannot drift
 # without something noticing.
 #
-# v3: bumped for the renderer split (planning/compaction_v3.md §2). The
+# v3: bumped for the renderer split (docs/adr/2026-09-15-compaction-renderer-split.md). The
 # retrieval layout is unchanged; the compaction layout
 # (STATE_SECTION_TITLES) is new, and it is the one the Codex prompt -- which
 # only ever fires on compaction -- should describe.
