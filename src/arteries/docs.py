@@ -1,8 +1,9 @@
 """Human-reviewed document ingestion.
 
 Walks a repo's Markdown, proposes candidate facts with source spans, and
-imports the ones a human accepts into persistent memory. Was the evergreen
-bootstrap; the tier is gone, the mechanism is worth keeping.
+imports the ones a human accepts into persistent memory. It used to bootstrap
+evergreen; evergreen is now promoted from persistent by score (`art evergreen`),
+and the review mechanism was worth keeping.
 
 Two-step flow:
     art docs extract --project . --out docs_review.md
