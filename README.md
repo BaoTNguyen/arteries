@@ -15,7 +15,7 @@ The goal is not to make another agent. The goal is to make the agents you alread
 
 ## Where it sits in the stack
 
-Arteries is the memory and tracing layer in a five-repo agent stack:
+Arteries is the memory and tracing layer in a six-repo agent stack:
 
 ```text
 capillaries  prompt/skill retrieval
@@ -23,6 +23,7 @@ arteries     memory + trace substrate               <- this repo
 heart        orchestration + environment + verify
 plexus       goal decomposition + acceptance loop
 marrow       RL training on heart's episodes
+pulse        event journal: collection, store, queries
 ```
 
 Capillaries decides which prompt fits. Arteries gives that decision a memory frame and records what happened. Heart runs coding agents that ride arteries' hooks; marrow later trains on the decision ledger arteries leaves behind. Dependencies point one way: arteries imports capillaries, never the reverse.
@@ -33,10 +34,10 @@ Every coding CLI is bolting on its own memory feature, each incompatible with th
 
 - **One memory across any CLI.** Codex, Claude Code, Pi, OpenCode, Cursor, and Hermes get explicit adapters; everything else gets `generic`, which needs only the ability to run a command and read stdout. Switch tools mid-project and the context follows you instead of resetting.
 - **Memory that surfaces by relevance, not recency.** Persistent memories are embedded at compile time and matched against the current message by vector similarity. A test-writing subagent surfaces test memories, a code agent surfaces code memories — task isolation falls out of the embeddings, with no scope labels to maintain.
-- **Three tiers with real half-lives.** Ephemeral (per process, high churn), persistent (per project, compiled facts), evergreen (global, explicitly promoted). Observations get compiled up the tiers in the background; they don't all live forever at the same weight.
+- **Three tiers with real half-lives.** Ephemeral (per process, high churn), persistent (per scope group, compiled facts), evergreen (the knowledge graph, shared across the scope group). Observations get compiled up the tiers in the background; they don't all live forever at the same weight.
 - **An audit trail that keeps gate and retrieval honest.** A gate opening on a nearest-match title and the prompt actually retrieved are logged as distinct events, with bounded previews and SHA-256 hashes. You can reconstruct why a prompt surfaced months later.
 - **It never fabricates.** If a CLI only exposes user turns, the continuity packet marks the assistant side as not captured rather than inventing a plausible reply.
-- **Degrades instead of failing.** Postgres down? Telemetry falls back to repo-local JSONL. Embedding server down? Retrieval falls back to recency. The hooks keep working.
+- **Degrades instead of failing.** Postgres down? Every event still lands in the shared event journal. Embedding server down? Retrieval falls back to recency. The hooks keep working.
 
 ## What problem it solves
 
@@ -77,7 +78,7 @@ Capillaries owns:
 Arteries owns:
 
 - explicit setup adapters for Codex, Claude Code, Pi, OpenCode, Hermes, and Cursor, plus a host-agnostic `generic` adapter
-- `.arteries/` runtime scripts inside target repos
+- `.vascular/arteries/` runtime scripts inside target repos
 - ephemeral, persistent, and evergreen memory storage
 - the memory contract types (`arteries.memory_types`: `MemoryFrame` and its tiers)
 - `MemoryFrame` assembly
@@ -378,17 +379,17 @@ supported.
 bash ~/code/arteries/scripts/art.sh setup add generic
 ```
 
-That writes `.arteries/bin/art`, a wrapper carrying `PYTHONPATH` and project
+That writes `.vascular/arteries/bin/art`, a wrapper carrying `PYTHONPATH` and project
 identity so the caller needs no environment of its own. Point the host at two
 commands:
 
 ```bash
 # session start — prints evergreen memory as context
-/abs/path/to/repo/.arteries/bin/art activate --cli <name>
+/abs/path/to/repo/.vascular/arteries/bin/art activate --cli <name>
 
 # each turn — prompt on argv or stdin, retrieval on stdout
-/abs/path/to/repo/.arteries/bin/art observe --cli <name> "<user prompt>"
-echo "<user prompt>" | /abs/path/to/repo/.arteries/bin/art observe --cli <name>
+/abs/path/to/repo/.vascular/arteries/bin/art observe --cli <name> "<user prompt>"
+echo "<user prompt>" | /abs/path/to/repo/.vascular/arteries/bin/art observe --cli <name>
 ```
 
 `observe` prints nothing when the retrieval gate abstains, so it is safe to
@@ -405,7 +406,7 @@ Any other host should declare what it already knows, or its turns price at zero
 on the cost panel:
 
 ```bash
-.arteries/bin/art observe --cli <name> --tokens-in 1200 --tokens-out 340 "<prompt>"
+.vascular/arteries/bin/art observe --cli <name> --tokens-in 1200 --tokens-out 340 "<prompt>"
 ```
 
 Equivalently, via env: `ARTERIES_USAGE_TOKENS_IN`, `ARTERIES_USAGE_TOKENS_OUT`,
@@ -453,7 +454,7 @@ bash ~/code/arteries/scripts/art.sh setup sync ~/code --check
 bash ~/code/arteries/scripts/art.sh setup sync ~/code
 ```
 
-`sync` detects providers by artifact, not by what `.arteries/config.json`
+`sync` detects providers by artifact, not by what `.vascular/arteries/config.json`
 claims — that field records what setup was *told*, and it drifts. It cannot go
 through `check` either: a repo installed by an older version fails its own
 check, and repairing exactly those repos is the point.
@@ -494,8 +495,8 @@ bash ~/code/arteries/scripts/art.sh setup add cursor --project my-app
 Smoke test the shared runtime:
 
 ```bash
-bash .arteries/smoke.sh "arteries setup test"           # dry run
-bash .arteries/smoke.sh --write "arteries setup test"   # persist what it extracts
+bash .vascular/arteries/smoke.sh "arteries setup test"           # dry run
+bash .vascular/arteries/smoke.sh --write "arteries setup test"   # persist what it extracts
 ```
 
 The default is a dry run (`ARTERIES_EPHEMERAL=discard`): every code path runs,
@@ -507,13 +508,9 @@ one project's stored facts turned out to be this script talking to itself.
 Every provider gets a repo-local runtime:
 
 ```text
-.arteries/config.json
-.arteries/hooks/observe.sh
-.arteries/hooks/generic-observe.sh
-.arteries/hooks/activate.sh
-.arteries/hooks/compact-packet.sh
-.arteries/hooks/pi-compact-json.sh
-.arteries/smoke.sh
+.vascular/arteries/config.json
+.vascular/arteries/hooks/   observe, activate, compact-packet and per-host hook scripts
+.vascular/arteries/smoke.sh
 ```
 
 The runtime sets:
@@ -530,7 +527,7 @@ PYTHONPATH
 
 Provider-specific files:
 
-- Codex: `.codex/config.toml`, `.arteries/codex/compact_prompt.txt`, and an `AGENTS.md` block. Codex gets a PreCompact packet hook where hooks are available, plus the compact prompt override as a fallback. Assistant response memory uses transcript capture on prompt submit when available, or the generated assistant observe hook when the host exposes a response event.
+- Codex: `.codex/config.toml`, `.vascular/arteries/codex/compact_prompt.txt`, and an `AGENTS.md` block. Codex gets a PreCompact packet hook where hooks are available, plus the compact prompt override as a fallback. Assistant response memory uses transcript capture on prompt submit when available, or the generated assistant observe hook when the host exposes a response event.
 - Claude Code: `.claude/settings.local.json` hooks for session start, prompt submit, pre-compact, post-compact, and subagent metadata. Assistant response memory is captured from the transcript during prompt submit, so no separate Stop hook is needed.
 - Pi: `.pi/extensions/arteries.ts` for extension-based compaction replacement and assistant response observation.
 - OpenCode: `.opencode/plugins/arteries.ts` for plugin events, assistant response observation, and compaction context injection.
@@ -548,13 +545,13 @@ Compaction support levels:
 | Cursor | Manual/rule fallback | Rules tell the agent to run `assistant-observe.sh` for useful assistant replies and `compact-packet.sh` before summarizing long sessions. |
 | Hermes | Manual/context fallback | `HERMES.md` tells Hermes to run `assistant-observe.sh` for useful assistant replies and `compact-packet.sh` when context pressure appears. |
 
-Codex config detail: `experimental_compact_prompt_file` is top-level and points to `../.arteries/codex/compact_prompt.txt`, because Codex resolves relative project config paths from the `.codex/` folder.
+Codex config detail: `experimental_compact_prompt_file` is top-level and points to `../.vascular/arteries/codex/compact_prompt.txt`, because Codex resolves relative project config paths from the `.codex/` folder.
 
 ## What happens during use
 
 After setup, start your CLI in the target project and work as usual.
 
-On session start, arteries starts a run and writes `.arteries/current-run.json`.
+On session start, arteries starts a run and points `.vascular/arteries/runs/current-<cli>.json` at it.
 
 On each observed user prompt, `arteries.eval`:
 
@@ -573,7 +570,7 @@ On compaction, arteries builds a continuity packet with:
 - recent user turns from Arteries run logs when assistant text is unavailable
 - ephemeral memory for short-lived project observations
 - relevance-filtered persistent project memory
-- evergreen global memory
+- evergreen memory for the scope group
 - use rules that keep the packet below current user, developer, system, and repo instructions
 
 Arteries never fabricates missing assistant answers. If a CLI only exposes user prompts, the packet marks assistant text as not captured.
@@ -598,17 +595,16 @@ an untracked project stays untracked everywhere beneath it.
 
 ## Memory tiers
 
-Two tiers and a graph.
+Three tiers; the third is the graph.
 
 | Tier | Scope | Lifecycle |
 | --- | --- | --- |
 | **ephemeral** | one agent process | one row per turn, whole; exits by being compiled |
 | **persistent** | the scope group | distilled by the compile pass; tombstoned, never deleted |
-| **graph** | entities scoped to the group | written by the same pass that writes persistent |
+| **evergreen** | the knowledge graph, one per scope group | written by the same pass that writes persistent |
 
-Evergreen is gone. It held zero rows for its entire existence, and the frame's
-third slot is now `scope` — context from sibling repos rather than a permanence
-claim nothing enforced.
+Evergreen was briefly removed (it held zero rows) and came back as the graph:
+the frame's third slot is durable facts for the whole scope group, not one repo.
 
 Promotion is one detached LLM pass per turn. It compares each candidate against
 **every** live persistent row in scope through the vector index: at or above
@@ -642,7 +638,7 @@ remain:
 
 ```bash
 art remember add "the codex JS hook swallows every error and exits 0"
-art remember add "I prefer stdlib-first implementations" --also-evergreen
+art remember add "I prefer stdlib-first implementations" --core   # also into evergreen, never evicted
 art compile        # promote this agent's ephemeral now
 ```
 
@@ -682,11 +678,11 @@ the cost side.
 
 ## Relevance-filtered retrieval
 
-Persistent memories are embedded at compile time using the same embedding server that capillaries uses (snowflake-arctic-embed-m-v2.0, 768-dim). At retrieval time, the current user message is embedded and matched against persistent memories via pgvector HNSW cosine search. Only memories above a similarity threshold are included in the MemoryFrame.
+Persistent memories are embedded at compile time using the same embedding server that capillaries uses (Qwen3-Embedding-0.6B, 1024-dim, imported from capillaries' config). At retrieval time, the current user message is embedded and matched against persistent memories via pgvector HNSW cosine search. Only memories above a similarity threshold are included in the MemoryFrame.
 
 This replaces the previous recency-based retrieval and naturally isolates subagents by task — a test-writing agent surfaces test-relevant memories, a code agent surfaces code-relevant memories, without needing scope labels.
 
-The threshold defaults to 0.3 and is configurable:
+The threshold defaults to 0.0 (it awaits calibration, so every candidate passes) and is configurable:
 
 ```bash
 ARTERIES_RELEVANCE_THRESHOLD=0.5
@@ -726,18 +722,10 @@ ARTERIES_PERSISTENT_READ=none # relevance (default) or none
 
 ## Trace data
 
-Arteries writes telemetry to Postgres when these tables exist:
-
-```text
-arteries.agent_runs
-arteries.agent_events
-```
-
-If Postgres is unavailable, it falls back to repo-local JSONL:
-
-```text
-.arteries/runs/*.jsonl
-```
+Every event appends to the shared event journal (`~/.vascular/spool/events`, or
+`$EVENT_JOURNAL_DIR`), which pulse collects. `arteries.agent_runs` and
+`arteries.agent_events` in Postgres are projections of it. With Postgres down,
+`art runs` reads the journal's last two day files instead.
 
 Common event types:
 
@@ -857,38 +845,42 @@ Use this rule:
 - Claude hook settings: restart Claude Code or start a new session.
 - Prompt database changes: no CLI restart, unless a separate capillaries server has cached prompt data.
 
-## Evergreen import
+## Importing facts from docs
 
-Evergreen memory is for durable cross-project facts. Generate a review file from trusted docs:
+`art docs` mines a repo's Markdown for facts and writes the ones you accept into
+persistent memory. Generate a review file:
 
 ```bash
-bash scripts/art.sh evergreen extract \
-  --project . \
-  --out evergreen_review.md
+art docs extract --project . --out docs_review.md
 ```
 
-Edit the Markdown file by hand. Delete memories you do not want, rewrite wording, or move items under rejected memories. Preview import:
+Edit the Markdown file by hand. Delete memories you do not want, rewrite wording, or move items under rejected memories. Preview, then write:
 
 ```bash
-bash scripts/art.sh evergreen import --review evergreen_review.md
+art docs import --review docs_review.md
+art docs import --review docs_review.md --write
 ```
 
-Write accepted memories:
+## Evergreen
+
+Evergreen is promoted from persistent by score, not by hand:
 
 ```bash
-bash scripts/art.sh evergreen import --review evergreen_review.md --write
+art evergreen promote --dry-run   # show scores without writing
+art evergreen seed                # a project's own specs, as core claims
+art evergreen stats
 ```
 
-## Evergreen CRUD
+## Managing what you wrote
 
-Manage evergreen memories directly:
+`art remember` manages the persistent memories you wrote yourself:
 
 ```bash
-art docs list
-art docs list --json
-art docs add "User prefers pytest" --domains "technical,testing" --confidence 0.9
-art docs edit <id-prefix> --fact "Updated fact" --domains "technical"
-art docs rm <id-prefix>
+art remember list
+art remember list --json
+art remember add "User prefers pytest" --domains "technical,testing" --confidence 0.9
+art remember edit <id-prefix> --fact "Updated fact" --domains "technical"
+art remember rm <id-prefix>
 ```
 
 ID prefixes are matched uniquely — pass enough characters to be unambiguous.
@@ -946,13 +938,13 @@ python -m arteries.setup_db
 
 If setup cannot find capillaries, pass `--capillaries-root`.
 
-If Codex complains about `.codex/config.toml`, check that `experimental_compact_prompt_file` is top-level and points to `../.arteries/codex/compact_prompt.txt`.
+If Codex complains about `.codex/config.toml`, check that `experimental_compact_prompt_file` is top-level and points to `../.vascular/arteries/codex/compact_prompt.txt`.
 
 If no prompts surface, run trace first. Look for `prompt.gate.decided`. If `search_opened` is false, capillaries decided the prompt corpus was not relevant enough. If search opened but no `prompt.retrieved` appears, inspect capillaries retrieval and model services.
 
 If trace shows only character counts for older turns, that is expected. Message previews were added later. New turns record bounded previews and hashes.
 
-If Postgres is down, arteries still writes fallback JSONL under `.arteries/runs/`, but memory tiers and prompt corpus lookup need the database.
+If Postgres is down, events still land in the event journal, but memory tiers and prompt corpus lookup need the database.
 
 ## Stable scripts
 
