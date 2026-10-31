@@ -1,8 +1,10 @@
-# arteries
+# About
 
-Arteries is the memory and tracing layer for coding CLIs.
+arteries is part of [vascular](https://github.com/BaoTNguyen/vascular), the software factory
+monorepo. This repo acts as the memory and audit trail for the coding CLIs you already
+use.
 
-On each turn it builds a memory frame, asks the stack's prompt retrieval whether a prompt from your private corpus fits, records what happened, and leaves enough trace data that you can later answer practical questions like:
+On each turn arteries builds a memory frame, asks the stack's prompt retrieval whether a prompt from your private corpus fits, records what happened, and leaves enough trace data that you can later answer practical questions like:
 
 - What did the agent observe in this repo?
 - Which memories did it extract?
@@ -15,7 +17,7 @@ The goal is not to make another agent. The goal is to make the agents you alread
 
 ## Where it sits in the stack
 
-Arteries is part of [vascular](https://github.com/BaoTNguyen/vascular), the monorepo that holds the whole stack in one clone. It needs the stack's prompt-retrieval package beside it, which vascular provides; vascular's README describes what passes between them.
+Arteries needs the stack's prompt-retrieval package beside it, which vascular provides; vascular's README describes what passes between them.
 
 ## What sets it apart
 
